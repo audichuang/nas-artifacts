@@ -24,9 +24,13 @@ export const LIMITS = {
 export type FileEntry = { sha256: string; size: number; type: string }
 export type FileMap = Record<string, FileEntry>
 
+/** Where a version was published from: the machine and the folder (home shown as ~). */
+export type Source = { host: string; path: string }
+
 export type VersionRow = {
   version: number
   label: string | null
+  source: Source | null
   title: string
   description: string | null
   entry: string
@@ -43,6 +47,7 @@ export type ArtifactSummary = {
   currentVersion: number
   capabilities: Capability[]
   pinned: boolean
+  source: Source | null
   createdAt: string
   updatedAt: string
 }
@@ -107,6 +112,7 @@ export type PublishInput = {
   entry?: string
   label?: string | null
   capabilities?: string[]
+  source?: unknown
   files: Record<string, IncomingFile>
 }
 
@@ -174,6 +180,20 @@ function clampInt(value: number | undefined, fallback: number, min: number, max:
   const number = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback
   return Math.min(Math.max(number, min), max)
 }
+
+function parseSource(value: unknown): Source | null {
+  if (value === undefined || value === null) {
+    return null
+  }
+  const { host, path } = value as { host?: unknown; path?: unknown }
+  if (typeof value !== 'object' || typeof host !== 'string' || typeof path !== 'string' || !host || host.length > 100 || path.length > 500) {
+    throw new ArtifactError(400, 'invalid_field', 'source is { host, path }: strings of at most 100 and 500 characters.')
+  }
+  return { host, path }
+}
+
+const sourceFromRow = (row: Record<string, unknown>): Source | null =>
+  row.source_host === null || row.source_host === undefined ? null : { host: String(row.source_host), path: String(row.source_path ?? '') }
 
 function chooseEntry(files: FileMap, requested: string | undefined): string {
   if (requested !== undefined) {
@@ -278,6 +298,18 @@ export class ArtifactStore {
         PRIMARY KEY (artifact_id, version, path, kind, message, source)
       );
     `)
+    for (const table of ['artifacts', 'versions']) {
+      this.addColumn(table, 'source_host', 'TEXT')
+      this.addColumn(table, 'source_path', 'TEXT')
+    }
+  }
+
+  /** Columns added after the first release; CREATE TABLE IF NOT EXISTS leaves existing tables as they were. */
+  private addColumn(table: string, column: string, type: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all().map((row) => String(row.name))
+    if (!columns.includes(column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+    }
   }
 
   close(): void {
@@ -384,19 +416,20 @@ export class ArtifactStore {
     const icon = optionalText(input.icon, 'icon', 40)
     const label = optionalText(input.label, 'label', 60)
     const capabilities = parseCapabilities(input.capabilities)
+    const source = parseSource(input.source)
     const { files, bodies } = this.planFiles({}, input.files ?? {})
     const entry = chooseEntry(files, input.entry)
     const id = newId(12)
     const at = now()
     this.commitWithBlobs(bodies, () => this.transaction(() => {
       this.db
-        .prepare(`INSERT INTO artifacts (id, title, description, icon, entry, current_version, capabilities, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`)
-        .run(id, title, description, icon, entry, JSON.stringify(capabilities), at, at)
+        .prepare(`INSERT INTO artifacts (id, title, description, icon, entry, current_version, capabilities, source_host, source_path, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`)
+        .run(id, title, description, icon, entry, JSON.stringify(capabilities), source?.host ?? null, source?.path ?? null, at, at)
       this.db
-        .prepare(`INSERT INTO versions (artifact_id, version, label, title, description, entry, files, created_at)
-          VALUES (?, 1, ?, ?, ?, ?, ?, ?)`)
-        .run(id, label, title, description, entry, JSON.stringify(files), at)
+        .prepare(`INSERT INTO versions (artifact_id, version, label, title, description, entry, files, source_host, source_path, created_at)
+          VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, label, title, description, entry, JSON.stringify(files), source?.host ?? null, source?.path ?? null, at)
     }))
     return this.requireSummary(id)
   }
@@ -421,18 +454,21 @@ export class ArtifactStore {
     const icon = input.icon === undefined ? current.icon : optionalText(input.icon, 'icon', 40)
     const label = optionalText(input.label, 'label', 60)
     const capabilities = input.capabilities === undefined ? current.capabilities : parseCapabilities(input.capabilities)
+    const source = parseSource(input.source)
     const { files, bodies } = this.planFiles(previous.files, input.files ?? {})
     const entry = input.entry !== undefined ? chooseEntry(files, input.entry) : files[current.entry] ? current.entry : chooseEntry(files, undefined)
     const version = current.currentVersion + 1
     const at = now()
     this.commitWithBlobs(bodies, () => this.transaction(() => {
       this.db
-        .prepare(`INSERT INTO versions (artifact_id, version, label, title, description, entry, files, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, version, label, title, description, entry, JSON.stringify(files), at)
+        .prepare(`INSERT INTO versions (artifact_id, version, label, title, description, entry, files, source_host, source_path, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, version, label, title, description, entry, JSON.stringify(files), source?.host ?? null, source?.path ?? null, at)
+      // The artifact shows the latest known source; a publish from an older CLI that sends none keeps it.
       this.db
-        .prepare(`UPDATE artifacts SET title = ?, description = ?, icon = ?, entry = ?, current_version = ?, capabilities = ?, updated_at = ? WHERE id = ?`)
-        .run(title, description, icon, entry, version, JSON.stringify(capabilities), at, id)
+        .prepare(`UPDATE artifacts SET title = ?, description = ?, icon = ?, entry = ?, current_version = ?, capabilities = ?, updated_at = ?,
+          source_host = COALESCE(?, source_host), source_path = COALESCE(?, source_path) WHERE id = ?`)
+        .run(title, description, icon, entry, version, JSON.stringify(capabilities), at, source?.host ?? null, source?.path ?? null, id)
     }))
     this.emit(id, { kind: 'version', version })
     return this.requireSummary(id)
@@ -523,6 +559,7 @@ export class ArtifactStore {
       currentVersion: Number(row.current_version),
       capabilities: JSON.parse(String(row.capabilities)) as Capability[],
       pinned: Number(row.pinned) === 1,
+      source: sourceFromRow(row),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
     }
@@ -544,11 +581,12 @@ export class ArtifactStore {
   detail(id: string): ArtifactDetail {
     const summary = this.requireSummary(id)
     const versions = this.db
-      .prepare('SELECT version, label, title, description, entry, created_at FROM versions WHERE artifact_id = ? ORDER BY version DESC')
+      .prepare('SELECT version, label, title, description, entry, source_host, source_path, created_at FROM versions WHERE artifact_id = ? ORDER BY version DESC')
       .all(id)
       .map((row) => ({
         version: Number(row.version),
         label: row.label === null ? null : String(row.label),
+        source: sourceFromRow(row),
         title: String(row.title),
         description: row.description === null ? null : String(row.description),
         entry: String(row.entry),
@@ -565,6 +603,7 @@ export class ArtifactStore {
     return {
       version: Number(row.version),
       label: row.label === null ? null : String(row.label),
+      source: sourceFromRow(row),
       title: String(row.title),
       description: row.description === null ? null : String(row.description),
       entry: String(row.entry),

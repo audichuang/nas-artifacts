@@ -443,3 +443,20 @@ describe('page errors', () => {
     assert.ok(stored.every((e) => e.message.length <= 500))
   })
 })
+
+describe('source', () => {
+  test('each version records where it was published from, and the artifact shows the latest', async () => {
+    const source = { host: 'mac-mini', path: '~/Project/report' }
+    const created = await publish({ 'index.html': 'x' }, { source })
+    let detail = (await (await call(`/api/artifacts/${created.id}`)).json()) as { source: unknown; versions: { version: number; source: unknown }[] }
+    assert.deepEqual(detail.source, source)
+    await call(`/api/artifacts/${created.id}`, { method: 'PUT', token: TOKEN, json: { baseVersion: 1, files: { 'index.html': { content: 'y' } } } })
+    const other = { host: 'macbook-pro', path: '~/work/report' }
+    await call(`/api/artifacts/${created.id}`, { method: 'PUT', token: TOKEN, json: { baseVersion: 2, source: other, files: { 'index.html': { content: 'z' } } } })
+    detail = (await (await call(`/api/artifacts/${created.id}`)).json()) as typeof detail
+    assert.deepEqual(detail.source, other)
+    assert.deepEqual(detail.versions.map((v) => v.source), [other, null, source])
+    const bad = await call('/api/artifacts', { method: 'POST', token: TOKEN, json: { title: 'T', source: { host: 1 }, files: { 'index.html': { content: 'x' } } } })
+    assert.equal(bad.status, 400)
+  })
+})

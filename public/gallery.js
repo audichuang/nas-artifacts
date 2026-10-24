@@ -54,6 +54,13 @@ function card(artifact) {
     meta.append(span)
   }
   link.append(meta)
+  if (artifact.source) {
+    const source = document.createElement('div')
+    source.className = 'card-source'
+    source.textContent = `${artifact.source.host} · ${artifact.source.path}`
+    source.title = '最近一次從這台機器、這個資料夾發佈'
+    link.append(source)
+  }
   item.append(link)
   return item
 }

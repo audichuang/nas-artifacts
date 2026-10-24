@@ -38,7 +38,8 @@ const USAGE = `artifact <command> [options]
   db set|update <id> <collection> <docId> <json>
   db query <id> <collection> <json-where>
   asset upload <id> <file> | asset list <id>
-  config [--url URL] [--token-stdin] [--author NAME]  save server URL / token / comment author to ${CONFIG_FILE}
+  config [--url URL] [--token-stdin] [--author NAME] [--machine NAME]
+                         save server URL / token / comment author / machine name to ${CONFIG_FILE}
 
 Common: --json for machine output. Env: ARTIFACTS_URL, ARTIFACTS_TOKEN.`
 
@@ -272,7 +273,8 @@ async function publish(target, values) {
     icon: values.icon,
     entry: values.entry,
     label: values.label,
-    capabilities
+    capabilities,
+    source: publishSource(source)
   }
   const encode = (changed) => Object.fromEntries(changed.map((path) => [path, encodeFile(paths[path])]))
   const entry = state[source]
@@ -343,6 +345,14 @@ function formatComments(comments) {
 function openThreads(comments) {
   const open = new Set(comments.filter((c) => !c.parentId && !c.resolved).map((c) => c.id))
   return comments.filter((c) => open.has(c.parentId ?? c.id))
+}
+
+// Shown in the gallery so the reader knows which machine and folder to continue from.
+function publishSource(source) {
+  const home = homedir()
+  const path = source === home || source.startsWith(home + sep) ? `~${source.slice(home.length).split(sep).join('/')}` : source
+  const host = process.env.ARTIFACTS_MACHINE || readJson(CONFIG_FILE, {}).machine || hostname().split('.')[0]
+  return { host: host.slice(0, 100), path: path.slice(0, 500) }
 }
 
 function commentAuthor(values) {
@@ -429,6 +439,7 @@ async function main() {
       wait: { type: 'boolean' },
       timeout: { type: 'string' },
       author: { type: 'string' },
+      machine: { type: 'string' },
       resolve: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' }
     }
@@ -465,7 +476,7 @@ async function main() {
       if (values.q) params.set('q', values.q)
       const data = await api(`/api/artifacts?${params}`)
       return print(data, json, (d) =>
-        d.artifacts.map((a) => `${a.id}  v${a.currentVersion}  ${a.updatedAt.slice(0, 16).replace('T', ' ')}  ${a.icon ?? ''} ${a.title}`).join('\n') || '(none)'
+        d.artifacts.map((a) => `${a.id}  v${a.currentVersion}  ${a.updatedAt.slice(0, 16).replace('T', ' ')}  ${a.icon ?? ''} ${a.title}${a.source ? `  [${a.source.host} ${a.source.path}]` : ''}`).join('\n') || '(none)'
       )
     }
     case 'get': {
@@ -562,8 +573,9 @@ async function main() {
       if (values.url) file.url = values.url.replace(/\/+$/, '')
       if (values['token-stdin']) file.token = readFileSync(0, 'utf8').trim()
       if (values.author) file.author = values.author
+      if (values.machine) file.machine = values.machine
       writePrivateJson(CONFIG_FILE, file)
-      return console.log(`url ${file.url ?? DEFAULT_URL} · token ${file.token ? 'saved' : 'not set'} · author ${file.author ?? '(agent@host)'}`)
+      return console.log(`url ${file.url ?? DEFAULT_URL} · token ${file.token ? 'saved' : 'not set'} · author ${file.author ?? '(agent@host)'} · machine ${file.machine ?? hostname().split('.')[0]}`)
     }
     default:
       console.log(USAGE)

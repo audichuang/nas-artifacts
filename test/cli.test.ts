@@ -196,3 +196,18 @@ describe('page checks', () => {
     assert.match(run.stdout, /\[csp\] index\.html ×1 {2}connect-src blocked/)
   })
 })
+
+describe('source', () => {
+  test('publish says which machine and folder it came from, with the home folder as ~', async () => {
+    const root = mkdtempSync(join(dir, 'src-'))
+    writeFileSync(join(root, 'index.html'), '<!doctype html><title>s</title><p>s</p>')
+    const run = await cli(['publish', root, '--json'], { HOME: dir })
+    assert.equal(run.code, 0, run.stderr)
+    const { id } = JSON.parse(run.stdout) as { id: string }
+    const source = store.requireSummary(id).source
+    assert.equal(source?.path, `~/${root.slice(dir.length + 1)}`)
+    assert.ok(source?.host)
+    const list = await cli(['list'])
+    assert.match(list.stdout, new RegExp(`${id}.*${source.host}`))
+  })
+})

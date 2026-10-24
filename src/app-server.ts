@@ -175,6 +175,7 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
       entry: body.entry as string | undefined,
       label: body.label as string | undefined,
       capabilities: optionalStringArray(body.capabilities, 'capabilities'),
+      source: body.source,
       files: parseFiles(body.files)
     })
     return c.json(present(summary), 201)
@@ -201,6 +202,7 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
       entry: body.entry as string | undefined,
       label: body.label as string | undefined,
       capabilities: optionalStringArray(body.capabilities, 'capabilities'),
+      source: body.source,
       files: parseFiles(body.files),
       baseVersion: typeof body.baseVersion === 'number' ? body.baseVersion : undefined,
       force
