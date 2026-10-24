@@ -264,15 +264,19 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     return summary
   }
 
+  // Eligibility is checked after the body has arrived, with no await between the check and the write:
+  // the deck may gain capabilities or change entry while a slow request is still on its way.
+
   app.post('/api/artifacts/:id/slides/preview', async (c) => {
+    const body = await jsonBody(c)
     requireEditableDeck(c, c.req.param('id'))
-    return c.json(renderSlides(deckSource(await jsonBody(c))))
+    return c.json(renderSlides(deckSource(body)))
   })
 
   app.put('/api/artifacts/:id/slides', async (c) => {
     const id = c.req.param('id')
-    const summary = requireEditableDeck(c, id)
     const body = await jsonBody(c)
+    const summary = requireEditableDeck(c, id)
     const markdown = deckSource(body)
     if (typeof body.baseVersion !== 'number') {
       throw new ArtifactError(400, 'base_version_required', 'Pass baseVersion: the version the edit started from.')

@@ -582,6 +582,10 @@ let savedVersion = null
 let dirty = false
 // The save on its way: a version event can arrive before the PUT answers, so it waits for this first.
 let saveInFlight = null
+// Text and base change together, only from a load that finished in the same editor session with no typing
+// meanwhile; anything else would pair old text with a newer base and let a save overwrite that version.
+let editSession = 0
+let editRevision = 0
 let cursorSlide = -1
 let previewSeq = 0
 let previewTimer
@@ -639,8 +643,8 @@ function revealSlideSource(index) {
   cursorSlide = index
 }
 
-async function loadSource() {
-  const response = await fetch(`/api/artifacts/${id}/files/${artifact.entry.split('/').map(encodeURIComponent).join('/')}?v=${artifact.currentVersion}`)
+async function loadSource(v) {
+  const response = await fetch(`/api/artifacts/${id}/files/${artifact.entry.split('/').map(encodeURIComponent).join('/')}?v=${v}`)
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
   return response.text()
 }
@@ -649,15 +653,19 @@ async function openEditor() {
   if (version !== artifact.currentVersion) {
     await showKeepingPlace(artifact.currentVersion)
   }
+  const base = artifact.currentVersion
+  const session = ++editSession
   let text
   try {
-    text = await loadSource()
+    text = await loadSource(base)
   } catch (error) {
     toast(`讀不到簡報原始碼:${error.message}`)
     return
   }
+  if (session !== editSession) return
   setCommentsOpen(false)
-  editBase = artifact.currentVersion
+  // The text is version `base`, even if a newer one arrived meanwhile: saving then reports the conflict.
+  editBase = base
   dirty = false
   sourceInput.value = text
   editorPanel.hidden = false
@@ -678,6 +686,7 @@ function closeEditor() {
   if (dirty) show(version, place.path ?? undefined, place.hash)
   dirty = false
   editBase = null
+  editSession++
 }
 
 async function preview() {
@@ -695,6 +704,7 @@ async function preview() {
 
 sourceInput.addEventListener('input', () => {
   dirty = true
+  editRevision++
   if (!saveInFlight) setEditorStatus(`根據 v${editBase} · 未儲存`)
   clearTimeout(previewTimer)
   previewTimer = setTimeout(preview, 250)
@@ -846,9 +856,23 @@ function connectEvents() {
           // Keep the draft and its preview; saving it will report the conflict.
           toast(`有人存了新版本 ${versionLabel(change.version)},你的修改還沒儲存`)
         } else {
+          const session = editSession
+          const revision = editRevision
           await showKeepingPlace(change.version)
+          let text
+          try {
+            text = await loadSource(change.version)
+          } catch {
+            // Keep the old base: a save from this text then reports the conflict instead of overwriting.
+            toast(`有人存了新版本 ${versionLabel(change.version)},但讀不到它的原始碼;存檔時會提示衝突`)
+            return
+          }
+          if (session !== editSession || revision !== editRevision || dirty) {
+            toast(`有人存了新版本 ${versionLabel(change.version)},你的修改還沒儲存`)
+            return
+          }
           editBase = change.version
-          sourceInput.value = await loadSource().catch(() => sourceInput.value)
+          sourceInput.value = text
           setEditorStatus(`根據 v${editBase}`)
           toast(`已載入別人存的 ${versionLabel(change.version)}`)
         }

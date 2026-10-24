@@ -147,6 +147,36 @@ describe('editing decks from the viewer', () => {
     assert.equal(store.requireSummary(plain.id).currentVersion, 1)
   })
 
+  test('a deck that gains capabilities or loses its slides entry while a save is still arriving is not written', async () => {
+    for (const change of ['capabilities', 'entry'] as const) {
+      const { id } = deck()
+      let send!: (text: string) => void
+      let finish!: () => void
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          send = (text) => controller.enqueue(new TextEncoder().encode(text))
+          finish = () => controller.close()
+        }
+      })
+      const pending = app.request(`http://app.test/api/artifacts/${id}/slides`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-artifact-client': 'viewer' },
+        body,
+        // @ts-expect-error Node's fetch needs this for a streamed body
+        duplex: 'half'
+      })
+      send('{"markdown":"# viewer text",')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      if (change === 'capabilities') store.update(id, { capabilities: ['db'] })
+      else store.update(id, { files: { 'index.html': { content: Buffer.from('<p>page</p>') } }, entry: 'index.html' })
+      send('"baseVersion":2}')
+      finish()
+      const response = await pending
+      assert.ok([403, 409].includes(response.status), `${change}: ${response.status}`)
+      assert.equal(store.requireSummary(id).currentVersion, 2, change)
+    }
+  })
+
   test('preview renders a draft without saving it', async () => {
     const { id } = deck()
     const response = await viewerCall(`/api/artifacts/${id}/slides/preview`, 'POST', { markdown: '# A\n---\n## B' })
@@ -230,6 +260,24 @@ describe('exporting decks', () => {
     }
     const slide = entries.get('ppt/slides/slide1.xml')!
     assert.equal((slide.match(/<a:hlinkClick /g) ?? []).length, 1)
+  })
+
+  test('crowded slides still export positive sizes, and link targets cannot break the package XML', async () => {
+    const code = '```\n' + Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n') + '\n```'
+    const source = [
+      `## Code then picture\n${code}\n\n![a](a.png)`,
+      `## Eight pictures\n${Array.from({ length: 8 }, () => '![a](a.png)').join('\n\n')}`,
+      Array(25).fill('text').join('\n|||\n'),
+      '## Link\n[x](https://e.com/a\u0007b)'
+    ].join('\n---\n')
+    const { id } = store.publish({ title: 'Crowded', files: { 'index.slides.md': { content: Buffer.from(source) }, 'a.png': { content: PNG } } })
+    const response = await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)
+    assert.equal(response.status, 200)
+    for (const [name, xml] of unzip(Buffer.from(await response.arrayBuffer()))) {
+      if (!/\.(xml|rels)$/.test(name)) continue
+      if (/^ppt\/slides\/slide\d+\.xml$/.test(name)) assert.doesNotMatch(xml, /\b(cx|cy)="-/, `${name} has a negative size`)
+      assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/, `${name} has a character XML cannot hold`)
+    }
   })
 
   test('a page that is not a deck does not export', async () => {

@@ -665,3 +665,69 @@ test('the editor counts slides like the server, and text typed while a save is o
   await viewer.locator('#editor-status', { hasText: '已存成 v3' }).waitFor({ timeout: 5000 })
   await viewer.close()
 })
+
+test('the editor never pairs old text with a newer base: typing during a reload, a failed reload, a slow open', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const source = (id: string, v: number) => store.blobs.read(store.requireVersion(id, v).files['index.slides.md'].sha256).toString()
+  const scenario = async (name: string, run: (ctx: { viewer: import('playwright-core').Page; id: string }) => Promise<void>) => {
+    const { id } = store.publish({ title: name, files: { 'index.slides.md': { content: Buffer.from('# v1 original\n') } } })
+    const viewer = await browser.newPage({ viewport: { width: 1300, height: 800 } })
+    await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+    await viewer.frameLocator('#frame').locator('.slide.active').waitFor()
+    await run({ viewer, id })
+    // Whatever happened, saving must not silently replace v2.
+    viewer.once('dialog', (dialog) => dialog.dismiss())
+    await viewer.locator('#editor-source').press('End')
+    await viewer.keyboard.type(' edit')
+    await viewer.click('#save-deck')
+    await viewer.waitForTimeout(800)
+    const now = store.requireSummary(id).currentVersion
+    assert.ok(now === 2 || source(id, now).startsWith('# v2'), `${name}: v${now} = ${JSON.stringify(source(id, now))}`)
+    await viewer.close()
+  }
+  const hold = async (viewer: import('playwright-core').Page, version: number, answer: 'continue' | 'fail') => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    let seen!: () => void
+    const requested = new Promise<void>((resolve) => { seen = resolve })
+    await viewer.route((url) => url.pathname.endsWith('/files/index.slides.md') && url.searchParams.get('v') === String(version), async (route) => {
+      seen()
+      await held
+      if (answer === 'fail') await route.fulfill({ status: 503, body: 'down' })
+      else await route.continue()
+    })
+    return { requested, release }
+  }
+
+  await scenario('typing during reload', async ({ viewer, id }) => {
+    await viewer.click('#edit')
+    await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('v1'))
+    const gate = await hold(viewer, 2, 'continue')
+    store.update(id, { files: { 'index.slides.md': { content: Buffer.from('# v2 by publisher\n') } } })
+    await gate.requested
+    await viewer.locator('#editor-source').press('End')
+    await viewer.keyboard.type(' TYPED')
+    gate.release()
+    await viewer.waitForTimeout(500)
+    assert.match(await viewer.locator('#editor-source').inputValue(), /TYPED/)
+  })
+
+  await scenario('failed reload', async ({ viewer, id }) => {
+    await viewer.click('#edit')
+    await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('v1'))
+    const gate = await hold(viewer, 2, 'fail')
+    store.update(id, { files: { 'index.slides.md': { content: Buffer.from('# v2 by publisher\n') } } })
+    await gate.requested
+    gate.release()
+    await viewer.waitForTimeout(500)
+  })
+
+  await scenario('slow open', async ({ viewer, id }) => {
+    const gate = await hold(viewer, 1, 'continue')
+    await viewer.click('#edit')
+    await gate.requested
+    store.update(id, { files: { 'index.slides.md': { content: Buffer.from('# v2 by publisher\n') } } })
+    await viewer.waitForFunction(() => document.querySelector<HTMLSelectElement>('#version')!.options.length === 2)
+    gate.release()
+    await viewer.waitForTimeout(500)
+  })
+})

@@ -28,6 +28,8 @@ type ReadFile = (path: string) => Buffer | null
 // Text width in ems: CJK and full-width characters are one em, everything else about half.
 const ems = (text: string) => [...text].reduce((sum, char) => sum + (/[⺀-￯]/.test(char) ? 1 : 0.55), 0)
 const lineHeight = (pt: number) => (pt * 1.3) / 72
+// Every size PowerPoint gets must be positive; a crowded slide overflows rather than collapsing to zero.
+const positive = (inches: number, min = 0.1) => (Number.isFinite(inches) ? Math.max(min, inches) : min)
 
 function estimateLines(text: string, pt: number, width: number): number {
   return text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil((ems(line) * pt) / 72 / Math.max(width, 0.5))), 0)
@@ -63,7 +65,7 @@ function inlineRuns(tokens: Token[] | undefined, style: pptxgen.default.TextProp
         break
       case 'link':
         // Only links that lead somewhere outside the deck; relative and empty ones stay plain text.
-        runs.push(...inlineRuns(token.tokens, /^(https?:|mailto:)/i.test(token.href) ? { ...style, hyperlink: { url: token.href }, color: C.accent } : style))
+        runs.push(...inlineRuns(token.tokens, /^(https?:|mailto:)/i.test(token.href) ? { ...style, hyperlink: { url: xmlSafe(token.href) }, color: C.accent } : style))
         break
       case 'br':
         runs.push({ text: '\n', options: style })
@@ -196,7 +198,7 @@ function blocksOf(markdown: string, pt: number, read: ReadFile): Block[] {
         const language = (token.lang ?? '').trim().split(/\s+/)[0].toLowerCase()
         if (language === 'mermaid') {
           try {
-            picture(Buffer.from(flattenDiagram(renderDiagram(token.text, { idPrefix: 'p-', fontFamily: FONT }).svg)), 'svg')
+            picture(Buffer.from(xmlSafe(flattenDiagram(renderDiagram(token.text, { idPrefix: 'p-', fontFamily: FONT }).svg))), 'svg')
           } catch {
             flush()
             blocks.push({ kind: 'code', text: xmlSafe(token.text) })
@@ -269,10 +271,10 @@ function drawBlocks(slide: pptxgen.default.Slide, blocks: Block[], box: Box, ali
         })
         if (p.runs.length === 0) runs.push({ text: '', options: { breakLine: !last } })
       })
-      slide.addText(runs, { x: box.x, y, w: box.w, h, valign: 'top', fontFace: FONT, margin: 0, fit: 'shrink' })
+      slide.addText(runs, { x: box.x, y, w: positive(box.w), h: positive(h), valign: 'top', fontFace: FONT, margin: 0, fit: 'shrink' })
     } else if (block.kind === 'code') {
       slide.addText(block.text, {
-        x: box.x, y, w: box.w, h, valign: 'top', fontFace: MONO, fontSize: Math.round(SIZE.body * 0.68 * scale), color: C.text,
+        x: box.x, y, w: positive(box.w), h: positive(h), valign: 'top', fontFace: MONO, fontSize: Math.round(SIZE.body * 0.68 * scale), color: C.text,
         fill: { color: C.code }, margin: 0.12, fit: 'shrink'
       })
     } else if (block.kind === 'table') {
@@ -281,16 +283,19 @@ function drawBlocks(slide: pptxgen.default.Slide, blocks: Block[], box: Box, ali
         options: { bold: header || undefined, border: [{ type: 'none' }, { type: 'none' }, { pt: header ? 1.5 : 0.75, color: header ? C.accent : C.border }, { type: 'none' }] }
       })
       slide.addTable([block.header.map((runs) => cell(runs, true)), ...block.rows.map((row) => row.map((runs) => cell(runs, false)))], {
-        x: box.x, y, w: box.w, fontFace: FONT, fontSize: Math.round(SIZE.body * 0.8 * scale), color: C.text, margin: [0.05, 0.12, 0.05, 0.12], valign: 'top'
+        x: box.x, y, w: positive(box.w), fontFace: FONT, fontSize: Math.round(SIZE.body * 0.8 * scale), color: C.text, margin: [0.05, 0.12, 0.05, 0.12], valign: 'top'
       })
     } else {
-      const maxH = Math.min(pictureRoom, box.y + box.h - y)
-      let w = box.w
+      // What is left of the box, but never less than a small thumbnail: past the bottom it overflows, as in the browser.
+      const maxH = positive(Math.min(pictureRoom, box.y + box.h - y), 0.6)
+      let w = positive(box.w)
       h = (w * block.height) / block.width
       if (h > maxH) {
         h = maxH
         w = (h * block.width) / block.height
       }
+      w = positive(w, 0.05)
+      h = positive(h, 0.05)
       slide.addImage({ data: block.data, x: box.x + (box.w - w) / 2, y, w, h })
     }
     y += h + gap
@@ -303,7 +308,7 @@ function drawTitle(slide: pptxgen.default.Slide, markdown: string, y = 0.55): nu
   const runs = inlineRuns(token.tokens, { bold: true })
   const lines = estimateLines(runsText(runs), SIZE.title, W - 2 * MARGIN_X)
   const h = lines * lineHeight(SIZE.title)
-  slide.addText(runs as pptxgen.default.TextProps[], { x: MARGIN_X, y, w: W - 2 * MARGIN_X, h, fontFace: FONT, fontSize: SIZE.title, color: C.text, valign: 'bottom', margin: 0, fit: 'shrink' })
+  slide.addText(runs as pptxgen.default.TextProps[], { x: MARGIN_X, y, w: W - 2 * MARGIN_X, h: positive(h), fontFace: FONT, fontSize: SIZE.title, color: C.text, valign: 'bottom', margin: 0, fit: 'shrink' })
   slide.addShape('rect', { x: MARGIN_X, y: y + h + 0.1, w: 0.8, h: 0.06, fill: { color: C.accent }, line: { type: 'none' } })
   return y + h + 0.45
 }
@@ -351,8 +356,10 @@ function drawSlide(pptx: pptxgen.default, model: SlideModel, number: number, rea
     drawBlocks(slide, blocks, { x: 1.5, y: 0.8, w: W - 3, h: H - 1.6 }, 'center', true)
   } else if (model.layout === 'columns' && model.columns) {
     const top = model.heading ? drawTitle(slide, model.heading) : 0.6
-    const gap = 0.5
-    const width = (W - 2 * MARGIN_X - gap * (model.columns.length - 1)) / model.columns.length
+    // Gaps shrink with the column count so the columns always keep a positive width.
+    const count = model.columns.length
+    const gap = Math.min(0.5, ((W - 2 * MARGIN_X) * 0.2) / Math.max(1, count - 1))
+    const width = positive((W - 2 * MARGIN_X - gap * (count - 1)) / count)
     model.columns.forEach((column, at) => {
       drawBlocks(slide, blocksOf(column, SIZE.body, read), { x: MARGIN_X + at * (width + gap), y: top, w: width, h: H - top - 0.7 })
     })
