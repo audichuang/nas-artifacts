@@ -456,3 +456,70 @@ test('a reader sees what a new version changed, from the update notice or the ±
   await dialog.waitFor({ state: 'visible' })
   await viewer.close()
 })
+
+const DECK = ['# Deck', 'by me', '???', 'opening words', '---', '## Two', '- a', '---', '## Three', 'text'].join('\n')
+
+test('a slide deck turns pages from keys in or outside the frame, and a new version opens on the same slide', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active#slide-1').waitFor()
+  // The viewer has focus, not the frame: it forwards the arrow key.
+  await viewer.keyboard.press('ArrowRight')
+  await frame.locator('.slide.active#slide-2').waitFor()
+  assert.equal(await frame.locator('#deck-counter').textContent(), '2 / 3')
+  await viewer.waitForFunction(() => location.hash === '#2')
+  await frame.locator('[data-deck="notes"]').click()
+  await frame.locator('[data-deck="prev"]').click()
+  assert.equal(await frame.locator('#deck-notes').textContent(), 'opening words\n')
+  await frame.locator('[data-deck="next"]').click()
+  await frame.locator('[data-deck="next"]').click()
+  await frame.locator('.slide.active#slide-3').waitFor()
+
+  store.update(id, { files: { 'index.slides.md': { content: Buffer.from(DECK.replace('text', 'changed')) } } })
+  await frame.locator('.slide.active#slide-3', { hasText: 'changed' }).waitFor({ timeout: 5000 })
+
+  // The overview shows every slide; picking one goes there.
+  await frame.locator('[data-deck="overview"]').click()
+  await frame.locator('#slide-1').click()
+  await frame.locator('body:not(.overview) .slide.active#slide-1').waitFor()
+  await viewer.close()
+
+  // A link to slide 2 opens on slide 2.
+  const linked = await browser.newPage()
+  await linked.goto(`http://localhost:${APP_PORT}/a/${id}#2`)
+  await linked.frameLocator('#frame').locator('.slide.active#slide-2').waitFor()
+  await linked.close()
+})
+
+test('a slide that cannot fit even with smaller text is reported to the error log', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const long = Array.from({ length: 60 }, (_, i) => `- item ${i}`).join('\n')
+  const { id } = store.publish({ title: 'Overflow', files: { 'index.slides.md': { content: Buffer.from(`## Fine\n---\n## Too much\n${long}`) } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.locator('#errors:not([hidden])').waitFor({ timeout: 5000 })
+  const errors = store.listErrors(id, 1)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0].message, /第 2 頁內容太多/)
+  await viewer.close()
+})
+
+test('a deck fits a phone: one slide in view, controls without horizontal scroll', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Phone deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage({ viewport: { width: 375, height: 740 }, hasTouch: true })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  const page = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  const fit = await page.evaluate(() => {
+    const slide = document.querySelector('.slide.active')!.getBoundingClientRect()
+    const bar = document.querySelector('.deck-bar')!
+    return { slideWidth: slide.width, innerWidth, barOverflow: bar.scrollWidth > bar.clientWidth, docOverflow: document.documentElement.scrollWidth > innerWidth }
+  })
+  assert.ok(fit.slideWidth <= fit.innerWidth && fit.slideWidth > fit.innerWidth * 0.8, JSON.stringify(fit))
+  assert.equal(fit.barOverflow, false)
+  assert.equal(fit.docOverflow, false)
+  await viewer.close()
+})

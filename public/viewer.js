@@ -90,9 +90,20 @@ function renderVersions() {
   versionSelect.value = String(version)
 }
 
-// The file and scroll position the page last reported; path null is the entry.
-let place = { path: null, scrollY: 0 }
+// The file, hash and scroll position the page last reported; path null is the entry.
+let place = { path: null, hash: '', scrollY: 0 }
 let pendingScroll = null
+
+// A hash the page or the address bar names: an anchor or a slide number, nothing that could be a URL.
+function validHash(hash) {
+  if (typeof hash !== 'string' || hash.length > 400) return ''
+  try {
+    const decoded = decodeURIComponent(hash)
+    return /^#[\p{L}\p{N}_-]{1,100}$/u.test(decoded) ? decoded : ''
+  } catch {
+    return ''
+  }
+}
 
 function syncUrl() {
   const url = new URL(location.href)
@@ -100,18 +111,19 @@ function syncUrl() {
   else url.searchParams.set('v', String(version))
   if (place.path) url.searchParams.set('path', place.path)
   else url.searchParams.delete('path')
+  url.hash = place.hash
   // Safari throws once a page replaces its URL too often; the address bar is a convenience.
   try { history.replaceState(null, '', url) } catch {}
 }
 
-function show(v, path) {
+function show(v, path, hash = '') {
   version = v
   const row = artifact.versions.find((candidate) => candidate.version === v)
   titleEl.textContent = row?.title || artifact.title
   document.title = titleEl.textContent
-  frame.src = contentUrl(v, path)
+  frame.src = contentUrl(v, path) + hash
   versionSelect.value = String(v)
-  place = { path: path ?? null, scrollY: 0 }
+  place = { path: path ?? null, hash, scrollY: 0 }
   syncUrl()
   loadErrors()
   syncChangesButton()
@@ -124,11 +136,11 @@ function syncChangesButton() {
 
 // Opens version v on the file the reader is on, scrolled where they were, if that file exists there.
 async function showKeepingPlace(v) {
-  const { path, scrollY } = place
+  const { path, hash, scrollY } = place
   let files = v === artifact.currentVersion ? artifact.files : undefined
   if (path && !files) files = (await api(`?v=${v}`).catch(() => null))?.files
   const keep = !path || (files ? Object.hasOwn(files, path) : false)
-  show(v, keep ? path ?? undefined : undefined)
+  show(v, keep ? path ?? undefined : undefined, keep ? hash : '')
   pendingScroll = keep ? scrollY : null
 }
 
@@ -158,10 +170,21 @@ function onPlaceReport(report) {
   const path = framePath(report.path)
   if (path === undefined || !Number.isFinite(report.scrollY)) return
   const next = path === currentEntry() ? null : path
-  const moved = next !== place.path
-  place = { path: next, scrollY: Math.max(0, report.scrollY) }
+  const hash = validHash(report.hash)
+  const moved = next !== place.path || hash !== place.hash
+  place = { path: next, hash, scrollY: Math.max(0, report.scrollY) }
   if (moved) syncUrl()
 }
+
+// Slide decks: arrow keys pressed outside the frame still turn the page.
+const isDeck = () => /\.slides\.md$/i.test(place.path ?? currentEntry())
+const DECK_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
+document.addEventListener('keydown', (event) => {
+  if (!isDeck() || !DECK_KEYS.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return
+  if (event.target.closest('input, textarea, select, [contenteditable], dialog') || document.querySelector('dialog[open]')) return
+  event.preventDefault()
+  notifyPage({ type: 'deck-key', key: event.key })
+})
 
 fullscreenButton.addEventListener('click', () => {
   frame.requestFullscreen?.().catch(() => toast('無法進入全螢幕'))
@@ -639,6 +662,6 @@ if (storage.get('artifacts.commentsOpen') === '1') {
   commentsPanel.hidden = false
   toggleComments.setAttribute('aria-expanded', 'true')
 }
-show(version, data.path)
+show(version, data.path, validHash(location.hash))
 loadComments().catch(() => {})
 connectEvents()

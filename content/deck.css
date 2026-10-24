@@ -1,0 +1,141 @@
+/* Slide decks (*.slides.md). Each slide is a 16:9 container; everything inside is sized from its width (cqw), so a slide looks the same at any size, in the overview grid and in print. */
+:root {
+  --accent: #2563eb;
+  --accent-soft: #dbe7ff;
+  --deck-bg: #e8ebf0;
+  --slide-bg: #ffffff;
+  --bar-h: 48px;
+  --notes-h: 30vh;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --accent: #6ea8fe; --accent-soft: #1d2b44; --deck-bg: #05070a; --slide-bg: #12171e; }
+}
+html, body.deck { height: 100%; }
+body.deck {
+  margin: 0; overflow: hidden; background: var(--deck-bg); color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang TC", "Noto Sans TC", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.deck-stage { position: fixed; inset: 0 0 var(--bar-h) 0; container-type: size; display: grid; place-items: center; touch-action: pan-y; }
+body.show-notes .deck-stage { bottom: calc(var(--bar-h) + var(--notes-h)); }
+.slide {
+  grid-area: 1 / 1; position: relative; overflow: hidden; container-type: size;
+  width: min(calc(100cqw - 24px), calc((100cqh - 24px) * 16 / 9));
+  height: min(calc((100cqw - 24px) * 9 / 16), calc(100cqh - 24px));
+  background: var(--slide-bg); border-radius: 6px; box-shadow: 0 2px 14px rgb(0 0 0 / 0.12);
+  visibility: hidden;
+}
+.slide.active { visibility: visible; }
+.slide::after { content: attr(data-number); position: absolute; right: 3.2cqw; bottom: 2.6cqh; font-size: 1.5cqw; color: var(--muted); font-variant-numeric: tabular-nums; }
+.slide.layout-cover::after { content: none; }
+
+.slide-inner {
+  position: absolute; inset: 0; padding: 6.5cqh 6.5cqw 7.5cqh; display: flex; flex-direction: column; overflow: hidden;
+  font-size: calc(2.45cqw * var(--fit, 1)); line-height: 1.5; overflow-wrap: anywhere;
+}
+.slide-inner > :first-child { margin-top: 0; }
+.slide-inner > :last-child { margin-bottom: 0; }
+.slide-inner :is(h1, h2, h3, h4) { line-height: 1.22; font-weight: 700; letter-spacing: -0.01em; margin: 0.9em 0 0.4em; }
+.slide-inner h1 { font-size: 1.85em; }
+.slide-inner h2 { font-size: 1.55em; }
+.slide-inner h3 { font-size: 1.18em; }
+.slide-inner h4 { font-size: 1em; color: var(--muted); }
+/* The slide title: the heading that opens a slide, with an accent rule under it. */
+.slide-inner > :is(h1, h2):first-child { margin-bottom: 0.75em; }
+.slide-inner > :is(h1, h2):first-child::after { content: ""; display: block; width: 2.4em; height: 0.12em; margin-top: 0.32em; border-radius: 1em; background: var(--accent); font-size: 0.55em; }
+.slide-inner p { margin: 0.45em 0; }
+.slide-inner :is(ul, ol) { margin: 0.4em 0; padding-left: 1.3em; }
+.slide-inner li { margin: 0.28em 0; }
+.slide-inner li::marker { color: var(--accent); }
+.slide-inner :is(li, p) :is(ul, ol) { margin: 0.15em 0; font-size: 0.9em; }
+.slide-inner a { color: var(--link); }
+.slide-inner strong { font-weight: 700; }
+.slide-inner mark { background: var(--accent-soft); color: inherit; padding: 0 0.15em; border-radius: 0.15em; }
+.slide-inner code { font: 0.85em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 0.25em; }
+.slide-inner pre { margin: 0.5em 0; padding: 0.7em 0.9em; background: var(--code-bg); border-radius: 0.35em; overflow: hidden; font-size: 0.72em; line-height: 1.45; }
+.slide-inner pre code { background: none; padding: 0; font-size: 1em; }
+.slide-inner blockquote { margin: 0.5em 0; padding: 0.1em 0 0.1em 0.8em; border-left: 0.18em solid var(--accent); color: var(--muted); }
+.slide-inner table { border-collapse: collapse; margin: 0.5em 0; font-size: 0.82em; max-width: 100%; }
+.slide-inner :is(th, td) { padding: 0.35em 0.8em; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.slide-inner th { font-weight: 700; border-bottom: 0.1em solid var(--accent); }
+.slide-inner hr { border: 0; border-top: 1px solid var(--border); margin: 0.8em 0; }
+.slide-inner img, .slide-inner video { display: block; max-width: 100%; max-height: 52cqh; margin: 0.4em auto; border-radius: 0.25em; object-fit: contain; }
+/* A diagram takes whatever room the slide has left and scales to it. */
+.slide-inner .diagram { flex: 1 1 0; min-height: 12cqh; margin: 0.3em 0; display: flex; align-items: center; justify-content: center; }
+.slide-inner .diagram svg { width: 100%; height: 100%; max-width: 100%; }
+.column .diagram { min-height: 30cqh; }
+.slide-inner .pele {
+  --pele-bg: var(--slide-bg); --pele-fg: var(--text); --pele-muted: var(--muted); --pele-line: var(--muted);
+  --pele-surface: var(--surface); --pele-surface-alt: var(--surface-alt); --pele-border: var(--border);
+  --pele-accent: var(--accent); --pele-radius: 6px;
+}
+.slide-inner .diagram-failed { border: 1px solid var(--danger); border-radius: 0.3em; padding: 0 0.6em; font-size: 0.6em; }
+.slide-inner .diagram-failed p { color: var(--danger); white-space: pre-wrap; }
+
+/* Layouts: picked from the content, or by <!-- layout: name --> on the slide. */
+.layout-cover .slide-inner { justify-content: center; padding-left: 9cqw; padding-right: 9cqw; }
+.layout-cover .slide-inner::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1.6cqw; background: var(--accent); }
+.layout-cover .slide-inner h1 { font-size: 2.6em; margin-bottom: 0.35em; }
+.layout-cover .slide-inner h1::after { content: none; }
+.layout-cover .slide-inner :is(h2, h3) { font-size: 1.25em; font-weight: 500; color: var(--muted); margin: 0.3em 0; }
+.layout-cover .slide-inner h2::after { content: none; }
+.layout-cover .slide-inner p { color: var(--muted); font-size: 1.05em; }
+.layout-section .slide-inner { justify-content: center; background: linear-gradient(135deg, var(--accent-soft), transparent 70%); }
+.layout-section .slide-inner :is(h1, h2) { font-size: 2.3em; margin: 0 0 0.25em; }
+.layout-section .slide-inner :is(h3, h4) { font-size: 1.15em; font-weight: 500; color: var(--muted); margin: 0; }
+.layout-center .slide-inner { justify-content: center; align-items: center; text-align: center; }
+.layout-center .slide-inner > :is(h1, h2):first-child::after { margin-left: auto; margin-right: auto; }
+.layout-center .slide-inner blockquote { border: 0; padding: 0; font-size: 1.35em; color: var(--text); }
+.columns { display: grid; grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); gap: 4cqw; flex: 1; min-height: 0; }
+.column > :first-child { margin-top: 0; }
+.column img { max-height: 46cqh; }
+
+.slide-notes { display: none; }
+
+/* Controls */
+.deck-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; height: var(--bar-h); display: flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 0 8px; font-size: 14px; color: var(--muted); transition: opacity 0.2s;
+}
+.deck-bar button {
+  min-width: 40px; height: 36px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; background: none;
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.deck-bar button[data-deck="prev"], .deck-bar button[data-deck="next"] { font-size: 22px; line-height: 1; }
+.deck-bar button:hover { background: var(--surface-alt); }
+.deck-bar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.deck-bar button:disabled { opacity: 0.35; cursor: default; background: none; }
+.deck-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.deck-counter { min-width: 4.5em; text-align: center; font-variant-numeric: tabular-nums; }
+.deck-gap { width: 12px; }
+body.idle .deck-bar { opacity: 0; }
+body.idle { cursor: none; }
+
+.deck-notes {
+  position: fixed; left: 0; right: 0; bottom: var(--bar-h); height: var(--notes-h); overflow: auto; box-sizing: border-box;
+  padding: 10px 18px; background: var(--surface); border-top: 1px solid var(--border); font-size: 16px; line-height: 1.7;
+}
+.deck-notes:empty::before { content: "這頁沒有講稿。"; color: var(--muted); }
+.deck-notes > :first-child { margin-top: 0; }
+
+/* Overview: every slide as a thumbnail; the same cqw sizing shrinks them whole. */
+body.overview .deck-stage { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 16px; padding: 16px; overflow: auto; align-content: start; place-items: stretch; container-type: normal; touch-action: auto; }
+body.overview .slide { grid-area: auto; visibility: visible; width: auto; height: auto; aspect-ratio: 16 / 9; cursor: pointer; }
+body.overview .slide.active { outline: 3px solid var(--accent); outline-offset: 2px; }
+body.overview .deck-notes { display: none; }
+
+@media (max-width: 520px) {
+  .deck-bar { gap: 0; }
+  .deck-bar button { padding: 0 7px; min-width: 36px; }
+  .deck-gap { width: 4px; }
+}
+
+/* Print / PDF: one slide per page. */
+@page { size: 13.333in 7.5in; margin: 0; }
+@media print {
+  html, body.deck { height: auto; overflow: visible; background: none; }
+  .deck-bar, .deck-notes { display: none !important; }
+  .deck-stage, body.overview .deck-stage { position: static; display: block; container-type: normal; padding: 0; overflow: visible; }
+  .slide, body.overview .slide { visibility: visible; width: 13.333in; height: 7.5in; aspect-ratio: auto; border-radius: 0; box-shadow: none; outline: 0; break-after: page; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}

@@ -6,6 +6,7 @@ import { ArtifactError } from './artifact-store.ts'
 import type { Config } from './config.ts'
 import { BRIDGE_PATH, MARKDOWN_CSS_PATH, RENDER_VERSION, injectBridge, renderMarkdown } from './content-render.ts'
 import { decodeRequestPath, isHtmlPath, isMarkdownPath, isServableType } from './file-paths.ts'
+import { isSlidesPath, renderDeck, type DeckAssets } from './slides.ts'
 
 // Same CDN allowlist as Claude's artifacts; everything else must be inline or published with the page.
 const SCRIPT_HOSTS = 'https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://cdn.tailwindcss.com https://code.jquery.com'
@@ -43,8 +44,16 @@ export function createContentServer(store: ArtifactStore, config: Config, option
   const app = new Hono()
   const bridge = staticFile('bridge.js').replace('__APP_ORIGIN__', JSON.stringify(config.appOrigin))
   const markdownCss = staticFile('markdown.css')
+  const deck: DeckAssets = { css: staticFile('deck.css'), js: staticFile('deck.js') }
   // Everything a rendered page is built from, so a change to any of them revalidates the pages browsers hold.
-  const renderTag = createHash('sha256').update(bridge).update(markdownCss).update(options.renderVersion ?? RENDER_VERSION).digest('hex').slice(0, 16)
+  const renderTag = createHash('sha256')
+    .update(bridge)
+    .update(markdownCss)
+    .update(deck.css)
+    .update(deck.js)
+    .update(options.renderVersion ?? RENDER_VERSION)
+    .digest('hex')
+    .slice(0, 16)
 
   app.use('*', async (c, next) => {
     await next()
@@ -94,7 +103,8 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     }
     const body = read()
     if (isMarkdownPath(path)) {
-      return new Response(renderMarkdown(body.toString('utf8'), title), {
+      const source = body.toString('utf8')
+      return new Response(isSlidesPath(path) ? renderDeck(source, title, deck) : renderMarkdown(source, title), {
         headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' }
       })
     }
