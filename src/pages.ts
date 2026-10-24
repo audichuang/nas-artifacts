@@ -68,7 +68,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
 </header>
 <div class="viewer">
   <iframe id="frame" title="Artifact"
-    sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+    sandbox="allow-scripts allow-forms allow-modals allow-downloads"
     allow="clipboard-write; fullscreen"></iframe>
   <aside id="comments" class="comments" hidden>
     <div class="comments-head">

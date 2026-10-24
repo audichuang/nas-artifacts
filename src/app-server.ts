@@ -124,11 +124,15 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
 
   // Pages
 
-  app.get('/', (c) => c.html(galleryPage(config)))
+  app.get('/', (c) => {
+    c.header('Content-Security-Policy', "frame-src 'none'")
+    return c.html(galleryPage(config))
+  })
   app.get('/a/:id', (c) => {
     const detail = store.detail(c.req.param('id'))
     const requested = Number(c.req.query('v') ?? detail.currentVersion)
     const version = detail.versions.find((row) => row.version === requested)?.version ?? detail.currentVersion
+    c.header('Content-Security-Policy', `frame-src ${config.contentOrigin}/a/${detail.id}/`)
     return c.html(viewerPage(config, detail, version))
   })
   app.get('/static/:name', (c) => {
