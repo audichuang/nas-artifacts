@@ -22,7 +22,11 @@
 | tailnet 內的瀏覽器 | 看所有頁面、留言、釘選、使用頁面宣告過的能力 |
 | 持有發佈 token | 發佈、更新、刪除、直接讀寫任何 artifact 的 db |
 
-頁面檔案由**另一個 origin** 提供,並帶 `Content-Security-Policy: sandbox allow-scripts …`(沒有 `allow-same-origin`):頁面是 opaque origin,碰不到圖庫/API 的 origin,`connect-src 'none'` 也讓它無法把資料送出去。頁面能力只能經檢視頁的 `postMessage` 橋接,由檢視頁依宣告的能力代為呼叫 API。允許的外部腳本 CDN 與 Claude Artifacts 相同(cdnjs、jsdelivr、unpkg、tailwind、jquery)。
+頁面檔案由**另一個 origin** 提供,並帶 `Content-Security-Policy: sandbox allow-scripts …`(沒有 `allow-same-origin`、沒有 popups):頁面是 opaque origin,碰不到圖庫/API 的 origin;`connect-src 'none'` 擋掉 fetch/XHR/WebSocket;資源來源只限它自己的 `/a/<id>/` 路徑,讀不到別的 artifact。檢視頁再送 `frame-src <content>/a/<id>/`,所以框在檢視頁裡的頁面也無法把自己導向外站或別的 artifact。頁面能力只能經檢視頁的 `postMessage` 橋接,由檢視頁依宣告的能力代為呼叫 API。允許的外部腳本 CDN 與 Claude Artifacts 相同(cdnjs、jsdelivr、unpkg、tailwind、jquery)。
+
+**已知缺口**:直接打開 content 網址(檢視頁的 ↗,或貼上 `artifacts-content…` 連結)時頁面是頂層文件,沒有 `frame-src` 約束,頁面仍可把自己導向外站、把它自己的內容帶在網址裡。這時沒有頁面能力(拿不到 db),但頁面本身的內容可能外流。修正方向:content 端把 `Sec-Fetch-Dest: document` 的頁面請求轉回檢視頁。
+
+取捨:沙箱沒有 popups,所以頁面裡的外部連結無法開新分頁。
 
 ## 部署
 

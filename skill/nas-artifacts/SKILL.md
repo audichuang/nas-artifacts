@@ -25,7 +25,8 @@ Credentials: `ARTIFACTS_TOKEN` env, or `~/.config/nas-artifacts/config.json` (se
 
 The page runs in a sandbox on its own origin:
 
-- **No network.** `fetch`/XHR/WebSocket are blocked. Put data inline, in a published `.js` file that sets a global, or in the `db` capability.
+- **No network.** `fetch`/XHR/WebSocket are blocked, and inside the viewer the page cannot navigate away from its own files. Put data inline, in a published `.js` file that sets a global, or in the `db` capability.
+- **No popups or external links**: `target=_blank` and `window.open` do nothing; show a URL as text if the reader needs it.
 - **Scripts and styles**: inline, published files, or exact-version URLs from `cdnjs.cloudflare.com`, `cdn.jsdelivr.net`, `unpkg.com`, `cdn.tailwindcss.com`, `code.jquery.com`. Fonts: Google Fonts. Images: published files, data URIs, or assets (`artifact asset upload`) — remote image URLs are blocked.
 - **No cookies; `localStorage` throws** (the origin is opaque). Shared state goes in `db`.
 - Theme with CSS variables and `prefers-color-scheme`; set an explicit `body` background; make it work at phone width.
