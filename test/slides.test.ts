@@ -219,6 +219,19 @@ describe('exporting decks', () => {
     assert.ok([...entries].some(([name, xml]) => name.startsWith('ppt/notesSlides/') && xml.includes('開場白')))
   })
 
+  test('odd Markdown still exports: empty and relative links, control characters, lone surrogates', async () => {
+    const source = '## A [empty]() [rel](other.md) [web](https://example.com)\n\nbell\u0007 &#xD800; esc\u001b\n???\nnote\u0001'
+    const { id } = store.publish({ title: 'Odd\u0002', files: { 'index.slides.md': { content: Buffer.from(source) } } })
+    const response = await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)
+    assert.equal(response.status, 200)
+    const entries = unzip(Buffer.from(await response.arrayBuffer()))
+    for (const [name, xml] of entries) {
+      if (name.endsWith('.xml')) assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffd]/, name)
+    }
+    const slide = entries.get('ppt/slides/slide1.xml')!
+    assert.equal((slide.match(/<a:hlinkClick /g) ?? []).length, 1)
+  })
+
   test('a page that is not a deck does not export', async () => {
     const { id } = store.publish({ title: 'P', files: { 'index.md': { content: Buffer.from('# x') } } })
     assert.equal((await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)).status, 409)

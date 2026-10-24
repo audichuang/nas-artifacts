@@ -33,12 +33,15 @@ function estimateLines(text: string, pt: number, width: number): number {
   return text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil((ems(line) * pt) / 72 / Math.max(width, 0.5))), 0)
 }
 
+// Characters XML 1.0 cannot hold (control characters, lone surrogates) would make PowerPoint reject the file.
+const xmlSafe = (text: string) => text.replace(/[^\t\n\r\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu, '')
+
 function decodeEntities(text: string): string {
-  return text.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_, name: string) => {
+  return xmlSafe(text).replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_, name: string) => {
     const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
     if (name[0] !== '#') return named[name.toLowerCase()]
     const code = name[1].toLowerCase() === 'x' ? parseInt(name.slice(2), 16) : Number(name.slice(1))
-    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : ''
+    return code > 0 && code <= 0x10ffff ? xmlSafe(String.fromCodePoint(code)) : ''
   })
 }
 
@@ -59,13 +62,14 @@ function inlineRuns(tokens: Token[] | undefined, style: pptxgen.default.TextProp
         runs.push({ text: decodeEntities(token.text), options: { ...style, fontFace: MONO, highlight: C.code } })
         break
       case 'link':
-        runs.push(...inlineRuns(token.tokens, { ...style, hyperlink: { url: token.href }, color: C.accent }))
+        // Only links that lead somewhere outside the deck; relative and empty ones stay plain text.
+        runs.push(...inlineRuns(token.tokens, /^(https?:|mailto:)/i.test(token.href) ? { ...style, hyperlink: { url: token.href }, color: C.accent } : style))
         break
       case 'br':
         runs.push({ text: '\n', options: style })
         break
       case 'image':
-        runs.push({ text: token.text, options: style })
+        runs.push({ text: xmlSafe(token.text), options: style })
         break
       case 'html':
         break
@@ -195,11 +199,11 @@ function blocksOf(markdown: string, pt: number, read: ReadFile): Block[] {
             picture(Buffer.from(flattenDiagram(renderDiagram(token.text, { idPrefix: 'p-', fontFamily: FONT }).svg)), 'svg')
           } catch {
             flush()
-            blocks.push({ kind: 'code', text: token.text })
+            blocks.push({ kind: 'code', text: xmlSafe(token.text) })
           }
         } else {
           flush()
-          blocks.push({ kind: 'code', text: token.text })
+          blocks.push({ kind: 'code', text: xmlSafe(token.text) })
         }
         break
       }
@@ -311,7 +315,7 @@ function splitTitle(markdown: string): { title: string | null; rest: string } {
 }
 
 function notesText(markdown: string): string {
-  return markdown
+  return xmlSafe(markdown)
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/^[ \t]*#+[ \t]+/gm, '')
     .replace(/(\*\*|__|`)/g, '')
@@ -367,7 +371,7 @@ function drawSlide(pptx: pptxgen.default, model: SlideModel, number: number, rea
 export async function deckToPptx(source: string, title: string, entry: string, readFile: (path: string) => Buffer | null): Promise<Buffer> {
   const pptx = new PptxGenJS()
   pptx.layout = 'LAYOUT_WIDE'
-  pptx.title = title
+  pptx.title = xmlSafe(title)
   pptx.theme = { headFontFace: FONT, bodyFontFace: FONT }
   const read: ReadFile = (href) => {
     if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('/')) return null

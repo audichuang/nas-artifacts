@@ -627,3 +627,41 @@ test('a deck prints one slide per page, and the toolbar offers it as .pptx', { s
   assert.equal(download.suggestedFilename(), 'Print deck.pptx')
   await viewer.close()
 })
+
+test('the editor counts slides like the server, and text typed while a save is on its way stays unsaved', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Editor edges', files: { 'index.slides.md': { content: Buffer.from('# A\n---\n???\n---\n## C\nlast') } } })
+  const viewer = await browser.newPage({ viewport: { width: 1300, height: 800 } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  assert.equal(await frame.locator('#deck-counter').textContent(), '1 / 2')
+  await viewer.click('#edit')
+  const source = viewer.locator('#editor-source')
+  await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('last'))
+  // The cursor in "## C" (the server's slide 2, after a notes-only chunk it drops) shows slide 2.
+  await source.evaluate((el: HTMLTextAreaElement) => { el.focus(); el.setSelectionRange(el.value.length, el.value.length) })
+  await viewer.keyboard.press('End')
+  await frame.locator('.slide.active#slide-2').waitFor({ timeout: 3000 })
+
+  // Hold the save on the wire, type meanwhile: the new text is not counted as saved.
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await viewer.route('**/slides', async (route) => {
+    await held
+    await route.continue()
+  })
+  await viewer.keyboard.type(' one')
+  await viewer.keyboard.press('ControlOrMeta+s')
+  await viewer.locator('#editor-status', { hasText: '儲存中' }).waitFor()
+  await viewer.keyboard.type(' two')
+  await viewer.keyboard.press('ControlOrMeta+s')
+  release()
+  await viewer.locator('#editor-status', { hasText: '未儲存' }).waitFor({ timeout: 5000 })
+  assert.equal(store.requireSummary(id).currentVersion, 2)
+  assert.match(store.blobs.read(store.requireVersion(id, 2).files['index.slides.md'].sha256).toString(), /last one$/)
+  assert.equal(await viewer.locator('#save-deck').isEnabled(), true)
+  await viewer.unroute('**/slides')
+  await viewer.click('#save-deck')
+  await viewer.locator('#editor-status', { hasText: '已存成 v3' }).waitFor({ timeout: 5000 })
+  await viewer.close()
+})

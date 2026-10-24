@@ -174,11 +174,15 @@ function onPlaceReport(report) {
   const hash = validHash(report.hash)
   const moved = next !== place.path || hash !== place.hash
   place = { path: next, hash, scrollY: Math.max(0, report.scrollY) }
-  if (moved) syncUrl()
+  if (moved) {
+    syncUrl()
+    syncEditButton()
+  }
 }
 
 // Slide decks: arrow keys pressed outside the frame still turn the page.
-const isDeck = () => /\.slides\.md$/i.test(place.path ?? currentEntry())
+// The editor and the export work on the entry, so they count only while the entry is on show.
+const isDeck = () => place.path === null && /\.slides\.md$/i.test(currentEntry())
 const DECK_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 document.addEventListener('keydown', (event) => {
   if (!isDeck() || !DECK_KEYS.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return
@@ -191,7 +195,18 @@ fullscreenButton.addEventListener('click', () => {
   frame.requestFullscreen?.().catch(() => toast('無法進入全螢幕'))
 })
 
-versionSelect.addEventListener('change', () => showKeepingPlace(Number(versionSelect.value)))
+versionSelect.addEventListener('change', () => {
+  // The editor works on the latest version; looking at another one closes it.
+  if (!editorPanel.hidden) {
+    if (dirty && !confirm('切換版本會關閉編輯,放棄還沒儲存的修改?')) {
+      versionSelect.value = String(version)
+      return
+    }
+    dirty = false
+    closeEditor()
+  }
+  showKeepingPlace(Number(versionSelect.value))
+})
 
 function versionLabel(v) {
   const label = artifact.versions.find((row) => row.version === v)?.label
@@ -567,6 +582,7 @@ let savedVersion = null
 let dirty = false
 // The save on its way: a version event can arrive before the PUT answers, so it waits for this first.
 let saveInFlight = null
+let cursorSlide = -1
 let previewSeq = 0
 let previewTimer
 
@@ -584,8 +600,8 @@ function setEditorStatus(text, isDirty = dirty) {
   saveButton.disabled = !isDirty
 }
 
-// Which slide the cursor is on, splitting the way the server does: --- lines outside fenced code.
-function slideIndexAt(text, offset) {
+// Where each slide's source starts, splitting the way the server does: --- lines outside fenced code.
+function slideStarts(text) {
   const chunks = [{ start: 0, text: '' }]
   let fence = null
   let at = 0
@@ -603,10 +619,24 @@ function slideIndexAt(text, offset) {
     chunks[chunks.length - 1].text += `${line}\n`
     at += line.length + 1
   }
-  const kept = chunks.filter((chunk) => chunk.text.trim())
+  const kept = chunks.filter((chunk) => chunk.text.replace(/^\?\?\?\s*$/m, '').trim())
+  return (kept.length ? kept : chunks.slice(0, 1)).map((chunk) => chunk.start)
+}
+
+function slideIndexAt(text, offset) {
   let index = 0
-  kept.forEach((chunk, i) => { if (chunk.start <= offset) index = i })
+  slideStarts(text).forEach((start, i) => { if (start <= offset) index = i })
   return index
+}
+
+// Puts the cursor at the start of the slide on show and scrolls the source there.
+function revealSlideSource(index) {
+  const start = slideStarts(sourceInput.value)[index] ?? 0
+  sourceInput.focus({ preventScroll: true })
+  sourceInput.setSelectionRange(start, start)
+  const line = sourceInput.value.slice(0, start).split('\n').length - 1
+  sourceInput.scrollTop = Math.max(0, (line - 1) * parseFloat(getComputedStyle(sourceInput).lineHeight))
+  cursorSlide = index
 }
 
 async function loadSource() {
@@ -634,8 +664,7 @@ async function openEditor() {
   viewerEl.classList.add('editing')
   editButton.setAttribute('aria-expanded', 'true')
   setEditorStatus(`根據 v${editBase}`)
-  sourceInput.focus()
-  sourceInput.setSelectionRange(0, 0)
+  revealSlideSource(Math.max(0, Number(/^#(\d+)$/.exec(place.hash)?.[1] ?? 1) - 1))
 }
 
 function closeEditor() {
@@ -666,13 +695,12 @@ async function preview() {
 
 sourceInput.addEventListener('input', () => {
   dirty = true
-  setEditorStatus(`根據 v${editBase} · 未儲存`)
+  if (!saveInFlight) setEditorStatus(`根據 v${editBase} · 未儲存`)
   clearTimeout(previewTimer)
   previewTimer = setTimeout(preview, 250)
 })
 
 // Moving the cursor to another slide's source shows that slide.
-let cursorSlide = -1
 function followCursor() {
   const index = slideIndexAt(sourceInput.value, sourceInput.selectionStart)
   if (index === cursorSlide) return
@@ -683,16 +711,17 @@ sourceInput.addEventListener('keyup', followCursor)
 sourceInput.addEventListener('click', followCursor)
 
 async function saveDeck() {
-  if (!dirty || saveButton.disabled) return
-  saveButton.disabled = true
+  if (!dirty || saveInFlight) return
+  const sent = sourceInput.value
   setEditorStatus('儲存中…', false)
   try {
-    saveInFlight = api('/slides', { method: 'PUT', json: { markdown: sourceInput.value, baseVersion: editBase, author: viewerName() || undefined } })
+    saveInFlight = api('/slides', { method: 'PUT', json: { markdown: sent, baseVersion: editBase, author: viewerName() || undefined } })
     const saved = await saveInFlight
     savedVersion = saved.currentVersion
     editBase = saved.currentVersion
-    dirty = false
-    setEditorStatus(`已存成 v${saved.currentVersion}`)
+    // Whatever was typed while the save was on its way is still unsaved.
+    dirty = sourceInput.value !== sent
+    setEditorStatus(dirty ? `根據 v${editBase} · 未儲存` : `已存成 v${saved.currentVersion}`)
   } catch (error) {
     dirty = true
     if (error.code === 'version_conflict') {
