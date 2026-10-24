@@ -24,7 +24,7 @@
 
 頁面檔案由**另一個 origin** 提供,並帶 `Content-Security-Policy: sandbox allow-scripts …`(沒有 `allow-same-origin`、沒有 popups):頁面是 opaque origin,碰不到圖庫/API 的 origin;`connect-src 'none'` 擋掉 fetch/XHR/WebSocket;資源來源只限它自己的 `/a/<id>/` 路徑,讀不到別的 artifact。檢視頁再送 `frame-src <content>/a/<id>/`,所以框在檢視頁裡的頁面也無法把自己導向外站或別的 artifact。頁面能力只能經檢視頁的 `postMessage` 橋接,由檢視頁依宣告的能力代為呼叫 API。允許的外部腳本 CDN 與 Claude Artifacts 相同(cdnjs、jsdelivr、unpkg、tailwind、jquery)。
 
-**已知缺口**:直接打開 content 網址(檢視頁的 ↗,或貼上 `artifacts-content…` 連結)時頁面是頂層文件,沒有 `frame-src` 約束,頁面仍可把自己導向外站、把它自己的內容帶在網址裡。這時沒有頁面能力(拿不到 db),但頁面本身的內容可能外流。修正方向:content 端把 `Sec-Fetch-Dest: document` 的頁面請求轉回檢視頁。
+直接打開 content 網址(貼上 `artifacts-content…` 連結)時,HTML/Markdown 頁面的頂層導覽(`Sec-Fetch-Dest: document`)會被 302 送回檢視頁(帶 `v` 與 `path`),所以頁面永遠在檢視頁的 `frame-src` 約束下執行,沒有頂層文件可以把自己的內容帶去外站。檢視頁的框(`Sec-Fetch-Dest: iframe`)、不帶該標頭的用戶端(curl、CLI)與非頁面檔案(css、js、圖片)照常提供。
 
 取捨:沙箱沒有 popups,所以頁面裡的外部連結無法開新分頁。
 

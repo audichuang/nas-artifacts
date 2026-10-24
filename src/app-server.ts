@@ -12,7 +12,7 @@ import {
   type IncomingFile
 } from './artifact-store.ts'
 import type { Config } from './config.ts'
-import { decodeRequestPath } from './file-paths.ts'
+import { decodeRequestPath, normalizeFilePath } from './file-paths.ts'
 import { galleryPage, viewerPage } from './pages.ts'
 
 /** Mutations from the viewer must carry this header: it forces a CORS preflight, which no other origin passes. */
@@ -133,7 +133,9 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     const requested = Number(c.req.query('v') ?? detail.currentVersion)
     const version = detail.versions.find((row) => row.version === requested)?.version ?? detail.currentVersion
     c.header('Content-Security-Policy', `frame-src ${config.contentOrigin}/a/${detail.id}/`)
-    return c.html(viewerPage(config, detail, version))
+    const requestedPath = normalizeFilePath(c.req.query('path') ?? '')
+    const path = requestedPath && store.requireVersion(detail.id, version).files[requestedPath] ? requestedPath : undefined
+    return c.html(viewerPage(config, detail, version, path))
   })
   app.get('/static/:name', (c) => {
     const name = c.req.param('name')

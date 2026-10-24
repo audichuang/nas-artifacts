@@ -44,7 +44,7 @@ export function galleryPage(config: Config): string {
   )
 }
 
-export function viewerPage(config: Config, detail: ArtifactDetail, version: number): string {
+export function viewerPage(config: Config, detail: ArtifactDetail, version: number, path?: string): string {
   const row = detail.versions.find((candidate) => candidate.version === version)
   return shell(
     row?.title ?? detail.title,
@@ -61,7 +61,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
   <div class="bar-actions">
     <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
     <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
-    <a id="open-raw" class="icon-button" target="_blank" rel="noopener" title="單獨開啟頁面">↗</a>
+    <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
     <button id="toggle-comments" class="button" type="button" aria-expanded="false">留言 <span id="comment-count"></span></button>
     <button id="menu-delete" class="icon-button danger" type="button" title="刪除">🗑</button>
   </div>
@@ -91,7 +91,8 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
       appOrigin: config.appOrigin,
       contentOrigin: config.contentOrigin,
       artifact: detail,
-      version
+      version,
+      path
     }
   )
 }

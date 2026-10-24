@@ -6,7 +6,7 @@ const id = artifact.id
 const frame = document.getElementById('frame')
 const versionSelect = document.getElementById('version')
 const titleEl = document.getElementById('title')
-const openRaw = document.getElementById('open-raw')
+const fullscreenButton = document.getElementById('fullscreen')
 const pinButton = document.getElementById('pin')
 const toastEl = document.getElementById('toast')
 const commentsPanel = document.getElementById('comments')
@@ -56,8 +56,9 @@ async function api(path, options = {}) {
 
 // Versions
 
-function contentUrl(v) {
-  return `${data.contentOrigin}/a/${id}/v/${v}/`
+function contentUrl(v, path) {
+  const base = `${data.contentOrigin}/a/${id}/v/${v}/`
+  return path ? base + path.split('/').map(encodeURIComponent).join('/') : base
 }
 
 function renderVersions() {
@@ -73,19 +74,24 @@ function renderVersions() {
   versionSelect.value = String(version)
 }
 
-function show(v) {
+function show(v, path) {
   version = v
   const row = artifact.versions.find((candidate) => candidate.version === v)
   titleEl.textContent = row?.title || artifact.title
   document.title = titleEl.textContent
-  frame.src = contentUrl(v)
-  openRaw.href = contentUrl(v)
+  frame.src = contentUrl(v, path)
   versionSelect.value = String(v)
   const url = new URL(location.href)
   if (v === artifact.currentVersion) url.searchParams.delete('v')
   else url.searchParams.set('v', String(v))
+  if (path) url.searchParams.set('path', path)
+  else url.searchParams.delete('path')
   history.replaceState(null, '', url)
 }
+
+fullscreenButton.addEventListener('click', () => {
+  frame.requestFullscreen?.().catch(() => toast('無法進入全螢幕'))
+})
 
 versionSelect.addEventListener('change', () => show(Number(versionSelect.value)))
 
@@ -369,6 +375,6 @@ if (storage.get('artifacts.commentsOpen') === '1') {
   commentsPanel.hidden = false
   toggleComments.setAttribute('aria-expanded', 'true')
 }
-show(version)
+show(version, data.path)
 loadComments().catch(() => {})
 connectEvents()
