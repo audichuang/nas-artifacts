@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // artifact — publish and manage pages on a nas-artifacts server. Zero dependencies; Node 20+.
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -47,7 +47,16 @@ function readJson(path, fallback) {
 
 function writePrivateJson(path, value) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  const temp = `${path}.${process.pid}.tmp`
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temp, path)
+}
+
+// Re-reads state.json so concurrent publishes keep each other's entries.
+function updateState(mutate) {
+  const state = readJson(STATE_FILE, {})
+  mutate(state)
+  writePrivateJson(STATE_FILE, state)
 }
 
 function settings() {
@@ -58,7 +67,7 @@ function settings() {
   }
 }
 
-async function api(path, { method = 'GET', json, body, auth = false, raw = false, headers = {} } = {}) {
+async function api(path, { method = 'GET', json, body, auth = false, raw = false, headers = {}, allowNotFound = false } = {}) {
   const { url, token } = settings()
   if (auth && !token) {
     fail(`no token: set ARTIFACTS_TOKEN or run "artifact config --token-stdin".`)
@@ -80,6 +89,7 @@ async function api(path, { method = 'GET', json, body, auth = false, raw = false
   }
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
+    if (allowNotFound && response.status === 404 && payload?.error?.code === 'artifact_not_found') return null
     fail(`${method} ${path} → ${response.status} ${payload?.error?.code ?? ''}: ${payload?.error?.message ?? response.statusText}`)
   }
   return payload
@@ -144,7 +154,7 @@ async function publish(target, values) {
   }
   let result
   if (knownId) {
-    const current = await api(`/api/artifacts/${encodeURIComponent(knownId)}`).catch(() => null)
+    const current = await api(`/api/artifacts/${encodeURIComponent(knownId)}`, { allowNotFound: true })
     // A path that no longer exists on the server falls through to a fresh publish.
     if (current) {
       for (const stale of Object.keys(current.files)) {
@@ -161,8 +171,10 @@ async function publish(target, values) {
     const title = values.title ?? guessTitle(paths, values.entry) ?? basename(source)
     result = await api('/api/artifacts', { method: 'POST', auth: true, json: { ...common, title, files } })
   }
-  state[source] = { id: result.id, url: result.url }
-  writePrivateJson(STATE_FILE, state)
+  const recorded = { id: result.id, url: result.url }
+  updateState((latest) => {
+    latest[source] = recorded
+  })
   print(result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})`)
 }
 
@@ -237,9 +249,9 @@ async function main() {
       const id = args[0] ?? fail('delete needs an id')
       if (!values.yes) fail(`deleting ${id} is permanent; pass --yes`)
       await api(`/api/artifacts/${enc(id)}`, { method: 'DELETE', auth: true })
-      const state = readJson(STATE_FILE, {})
-      for (const [path, entry] of Object.entries(state)) if (entry.id === id) delete state[path]
-      writePrivateJson(STATE_FILE, state)
+      updateState((state) => {
+        for (const [path, entry] of Object.entries(state)) if (entry.id === id) delete state[path]
+      })
       return console.log(`deleted ${id}`)
     }
     case 'db': {
