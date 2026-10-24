@@ -456,3 +456,278 @@ test('a reader sees what a new version changed, from the update notice or the ±
   await dialog.waitFor({ state: 'visible' })
   await viewer.close()
 })
+
+const DECK = ['# Deck', 'by me', '???', 'opening words', '---', '## Two', '- a', '---', '## Three', 'text'].join('\n')
+
+test('a slide deck turns pages from keys in or outside the frame, and a new version opens on the same slide', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active#slide-1').waitFor()
+  // The viewer has focus, not the frame: it forwards the arrow key.
+  await viewer.keyboard.press('ArrowRight')
+  await frame.locator('.slide.active#slide-2').waitFor()
+  assert.equal(await frame.locator('#deck-counter').textContent(), '2 / 3')
+  await viewer.waitForFunction(() => location.hash === '#2')
+  await frame.locator('[data-deck="notes"]').click()
+  await frame.locator('[data-deck="prev"]').click()
+  assert.equal(await frame.locator('#deck-notes').textContent(), 'opening words\n')
+  await frame.locator('[data-deck="next"]').click()
+  await frame.locator('[data-deck="next"]').click()
+  await frame.locator('.slide.active#slide-3').waitFor()
+
+  store.update(id, { files: { 'index.slides.md': { content: Buffer.from(DECK.replace('text', 'changed')) } } })
+  await frame.locator('.slide.active#slide-3', { hasText: 'changed' }).waitFor({ timeout: 5000 })
+
+  // The overview shows every slide; picking one goes there.
+  await frame.locator('[data-deck="overview"]').click()
+  await frame.locator('#slide-1').click()
+  await frame.locator('body:not(.overview) .slide.active#slide-1').waitFor()
+  await viewer.close()
+
+  // A link to slide 2 opens on slide 2.
+  const linked = await browser.newPage()
+  await linked.goto(`http://localhost:${APP_PORT}/a/${id}#2`)
+  await linked.frameLocator('#frame').locator('.slide.active#slide-2').waitFor()
+  await linked.close()
+})
+
+test('a slide that cannot fit even with smaller text is reported to the error log', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const long = Array.from({ length: 60 }, (_, i) => `- item ${i}`).join('\n')
+  const { id } = store.publish({ title: 'Overflow', files: { 'index.slides.md': { content: Buffer.from(`## Fine\n---\n## Too much\n${long}`) } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.locator('#errors:not([hidden])').waitFor({ timeout: 5000 })
+  const errors = store.listErrors(id, 1)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0].message, /第 2 頁內容太多/)
+  await viewer.close()
+})
+
+test('a deck fits a phone: one slide in view, controls without horizontal scroll', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Phone deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage({ viewport: { width: 375, height: 740 }, hasTouch: true })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  const page = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  const fit = await page.evaluate(() => {
+    const slide = document.querySelector('.slide.active')!.getBoundingClientRect()
+    const bar = document.querySelector('.deck-bar')!
+    return { slideWidth: slide.width, innerWidth, barOverflow: bar.scrollWidth > bar.clientWidth, docOverflow: document.documentElement.scrollWidth > innerWidth }
+  })
+  assert.ok(fit.slideWidth <= fit.innerWidth && fit.slideWidth > fit.innerWidth * 0.8, JSON.stringify(fit))
+  assert.equal(fit.barOverflow, false)
+  assert.equal(fit.docOverflow, false)
+  await viewer.close()
+})
+
+test('the deck editor previews a draft live, saves it as a version, and stays on the slide', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Edit deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1300, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  await viewer.click('#edit')
+  const source = viewer.locator('#editor-source')
+  await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('## Three'))
+  // Typing on slide three's source shows slide three with the draft, before anything is saved.
+  await source.evaluate((el: HTMLTextAreaElement) => {
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  })
+  await viewer.keyboard.type(' draft-words')
+  await frame.locator('.slide.active#slide-3', { hasText: 'draft-words' }).waitFor({ timeout: 5000 })
+  assert.equal(store.requireSummary(id).currentVersion, 1)
+
+  await viewer.keyboard.press('ControlOrMeta+s')
+  await viewer.locator('#editor-status', { hasText: '已存成 v2' }).waitFor({ timeout: 5000 })
+  assert.match(store.blobs.read(store.requireVersion(id, 2).files['index.slides.md'].sha256).toString(), /text draft-words$/)
+  await viewer.waitForFunction(() => document.querySelector<HTMLIFrameElement>('#frame')!.src.includes('/v/2/'))
+  await frame.locator('.slide.active#slide-3', { hasText: 'draft-words' }).waitFor({ timeout: 5000 })
+
+  // Someone else saves while this viewer has an unsaved draft: the draft stays, saving reports the conflict.
+  await viewer.keyboard.type(' mine')
+  store.update(id, { files: { 'index.slides.md': { content: Buffer.from(DECK + '\n---\n## Theirs') } } })
+  await viewer.locator('#toast', { hasText: '還沒儲存' }).waitFor({ timeout: 5000 })
+  assert.match(await source.inputValue(), /draft-words mine$/)
+  viewer.once('dialog', (dialog) => dialog.dismiss())
+  await viewer.click('#save-deck')
+  await viewer.locator('#editor-status', { hasText: '別人已存了新版本' }).waitFor({ timeout: 5000 })
+  assert.equal(store.requireSummary(id).currentVersion, 3)
+  await viewer.close()
+})
+
+test('no other origin can save a deck through the viewer route', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Guarded deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const page = await browser.newPage()
+  await page.goto(`http://127.0.0.1:${CONTENT_PORT}/healthz`)
+  const outcome = await page.evaluate(async (url) => {
+    try {
+      const response = await fetch(url, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-artifact-client': 'viewer' },
+        body: JSON.stringify({ markdown: '# pwned', baseVersion: 1 })
+      })
+      return `status ${response.status}`
+    } catch (error) {
+      return `blocked: ${(error as Error).name}`
+    }
+  }, `http://localhost:${APP_PORT}/api/artifacts/${id}/slides`)
+  assert.match(outcome, /^blocked/)
+  assert.equal(store.requireSummary(id).currentVersion, 1)
+  await page.close()
+})
+
+test('on a phone the deck editor sits under the slide, both in view, without horizontal scroll', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Phone edit', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage({ viewport: { width: 375, height: 740 } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('.slide.active').waitFor()
+  await viewer.click('#edit')
+  await viewer.locator('#editor-source').waitFor()
+  const layout = await viewer.evaluate(() => {
+    const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
+    return { frame: box('#frame'), editor: box('#editor'), overflow: document.documentElement.scrollWidth > innerWidth, height: innerHeight }
+  })
+  assert.equal(layout.overflow, false)
+  assert.ok(layout.frame.height > 150 && layout.editor.top >= layout.frame.bottom - 1, JSON.stringify(layout))
+  assert.ok(layout.editor.bottom <= layout.height + 1 && layout.editor.height > 200, JSON.stringify(layout))
+  await viewer.close()
+})
+
+test('a deck prints one slide per page, and the toolbar offers it as .pptx', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Print deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage({ viewport: { width: 1200, height: 800 } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  const page = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  // The PDF button prints from inside the sandbox (allowed by allow-modals).
+  await page.evaluate(() => { (window as unknown as { print: () => void }).print = () => document.body.setAttribute('data-printed', '1') })
+  await frame.locator('[data-deck="print"]').click()
+  await frame.locator('body[data-printed="1"]').waitFor()
+  await viewer.emulateMedia({ media: 'print' })
+  const printed = await page.evaluate(() =>
+    [...document.querySelectorAll('.slide')].map((slide) => {
+      const style = getComputedStyle(slide)
+      return { visible: style.visibility === 'visible', breaks: style.breakAfter === 'page' }
+    })
+  )
+  assert.deepEqual(printed, [1, 2, 3].map(() => ({ visible: true, breaks: true })))
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.deck-bar')!).display), 'none')
+  await viewer.emulateMedia({ media: 'screen' })
+
+  const link = viewer.locator('#export-pptx')
+  assert.equal(await link.isVisible(), true)
+  const [download] = await Promise.all([viewer.waitForEvent('download'), link.click()])
+  assert.equal(download.suggestedFilename(), 'Print deck.pptx')
+  await viewer.close()
+})
+
+test('the editor counts slides like the server, and text typed while a save is on its way stays unsaved', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Editor edges', files: { 'index.slides.md': { content: Buffer.from('# A\n---\n???\n---\n## C\nlast') } } })
+  const viewer = await browser.newPage({ viewport: { width: 1300, height: 800 } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  assert.equal(await frame.locator('#deck-counter').textContent(), '1 / 2')
+  await viewer.click('#edit')
+  const source = viewer.locator('#editor-source')
+  await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('last'))
+  // The cursor in "## C" (the server's slide 2, after a notes-only chunk it drops) shows slide 2.
+  await source.evaluate((el: HTMLTextAreaElement) => { el.focus(); el.setSelectionRange(el.value.length, el.value.length) })
+  await viewer.keyboard.press('End')
+  await frame.locator('.slide.active#slide-2').waitFor({ timeout: 3000 })
+
+  // Hold the save on the wire, type meanwhile: the new text is not counted as saved.
+  let release!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  await viewer.route('**/slides', async (route) => {
+    await held
+    await route.continue()
+  })
+  await viewer.keyboard.type(' one')
+  await viewer.keyboard.press('ControlOrMeta+s')
+  await viewer.locator('#editor-status', { hasText: '儲存中' }).waitFor()
+  await viewer.keyboard.type(' two')
+  await viewer.keyboard.press('ControlOrMeta+s')
+  release()
+  await viewer.locator('#editor-status', { hasText: '未儲存' }).waitFor({ timeout: 5000 })
+  assert.equal(store.requireSummary(id).currentVersion, 2)
+  assert.match(store.blobs.read(store.requireVersion(id, 2).files['index.slides.md'].sha256).toString(), /last one$/)
+  assert.equal(await viewer.locator('#save-deck').isEnabled(), true)
+  await viewer.unroute('**/slides')
+  await viewer.click('#save-deck')
+  await viewer.locator('#editor-status', { hasText: '已存成 v3' }).waitFor({ timeout: 5000 })
+  await viewer.close()
+})
+
+test('the editor never pairs old text with a newer base: typing during a reload, a failed reload, a slow open', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const source = (id: string, v: number) => store.blobs.read(store.requireVersion(id, v).files['index.slides.md'].sha256).toString()
+  const scenario = async (name: string, run: (ctx: { viewer: import('playwright-core').Page; id: string }) => Promise<void>) => {
+    const { id } = store.publish({ title: name, files: { 'index.slides.md': { content: Buffer.from('# v1 original\n') } } })
+    const viewer = await browser.newPage({ viewport: { width: 1300, height: 800 } })
+    await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+    await viewer.frameLocator('#frame').locator('.slide.active').waitFor()
+    await run({ viewer, id })
+    // Whatever happened, saving must not silently replace v2.
+    viewer.once('dialog', (dialog) => dialog.dismiss())
+    await viewer.locator('#editor-source').press('End')
+    await viewer.keyboard.type(' edit')
+    await viewer.click('#save-deck')
+    await viewer.waitForTimeout(800)
+    const now = store.requireSummary(id).currentVersion
+    assert.ok(now === 2 || source(id, now).startsWith('# v2'), `${name}: v${now} = ${JSON.stringify(source(id, now))}`)
+    await viewer.close()
+  }
+  const hold = async (viewer: import('playwright-core').Page, version: number, answer: 'continue' | 'fail') => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    let seen!: () => void
+    const requested = new Promise<void>((resolve) => { seen = resolve })
+    await viewer.route((url) => url.pathname.endsWith('/files/index.slides.md') && url.searchParams.get('v') === String(version), async (route) => {
+      seen()
+      await held
+      if (answer === 'fail') await route.fulfill({ status: 503, body: 'down' })
+      else await route.continue()
+    })
+    return { requested, release }
+  }
+
+  await scenario('typing during reload', async ({ viewer, id }) => {
+    await viewer.click('#edit')
+    await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('v1'))
+    const gate = await hold(viewer, 2, 'continue')
+    store.update(id, { files: { 'index.slides.md': { content: Buffer.from('# v2 by publisher\n') } } })
+    await gate.requested
+    await viewer.locator('#editor-source').press('End')
+    await viewer.keyboard.type(' TYPED')
+    gate.release()
+    await viewer.waitForTimeout(500)
+    assert.match(await viewer.locator('#editor-source').inputValue(), /TYPED/)
+  })
+
+  await scenario('failed reload', async ({ viewer, id }) => {
+    await viewer.click('#edit')
+    await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('v1'))
+    const gate = await hold(viewer, 2, 'fail')
+    store.update(id, { files: { 'index.slides.md': { content: Buffer.from('# v2 by publisher\n') } } })
+    await gate.requested
+    gate.release()
+    await viewer.waitForTimeout(500)
+  })
+
+  await scenario('slow open', async ({ viewer, id }) => {
+    const gate = await hold(viewer, 1, 'continue')
+    await viewer.click('#edit')
+    await gate.requested
+    store.update(id, { files: { 'index.slides.md': { content: Buffer.from('# v2 by publisher\n') } } })
+    await viewer.waitForFunction(() => document.querySelector<HTMLSelectElement>('#version')!.options.length === 2)
+    gate.release()
+    await viewer.waitForTimeout(500)
+  })
+})

@@ -52,9 +52,9 @@ const FONT = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang TC"
  * needs no script and follows dark mode. A diagram that does not parse keeps its source on the page,
  * and an inline throw puts the reason in the viewer's error log.
  */
-function diagram(source: string, index: number): string {
+function diagram(source: string, idPrefix: string): string {
   try {
-    const { svg } = renderDiagram(source, { idPrefix: `d${index}-`, fontFamily: FONT, responsive: true })
+    const { svg } = renderDiagram(source, { idPrefix, fontFamily: FONT, responsive: true })
     return `<figure class="diagram">${svg}</figure>\n`
   } catch (error) {
     const message = `Mermaid: ${error instanceof Error ? error.message : String(error)}`
@@ -63,25 +63,32 @@ function diagram(source: string, index: number): string {
   }
 }
 
-export function renderMarkdown(markdown: string, title: string): string {
+export type TocEntry = { depth: number; id: string; html: string }
+
+/**
+ * The Marked setup every rendered page shares: code highlighted, mermaid drawn. Pages get heading anchors
+ * and a table of contents (collected into `toc`); slides do not. Diagram ids start with `diagramPrefix`,
+ * so several renders can share one document.
+ */
+export function markdownParser(options: { anchors: boolean; toc?: TocEntry[]; diagramPrefix?: string }): Marked {
   const slugs = new Map<string, number>()
-  const toc: { depth: number; id: string; html: string }[] = []
   let diagrams = 0
-  const marked = new Marked({
+  return new Marked({
     gfm: true,
     renderer: {
       heading({ tokens, depth, text }: Tokens.Heading) {
         const html = this.parser.parseInline(tokens)
+        if (!options.anchors) return `<h${depth}>${html}</h${depth}>\n`
         const base = slugify(text.replace(/<[^>]*>/g, '')) || 'section'
         const seen = slugs.get(base) ?? 0
         slugs.set(base, seen + 1)
         const id = seen === 0 ? base : `${base}-${seen}`
-        if (depth === 2 || depth === 3) toc.push({ depth, id, html })
+        if (depth === 2 || depth === 3) options.toc?.push({ depth, id, html })
         return `<h${depth} id="${escapeHtml(id)}"><a class="anchor" href="#${escapeHtml(id)}" aria-hidden="true" tabindex="-1">#</a>${html}</h${depth}>\n`
       },
       code({ text, lang }: Tokens.Code) {
         const language = (lang ?? '').trim().split(/\s+/)[0].toLowerCase()
-        if (language === 'mermaid') return diagram(text, diagrams++)
+        if (language === 'mermaid') return diagram(text, `${options.diagramPrefix ?? ''}d${diagrams++}-`)
         if (language && hljs.getLanguage(language)) {
           const highlighted = hljs.highlight(text, { language, ignoreIllegals: true }).value
           return `<pre><code class="hljs language-${escapeHtml(language)}">${highlighted}\n</code></pre>\n`
@@ -90,6 +97,11 @@ export function renderMarkdown(markdown: string, title: string): string {
       }
     }
   })
+}
+
+export function renderMarkdown(markdown: string, title: string): string {
+  const toc: TocEntry[] = []
+  const marked = markdownParser({ anchors: true, toc })
   const body = marked.parse(markdown, { async: false })
   const list = `<ol>${toc
     .map((entry) => `<li class="toc-${entry.depth}"><a href="#${escapeHtml(entry.id)}">${entry.html.replace(/<a\b[^>]*>|<\/a>/g, '')}</a></li>`)

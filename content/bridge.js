@@ -32,6 +32,11 @@
       restoreScroll(message.event.scrollY)
       return
     }
+    // Deck controls (slide decks only); the page is the only one listening, so a plain DOM event will do.
+    if (typeof message.event?.type === 'string' && message.event.type.startsWith('deck-')) {
+      dispatchEvent(new CustomEvent('artifact-deck', { detail: message.event }))
+      return
+    }
     if (message.event) {
       for (const listener of listeners[message.event.type] || []) {
         try { listener(message.event) } catch (error) { console.error(error) }
@@ -53,7 +58,7 @@
   let reportTimer = null
   function reportPlace() {
     reportTimer = null
-    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, scrollY: Math.round(scrollY) } }, APP_ORIGIN)
+    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: location.hash.slice(0, 400), scrollY: Math.round(scrollY) } }, APP_ORIGIN)
   }
   // Content drawn by scripts may not be tall enough yet, so keep trying briefly unless the reader scrolls first.
   function restoreScroll(target) {

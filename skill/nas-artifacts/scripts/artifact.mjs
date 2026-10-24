@@ -29,6 +29,7 @@ const USAGE = `artifact <command> [options]
   check <file|dir>       report what the page sandbox will block or cannot find (publish runs it too)
   errors <id> [--v N]    errors viewers' browsers hit on a version (default: the current one)
   diff <id> [--from N] [--to M]  what a version changed (default: current against the one before)
+  export <id> [--v N] [--out FILE]  save a slide deck as .pptx (default ./<id>.pptx)
   comments <id>          print the viewer comments
       --open             only threads not yet resolved
       --wait [--timeout S]  block until new comments arrive (default 540s; exit 2 on timeout)
@@ -110,6 +111,8 @@ async function api(path, { method = 'GET', json, body, auth = false, raw = false
   }
   return payload
 }
+
+const kb = (bytes) => (bytes < 1024 ? `${bytes} bytes` : `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`)
 
 const isSkipped = (name) => name.startsWith('.') || SKIP_DIRS.has(name)
 
@@ -459,6 +462,7 @@ async function main() {
       from: { type: 'string' },
       to: { type: 'string' },
       resolve: { type: 'boolean' },
+      out: { type: 'string' },
       help: { type: 'boolean', short: 'h' }
     }
   })
@@ -501,6 +505,17 @@ async function main() {
         })
         return [head, ...files].join('\n\n') + (d.files.length ? '' : '\n(no file changes)')
       })
+    }
+    case 'export': {
+      const id = args[0] ?? fail('export needs an id')
+      const query = values.v ? `?v=${enc(values.v)}` : ''
+      const bytes = await api(`/api/artifacts/${enc(id)}/export.pptx${query}`, {
+        raw: true,
+        hints: { not_found: 'this server cannot export decks yet; it needs a newer nas-artifacts image', not_a_deck: 'only slide decks (*.slides.md) export to .pptx' }
+      })
+      const out = resolve(values.out ?? `${id}.pptx`)
+      writeFileSync(out, bytes)
+      return print({ path: out, bytes: bytes.length }, json, (d) => `saved ${d.path} (${kb(d.bytes)})`)
     }
     case 'checkout':
       if (!args[0]) fail('checkout needs an id or viewer URL')
@@ -581,7 +596,6 @@ async function main() {
       const hints = { not_found: 'this server cannot prune yet; it needs a newer nas-artifacts image' }
       const results = []
       for (const id of ids) results.push({ id, ...(await api(`/api/artifacts/${enc(id)}/prune`, { method: 'POST', auth: true, json: { keep }, hints })) })
-      const kb = (bytes) => (bytes < 1024 ? `${bytes} bytes` : `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`)
       return print({ results }, json, (d) =>
         d.results.map((r) => `${r.id}: ${r.removed.length ? `dropped v${r.removed.join(', v')}, freed ${kb(r.freedBytes)}` : 'nothing to drop'}`).join('\n') || 'nothing to drop'
       )

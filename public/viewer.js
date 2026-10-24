@@ -90,9 +90,20 @@ function renderVersions() {
   versionSelect.value = String(version)
 }
 
-// The file and scroll position the page last reported; path null is the entry.
-let place = { path: null, scrollY: 0 }
+// The file, hash and scroll position the page last reported; path null is the entry.
+let place = { path: null, hash: '', scrollY: 0 }
 let pendingScroll = null
+
+// A hash the page or the address bar names: an anchor or a slide number, nothing that could be a URL.
+function validHash(hash) {
+  if (typeof hash !== 'string' || hash.length > 400) return ''
+  try {
+    const decoded = decodeURIComponent(hash)
+    return /^#[\p{L}\p{N}_-]{1,100}$/u.test(decoded) ? decoded : ''
+  } catch {
+    return ''
+  }
+}
 
 function syncUrl() {
   const url = new URL(location.href)
@@ -100,21 +111,23 @@ function syncUrl() {
   else url.searchParams.set('v', String(version))
   if (place.path) url.searchParams.set('path', place.path)
   else url.searchParams.delete('path')
+  url.hash = place.hash
   // Safari throws once a page replaces its URL too often; the address bar is a convenience.
   try { history.replaceState(null, '', url) } catch {}
 }
 
-function show(v, path) {
+function show(v, path, hash = '') {
   version = v
   const row = artifact.versions.find((candidate) => candidate.version === v)
   titleEl.textContent = row?.title || artifact.title
   document.title = titleEl.textContent
-  frame.src = contentUrl(v, path)
+  frame.src = contentUrl(v, path) + hash
   versionSelect.value = String(v)
-  place = { path: path ?? null, scrollY: 0 }
+  place = { path: path ?? null, hash, scrollY: 0 }
   syncUrl()
   loadErrors()
   syncChangesButton()
+  syncEditButton()
 }
 
 // Shown when a kept version older than the one on screen exists to compare against.
@@ -124,11 +137,11 @@ function syncChangesButton() {
 
 // Opens version v on the file the reader is on, scrolled where they were, if that file exists there.
 async function showKeepingPlace(v) {
-  const { path, scrollY } = place
+  const { path, hash, scrollY } = place
   let files = v === artifact.currentVersion ? artifact.files : undefined
   if (path && !files) files = (await api(`?v=${v}`).catch(() => null))?.files
   const keep = !path || (files ? Object.hasOwn(files, path) : false)
-  show(v, keep ? path ?? undefined : undefined)
+  show(v, keep ? path ?? undefined : undefined, keep ? hash : '')
   pendingScroll = keep ? scrollY : null
 }
 
@@ -158,16 +171,42 @@ function onPlaceReport(report) {
   const path = framePath(report.path)
   if (path === undefined || !Number.isFinite(report.scrollY)) return
   const next = path === currentEntry() ? null : path
-  const moved = next !== place.path
-  place = { path: next, scrollY: Math.max(0, report.scrollY) }
-  if (moved) syncUrl()
+  const hash = validHash(report.hash)
+  const moved = next !== place.path || hash !== place.hash
+  place = { path: next, hash, scrollY: Math.max(0, report.scrollY) }
+  if (moved) {
+    syncUrl()
+    syncEditButton()
+  }
 }
+
+// Slide decks: arrow keys pressed outside the frame still turn the page.
+// The editor and the export work on the entry, so they count only while the entry is on show.
+const isDeck = () => place.path === null && /\.slides\.md$/i.test(currentEntry())
+const DECK_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
+document.addEventListener('keydown', (event) => {
+  if (!isDeck() || !DECK_KEYS.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return
+  if (event.target.closest('input, textarea, select, [contenteditable], dialog') || document.querySelector('dialog[open]')) return
+  event.preventDefault()
+  notifyPage({ type: 'deck-key', key: event.key })
+})
 
 fullscreenButton.addEventListener('click', () => {
   frame.requestFullscreen?.().catch(() => toast('無法進入全螢幕'))
 })
 
-versionSelect.addEventListener('change', () => showKeepingPlace(Number(versionSelect.value)))
+versionSelect.addEventListener('change', () => {
+  // The editor works on the latest version; looking at another one closes it.
+  if (!editorPanel.hidden) {
+    if (dirty && !confirm('切換版本會關閉編輯,放棄還沒儲存的修改?')) {
+      versionSelect.value = String(version)
+      return
+    }
+    dirty = false
+    closeEditor()
+  }
+  showKeepingPlace(Number(versionSelect.value))
+})
 
 function versionLabel(v) {
   const label = artifact.versions.find((row) => row.version === v)?.label
@@ -496,7 +535,13 @@ function setCommentsOpen(open) {
   storage.set('artifacts.commentsOpen', open ? '1' : '0')
 }
 
-toggleComments.addEventListener('click', () => setCommentsOpen(commentsPanel.hidden))
+toggleComments.addEventListener('click', () => {
+  if (commentsPanel.hidden && !editorPanel.hidden) {
+    if (dirty) return toast('先儲存或關閉編輯,再開留言')
+    closeEditor()
+  }
+  setCommentsOpen(commentsPanel.hidden)
+})
 document.getElementById('close-comments').addEventListener('click', () => setCommentsOpen(false))
 
 form.addEventListener('submit', async (event) => {
@@ -520,6 +565,203 @@ form.addEventListener('submit', async (event) => {
 bodyInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) form.requestSubmit()
   if (event.key === 'Escape') setReply(null)
+})
+
+// Deck editor: the source on the left; every pause in typing renders the slides on the server and swaps
+// them into the frame, so what is on screen is the deck as it would publish. Saving makes a new version.
+
+const editorPanel = document.getElementById('editor')
+const editButton = document.getElementById('edit')
+const sourceInput = document.getElementById('editor-source')
+const editorStatus = document.getElementById('editor-status')
+const saveButton = document.getElementById('save-deck')
+const viewerEl = document.querySelector('.viewer')
+// The version the draft started from, the version this viewer saved last, and whether the draft differs.
+let editBase = null
+let savedVersion = null
+let dirty = false
+// The save on its way: a version event can arrive before the PUT answers, so it waits for this first.
+let saveInFlight = null
+// Text and base change together, only from a load that finished in the same editor session with no typing
+// meanwhile; anything else would pair old text with a newer base and let a save overwrite that version.
+let editSession = 0
+let editRevision = 0
+let cursorSlide = -1
+let previewSeq = 0
+let previewTimer
+
+const canEdit = () => isDeck() && artifact.capabilities.length === 0
+const exportLink = document.getElementById('export-pptx')
+function syncEditButton() {
+  editButton.hidden = !canEdit()
+  exportLink.hidden = !isDeck()
+  exportLink.href = `/api/artifacts/${id}/export.pptx?v=${version}`
+}
+
+function setEditorStatus(text, isDirty = dirty) {
+  editorStatus.textContent = text
+  editorStatus.classList.toggle('dirty', isDirty)
+  saveButton.disabled = !isDirty
+}
+
+// Where each slide's source starts, splitting the way the server does: --- lines outside fenced code.
+function slideStarts(text) {
+  const chunks = [{ start: 0, text: '' }]
+  let fence = null
+  let at = 0
+  for (const line of text.split('\n')) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null
+    } else if (marker) {
+      fence = marker
+    } else if (/^---\s*$/.test(line)) {
+      chunks.push({ start: at + line.length + 1, text: '' })
+      at += line.length + 1
+      continue
+    }
+    chunks[chunks.length - 1].text += `${line}\n`
+    at += line.length + 1
+  }
+  const kept = chunks.filter((chunk) => chunk.text.replace(/^\?\?\?\s*$/m, '').trim())
+  return (kept.length ? kept : chunks.slice(0, 1)).map((chunk) => chunk.start)
+}
+
+function slideIndexAt(text, offset) {
+  let index = 0
+  slideStarts(text).forEach((start, i) => { if (start <= offset) index = i })
+  return index
+}
+
+// Puts the cursor at the start of the slide on show and scrolls the source there.
+function revealSlideSource(index) {
+  const start = slideStarts(sourceInput.value)[index] ?? 0
+  sourceInput.focus({ preventScroll: true })
+  sourceInput.setSelectionRange(start, start)
+  const line = sourceInput.value.slice(0, start).split('\n').length - 1
+  sourceInput.scrollTop = Math.max(0, (line - 1) * parseFloat(getComputedStyle(sourceInput).lineHeight))
+  cursorSlide = index
+}
+
+async function loadSource(v) {
+  const response = await fetch(`/api/artifacts/${id}/files/${artifact.entry.split('/').map(encodeURIComponent).join('/')}?v=${v}`)
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.text()
+}
+
+async function openEditor() {
+  if (version !== artifact.currentVersion) {
+    await showKeepingPlace(artifact.currentVersion)
+  }
+  const base = artifact.currentVersion
+  const session = ++editSession
+  let text
+  try {
+    text = await loadSource(base)
+  } catch (error) {
+    toast(`讀不到簡報原始碼:${error.message}`)
+    return
+  }
+  if (session !== editSession) return
+  setCommentsOpen(false)
+  // The text is version `base`, even if a newer one arrived meanwhile: saving then reports the conflict.
+  editBase = base
+  dirty = false
+  sourceInput.value = text
+  editorPanel.hidden = false
+  viewerEl.classList.add('editing')
+  editButton.setAttribute('aria-expanded', 'true')
+  setEditorStatus(`根據 v${editBase}`)
+  revealSlideSource(Math.max(0, Number(/^#(\d+)$/.exec(place.hash)?.[1] ?? 1) - 1))
+}
+
+function closeEditor() {
+  if (dirty && !confirm('放棄還沒儲存的修改?')) return
+  editorPanel.hidden = true
+  viewerEl.classList.remove('editing')
+  editButton.setAttribute('aria-expanded', 'false')
+  clearTimeout(previewTimer)
+  previewSeq++
+  // The frame may hold a preview of the discarded draft: show the saved deck again.
+  if (dirty) show(version, place.path ?? undefined, place.hash)
+  dirty = false
+  editBase = null
+  editSession++
+}
+
+async function preview() {
+  const seq = ++previewSeq
+  let result
+  try {
+    result = await api('/slides/preview', { method: 'POST', json: { markdown: sourceInput.value } })
+  } catch (error) {
+    if (seq === previewSeq) setEditorStatus(`預覽失敗:${error.message}`)
+    return
+  }
+  if (seq !== previewSeq || editorPanel.hidden) return
+  notifyPage({ type: 'deck-preview', html: result.html, index: slideIndexAt(sourceInput.value, sourceInput.selectionStart) })
+}
+
+sourceInput.addEventListener('input', () => {
+  dirty = true
+  editRevision++
+  if (!saveInFlight) setEditorStatus(`根據 v${editBase} · 未儲存`)
+  clearTimeout(previewTimer)
+  previewTimer = setTimeout(preview, 250)
+})
+
+// Moving the cursor to another slide's source shows that slide.
+function followCursor() {
+  const index = slideIndexAt(sourceInput.value, sourceInput.selectionStart)
+  if (index === cursorSlide) return
+  cursorSlide = index
+  notifyPage({ type: 'deck-go', index })
+}
+sourceInput.addEventListener('keyup', followCursor)
+sourceInput.addEventListener('click', followCursor)
+
+async function saveDeck() {
+  if (!dirty || saveInFlight) return
+  const sent = sourceInput.value
+  setEditorStatus('儲存中…', false)
+  try {
+    saveInFlight = api('/slides', { method: 'PUT', json: { markdown: sent, baseVersion: editBase, author: viewerName() || undefined } })
+    const saved = await saveInFlight
+    savedVersion = saved.currentVersion
+    editBase = saved.currentVersion
+    // Whatever was typed while the save was on its way is still unsaved.
+    dirty = sourceInput.value !== sent
+    setEditorStatus(dirty ? `根據 v${editBase} · 未儲存` : `已存成 v${saved.currentVersion}`)
+  } catch (error) {
+    dirty = true
+    if (error.code === 'version_conflict') {
+      setEditorStatus('別人已存了新版本', true)
+      if (confirm('在你編輯時,別人已存了新版本。\n\n確定:放棄你的修改,載入最新版。\n取消:保留你的草稿(可先複製起來)。')) {
+        dirty = false
+        closeEditor()
+        await refreshArtifact()
+        await showKeepingPlace(artifact.currentVersion)
+        await openEditor()
+      }
+    } else {
+      setEditorStatus(`儲存失敗:${error.message}`, true)
+    }
+  } finally {
+    saveInFlight = null
+  }
+}
+
+editButton.addEventListener('click', () => (editorPanel.hidden ? openEditor() : closeEditor()))
+document.getElementById('close-editor').addEventListener('click', closeEditor)
+saveButton.addEventListener('click', saveDeck)
+sourceInput.addEventListener('keydown', (event) => {
+  if (event.key === 's' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    saveDeck()
+  }
+})
+addEventListener('beforeunload', (event) => {
+  if (dirty) event.preventDefault()
 })
 
 // Toolbar
@@ -579,7 +821,7 @@ async function resync() {
     lastSync = 0
     return
   }
-  if (artifact.currentVersion !== before && wasLatest) {
+  if (artifact.currentVersion !== before && wasLatest && editorPanel.hidden) {
     await showKeepingPlace(artifact.currentVersion)
     toast(`已更新到 ${versionLabel(artifact.currentVersion)}`)
   } else {
@@ -604,8 +846,37 @@ function connectEvents() {
     const change = JSON.parse(event.data)
     if (change.kind === 'version') {
       const wasLatest = version === artifact.currentVersion
+      await saveInFlight?.catch(() => {})
       await refreshArtifact()
-      if (wasLatest) {
+      if (change.version === savedVersion) {
+        // This viewer's own save: show it quietly, on the same slide.
+        await showKeepingPlace(change.version)
+      } else if (!editorPanel.hidden) {
+        if (dirty) {
+          // Keep the draft and its preview; saving it will report the conflict.
+          toast(`有人存了新版本 ${versionLabel(change.version)},你的修改還沒儲存`)
+        } else {
+          const session = editSession
+          const revision = editRevision
+          await showKeepingPlace(change.version)
+          let text
+          try {
+            text = await loadSource(change.version)
+          } catch {
+            // Keep the old base: a save from this text then reports the conflict instead of overwriting.
+            toast(`有人存了新版本 ${versionLabel(change.version)},但讀不到它的原始碼;存檔時會提示衝突`)
+            return
+          }
+          if (session !== editSession || revision !== editRevision || dirty) {
+            toast(`有人存了新版本 ${versionLabel(change.version)},你的修改還沒儲存`)
+            return
+          }
+          editBase = change.version
+          sourceInput.value = text
+          setEditorStatus(`根據 v${editBase}`)
+          toast(`已載入別人存的 ${versionLabel(change.version)}`)
+        }
+      } else if (wasLatest) {
         await showKeepingPlace(change.version)
         toast(`已更新到 ${versionLabel(change.version)}`, { label: '看變更', run: openDiff })
       } else {
@@ -639,6 +910,6 @@ if (storage.get('artifacts.commentsOpen') === '1') {
   commentsPanel.hidden = false
   toggleComments.setAttribute('aria-expanded', 'true')
 }
-show(version, data.path)
+show(version, data.path, validHash(location.hash))
 loadComments().catch(() => {})
 connectEvents()

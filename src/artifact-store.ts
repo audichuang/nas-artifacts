@@ -270,7 +270,7 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
     }
     return entry
   }
-  for (const candidate of ['index.html', 'index.md', 'README.md']) {
+  for (const candidate of ['index.html', 'index.md', 'index.slides.md', 'README.md']) {
     if (files[candidate]) {
       return candidate
     }
