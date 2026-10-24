@@ -369,7 +369,12 @@ export class ArtifactStore {
     for (const row of this.db
       .prepare('SELECT a.id, a.current_version FROM artifacts a LEFT JOIN search_text t ON t.artifact_id = a.id WHERE t.version IS NOT a.current_version')
       .all()) {
-      this.indexText(String(row.id), Number(row.current_version))
+      // Search is a convenience: an artifact it cannot read stays unsearchable rather than stopping the server.
+      try {
+        this.indexText(String(row.id), Number(row.current_version))
+      } catch (error) {
+        console.error(`search: cannot index ${String(row.id)}:`, error instanceof Error ? error.message : error)
+      }
     }
   }
 
