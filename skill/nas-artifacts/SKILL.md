@@ -7,6 +7,14 @@ description: Publishes HTML or Markdown pages to the user's self-hosted Artifact
 
 Pages live on the user's NAS and open only from devices on their tailnet, with no sign-in. Every page gets a stable URL; republishing the same path makes a new version at the same URL, and open viewers switch to it live.
 
+## Start from a template
+
+Copy one into a scratch folder, edit it, publish the folder. `references/design.md` covers the rules before you write or restyle a page.
+
+- `templates/report/`: long-form report.
+- `templates/dashboard/`: KPIs, charts and a table. Data lives in `data.js`, so a refresh republishes only that file.
+- `templates/checklist/`: a shared tool on the `db` capability. Publish it with `--cap db`. Use it as the pattern for any live shared page.
+
 ## Publish
 
 ```bash
@@ -14,23 +22,26 @@ A=<this-skill-directory>/scripts/artifact.mjs
 node "$A" publish <file-or-dir> --icon 📊 --description "<one sentence>" [--cap db,uploads] [--label "<what changed>"]
 ```
 
-- A directory publishes every file in it (dotfiles and `node_modules` skipped); the entry is `index.html`, `index.md`, or the only page. Relative links between the files work.
-- The CLI remembers which artifact each local path became, so publishing the same path again **updates** it: files you removed locally are removed from the new version. `--new` forces a separate artifact; `--id` targets a specific one.
-- Write the page into the scratchpad or a project folder, never into a published directory you did not create.
+- A directory publishes every file in it; the entry is `index.html`, `index.md`, or the only page. Relative links between files work.
+- The CLI remembers the version and file hashes for each local path. Republishing that path sends only your changed files, based on the version you last saw. Files you deleted locally are removed remotely.
+- **Conflict:** if someone else published in between, publish exits 1, lists the files changed remotely and uploads nothing. Then run `node "$A" checkout <id> <newdir>`, merge your edits there, and publish from `<newdir>`. `--force` overwrites the remote changes instead; it still sends only your changed files, so use it only when your version should win.
+- **Continuing an artifact made elsewhere** (another machine or agent): `checkout <id|viewer-url> [dir]` first, edit that folder, publish from it. Never publish a fresh copy over an existing artifact.
+- Publishing a path from before the version tracking existed sends one full snapshot and prints a note. That is expected.
 - Done when the command prints the URL; give the user that URL.
 
-Credentials: `ARTIFACTS_TOKEN` env, or `~/.config/nas-artifacts/config.json` (set once with `artifact config --token-stdin`). The token is in the 1Password `Agent` vault, item `nas-artifacts publish token`; pipe it, never print it. Reads (list, get, read, comments) need no token.
+Credentials: `ARTIFACTS_TOKEN`, or `~/.config/nas-artifacts/config.json` (set once with `node "$A" config --token-stdin`). The token lives in the 1Password `Agent` vault, item `nas-artifacts publish token`. Pipe it, never print it. Reads (list, get, read, comments, checkout) need no token.
 
 ## Page contract
 
 The page runs in a sandbox on its own origin:
 
 - **No network.** `fetch`/XHR/WebSocket are blocked, and inside the viewer the page cannot navigate away from its own files. Put data inline, in a published `.js` file that sets a global, or in the `db` capability.
-- **No popups or external links**: `target=_blank` and `window.open` do nothing; show a URL as text if the reader needs it.
-- **Scripts and styles**: inline, published files, or exact-version URLs from `cdnjs.cloudflare.com`, `cdn.jsdelivr.net`, `unpkg.com`, `cdn.tailwindcss.com`, `code.jquery.com`. Fonts: Google Fonts. Images: published files, data URIs, or assets (`artifact asset upload`) — remote image URLs are blocked.
+- **No popups or external links**: `target=_blank` and `window.open` do nothing; show a URL as text.
+- **Scripts and styles**: inline, published files, or exact-version URLs from `cdnjs.cloudflare.com`, `cdn.jsdelivr.net`, `unpkg.com`, `cdn.tailwindcss.com`, `code.jquery.com`. Fonts: Google Fonts. Images: published files, data URIs, or assets (`artifact asset upload`). Remote image URLs are blocked.
 - **No cookies; `localStorage` throws** (the origin is opaque). Shared state goes in `db`.
 - Theme with CSS variables and `prefers-color-scheme`; set an explicit `body` background; make it work at phone width.
-- Markdown entries are rendered with GitHub-like styling; raw HTML inside them runs under the same sandbox.
+- Markdown entries render with GitHub-like styling; raw HTML inside them runs under the same sandbox.
+- **Opening a page's content URL directly** sends the reader back into the viewer. `window.artifact` is missing or rejects outside the viewer, so catch that and tell the reader to open the page from the Artifacts viewer.
 
 ## Page capabilities
 
@@ -51,12 +62,15 @@ const { url } = await artifact.uploads.put(fileFromInput)
 await artifact.uploads.list()
 ```
 
-Collection and doc ids: 1-128 chars of `A-Za-z0-9_.:-`. Documents up to 256 KB. Render from `db` on load and on `subscribe`, not from a value cached in the page.
+- Collection and doc ids: 1-128 chars of `A-Za-z0-9_.:-`. Documents up to 256 KB.
+- Render from `db` on load and on every `subscribe` event, not from a value cached in the page.
+- An event with no `collection` means a full re-read is needed. The checklist template handles this by re-reading everything on any event. Do the same.
+- From the shell, `node "$A" db list|get|set|update|delete|query` reads and writes the same data with the token (no capability needed), for seeding or reading back what people entered.
 
-From the shell, `artifact db list|get|set|update|delete|query <id> <collection> …` reads and writes the same data with the token (no capability needed), for seeding or reading back what people entered.
+## Revising and feedback
 
-## Feedback
-
-Every artifact has viewer comments. `node "$A" comments <id>` prints them with version numbers; read them before revising a page the user says has feedback.
+- Re-read the whole file before revising a page, never from memory or an earlier copy.
+- Read the viewer comments (`node "$A" comments <id>`) before revising a page the user says has feedback.
+- Viewer deep link to one file: `/a/<id>?v=<n>&path=<file>`. Use it when pointing the user at a specific page of a multi-file artifact.
 
 `node "$A" --help` lists every command.
