@@ -73,8 +73,10 @@ export function createContentServer(store: ArtifactStore, config: Config): Hono 
 
   const serveFile = (read: () => Buffer, entry: FileEntry, path: string, title: string, immutable: boolean, ifNoneMatch: string | undefined) => {
     const etag = etagFor(entry, path, title)
+    // Rendered pages embed the bridge, which changes across releases, so they revalidate (a cheap 304).
+    const rendered = isMarkdownPath(path) || isHtmlPath(path)
     const headers: Record<string, string> = {
-      'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'Cache-Control': immutable && !rendered ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag: etag
     }
     if (!isMarkdownPath(path) && !isHtmlPath(path) && !isServableType(entry.type)) {
