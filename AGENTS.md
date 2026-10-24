@@ -8,7 +8,7 @@ Pages agents publish for one person to read on his own devices over Tailscale: n
 - Content responses carry the CSP built in `src/content-server.ts`: `sandbox` **without** `allow-same-origin` and without popups, `connect-src 'none'`, and own-file sources scoped to `<content>/a/<id>/` (plus the `/_/` bridge and markdown CSS). New content routes go through that middleware; widening any of these needs a red-first test showing why it stays safe.
 - The viewer sends `frame-src <content>/a/<id>/` so a framed page cannot navigate anywhere else. Rendered pages are `no-cache` so a bridge or CSP change reaches pages browsers already hold — keep it that way.
 - Page capabilities reach the API only through the viewer's `postMessage` bridge (`public/viewer.js` ↔ `content/bridge.js`). The server re-checks the declared capability on every viewer call; viewer mutations need the `x-artifact-client: viewer` header, which forces a CORS preflight no other origin passes. Publish, update, delete and asset delete need the Bearer token.
-- Anyone on the tailnet may view, comment, pin and use declared capabilities without a token. That is intended, not a gap.
+- Anyone on the tailnet may view, comment, pin, report page errors and use declared capabilities without a token. That is intended, not a gap. The error log is the one viewer write that needs no declared capability, so it stays bounded (100 rows of 500-char fields per version, de-duplicated) and diagnostic only: nothing reads it back into a page.
 
 ## Storage invariants
 

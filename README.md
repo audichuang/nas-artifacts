@@ -20,7 +20,7 @@
 | 誰 | 能做什麼 |
 |---|---|
 | tailnet 外 | 什麼都連不到(DNS 指向 Tailscale 100.x 位址) |
-| tailnet 內的瀏覽器 | 看所有頁面、留言、釘選、使用頁面宣告過的能力 |
+| tailnet 內的瀏覽器 | 看所有頁面、留言、釘選、回報頁面錯誤(每版最多 100 筆)、使用頁面宣告過的能力 |
 | 持有發佈 token | 發佈、更新、刪除、直接讀寫任何 artifact 的 db |
 
 頁面檔案由**另一個 origin** 提供,並帶 `Content-Security-Policy: sandbox allow-scripts …`(沒有 `allow-same-origin`、沒有 popups):頁面是 opaque origin,碰不到圖庫/API 的 origin;`connect-src 'none'` 擋掉 fetch/XHR/WebSocket;資源來源只限它自己的 `/a/<id>/` 路徑,讀不到別的 artifact。檢視頁再送 `frame-src <content>/a/<id>/`,所以框在檢視頁裡的頁面也無法把自己導向外站或別的 artifact。頁面能力只能經檢視頁的 `postMessage` 橋接,由檢視頁依宣告的能力代為呼叫 API。允許的外部腳本 CDN 與 Claude Artifacts 相同(cdnjs、jsdelivr、unpkg、tailwind、jquery)。

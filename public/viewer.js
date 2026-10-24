@@ -284,6 +284,10 @@ function onErrorReport(report) {
 
 async function loadErrors() {
   const shown = version
+  if (pageErrors.some((error) => error.version !== shown)) {
+    pageErrors = []
+    renderErrors()
+  }
   let errors
   try {
     errors = (await api(`/errors?v=${shown}`)).errors
