@@ -15,8 +15,16 @@ export class BlobStore {
     return join(this.root, sha256.slice(0, 2), sha256.slice(2))
   }
 
+  static hash(body: Buffer): string {
+    return createHash('sha256').update(body).digest('hex')
+  }
+
+  has(sha256: string): boolean {
+    return existsSync(this.path(sha256))
+  }
+
   put(body: Buffer): string {
-    const sha256 = createHash('sha256').update(body).digest('hex')
+    const sha256 = BlobStore.hash(body)
     const target = this.path(sha256)
     if (!existsSync(target)) {
       mkdirSync(join(this.root, sha256.slice(0, 2)), { recursive: true })

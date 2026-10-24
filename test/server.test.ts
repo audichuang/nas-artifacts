@@ -119,6 +119,61 @@ describe('publishing', () => {
   })
 })
 
+describe('store hardening', () => {
+  const unique = (label: string) => `${label}-${Math.random()}`
+
+  test('a rejected publish or update leaves no blob behind', async () => {
+    const before = store.blobs.list().length
+    const badEntry = await call('/api/artifacts', { method: 'POST', token: TOKEN, json: { title: 'T', entry: 'missing.html', files: { 'index.html': { content: unique('entry') } } } })
+    assert.equal(badEntry.status, 400)
+    const files = Object.fromEntries(Array.from({ length: 512 }, (_, i) => [`f${i}.txt`, { content: unique('many') }]))
+    const tooMany = await call('/api/artifacts', { method: 'POST', token: TOKEN, json: { title: 'T', files: { 'index.html': { content: 'x' }, ...files } } })
+    assert.equal(tooMany.status, 413)
+    assert.equal(store.blobs.list().length, before)
+
+    const { id } = await publish({ 'index.html': unique('base') })
+    const kept = store.blobs.list().length
+    const rejected = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { entry: 'nope.html', files: { 'extra.txt': { content: unique('upd') } } } })
+    assert.equal(rejected.status, 400)
+    assert.equal(store.blobs.list().length, kept)
+  })
+
+  test('non-integer limit and offset are clamped, not a server error', async () => {
+    for (const query of ['limit=abc', 'limit=1.5', 'offset=abc', 'offset=1.5', 'offset=1e30', 'limit=Infinity']) {
+      assert.equal((await call(`/api/artifacts?${query}`)).status, 200, query)
+    }
+    const { id } = await publish({ 'index.html': 'x' }, { capabilities: ['db'] })
+    await call(`/api/artifacts/${id}/db/c/d`, { method: 'PUT', viewer: true, json: { data: 1 } })
+    assert.equal((await call(`/api/artifacts/${id}/db/c?limit=1.5`, { viewer: true })).status, 200)
+    assert.equal((await call(`/api/artifacts/${id}/db/c?limit=abc`, { viewer: true })).status, 200)
+    const query = await call(`/api/artifacts/${id}/db/c/_query`, { method: 'POST', viewer: true, json: { limit: 1.5 } })
+    assert.equal(query.status, 200)
+  })
+
+  test('a malformed file path or a missing static file is a 404', async () => {
+    const { id } = await publish({ 'index.html': 'x' })
+    const bad = await call(`/api/artifacts/${id}/files/%E0%A4%A`)
+    assert.equal(bad.status, 404)
+    assert.equal(((await bad.json()) as { error: { code: string } }).error.code, 'file_not_found')
+    assert.equal((await call('/static/missing.js')).status, 404)
+  })
+
+  test('deleting an asset keeps blobs other artifacts or versions still reference', async () => {
+    const shared = unique('asset-shared')
+    const keep = await publish({ 'index.html': shared })
+    const other = await publish({ 'index.html': 'x' })
+    const solo = unique('asset-solo')
+    const sharedAsset = store.addAsset(other.id, 'a.txt', Buffer.from(shared), 'publisher')
+    const soloAsset = store.addAsset(other.id, 'b.txt', Buffer.from(solo), 'publisher')
+    const count = store.blobs.list().length
+    store.deleteAsset(other.id, sharedAsset.id)
+    assert.equal(store.blobs.list().length, count)
+    store.deleteAsset(other.id, soloAsset.id)
+    assert.equal(store.blobs.list().length, count - 1)
+    assert.equal((await content.request(`http://content.test/a/${keep.id}/v/1/`)).status, 200)
+  })
+})
+
 describe('content origin', () => {
   test('pages are sandboxed, framed only by the app, and get the bridge', async () => {
     const { id } = await publish({ 'index.html': '<html><head><title>x</title></head><body>hi</body></html>' })
