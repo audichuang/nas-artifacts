@@ -272,11 +272,14 @@ async function loadComments() {
 
 showResolved.addEventListener('change', renderComments)
 
-toggleComments.addEventListener('click', () => {
-  commentsPanel.hidden = !commentsPanel.hidden
-  toggleComments.setAttribute('aria-expanded', String(!commentsPanel.hidden))
-  storage.set('artifacts.commentsOpen', commentsPanel.hidden ? '0' : '1')
-})
+function setCommentsOpen(open) {
+  commentsPanel.hidden = !open
+  toggleComments.setAttribute('aria-expanded', String(open))
+  storage.set('artifacts.commentsOpen', open ? '1' : '0')
+}
+
+toggleComments.addEventListener('click', () => setCommentsOpen(commentsPanel.hidden))
+document.getElementById('close-comments').addEventListener('click', () => setCommentsOpen(false))
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault()
@@ -360,7 +363,8 @@ async function resync() {
   if (artifact.currentVersion !== before && wasLatest) {
     show(artifact.currentVersion)
     toast(`已更新到 v${artifact.currentVersion}`)
-  } else if (artifact.currentVersion === before) {
+  } else {
+    // A retained frame keeps its stale db data unless told; a reloaded one re-reads on load.
     notifyPage({ type: 'db', resync: true })
   }
 }

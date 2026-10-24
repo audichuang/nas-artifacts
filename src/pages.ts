@@ -73,7 +73,10 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
   <aside id="comments" class="comments" hidden>
     <div class="comments-head">
       <h2>留言</h2>
-      <label class="muted small"><input id="show-resolved" type="checkbox"> 顯示已解決</label>
+      <div class="comments-head-actions">
+        <label class="muted small"><input id="show-resolved" type="checkbox"> 顯示已解決</label>
+        <button id="close-comments" class="icon-button" type="button" aria-label="關閉留言" title="關閉留言">×</button>
+      </div>
     </div>
     <ol id="threads" class="threads"></ol>
     <form id="comment-form" class="comment-form">

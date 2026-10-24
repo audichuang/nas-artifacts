@@ -15,12 +15,13 @@ const SCRIPT_HOSTS = 'https://cdnjs.cloudflare.com https://cdn.jsdelivr.net http
  * this host, and no same-origin access to the app origin's API. connect-src 'none' keeps pages
  * from sending their data anywhere; page capabilities go through the viewer's postMessage bridge.
  * Own-file sources are scoped to the artifact's path so one artifact cannot load another's files.
+ * A top-level navigation has no frame-src to confine it, so it gets no allow-scripts.
  */
-export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, artifactId?: string): string {
+export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, artifactId?: string, topLevel = false): string {
   const own = artifactId ? `${contentOrigin}/a/${artifactId}/` : ''
   const sources = (...list: string[]) => list.filter(Boolean).join(' ')
   return [
-    'sandbox allow-scripts allow-forms allow-modals allow-downloads',
+    `sandbox ${topLevel ? '' : 'allow-scripts '}allow-forms allow-modals allow-downloads`,
     "default-src 'none'",
     `script-src ${sources(own, `${contentOrigin}${BRIDGE_PATH}`)} 'unsafe-inline' 'unsafe-eval' blob: ${SCRIPT_HOSTS}`,
     `style-src ${sources(own, `${contentOrigin}${MARKDOWN_CSS_PATH}`)} 'unsafe-inline' https://fonts.googleapis.com ${SCRIPT_HOSTS}`,
@@ -47,7 +48,9 @@ export function createContentServer(store: ArtifactStore, config: Config): Hono 
   app.use('*', async (c, next) => {
     await next()
     const id = /^\/a\/([A-Za-z0-9_-]+)\//.exec(new URL(c.req.url).pathname)?.[1]
-    c.header('Content-Security-Policy', contentSecurityPolicy(config.appOrigin, config.contentOrigin, id))
+    const topLevel = c.req.header('sec-fetch-dest') === 'document'
+    c.header('Content-Security-Policy', contentSecurityPolicy(config.appOrigin, config.contentOrigin, id, topLevel))
+    c.header('Vary', 'Sec-Fetch-Dest', { append: true })
     c.header('X-Content-Type-Options', 'nosniff')
     c.header('Referrer-Policy', 'no-referrer')
   })
