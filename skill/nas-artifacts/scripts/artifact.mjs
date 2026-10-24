@@ -2,7 +2,7 @@
 // artifact — publish and manage pages on a nas-artifacts server. Zero dependencies; Node 20+.
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -26,13 +26,17 @@ const USAGE = `artifact <command> [options]
   get <id>               metadata and version history
   read <id> [path] [--v N]          print a published file (default: the entry)
   comments <id>          print the viewer comments
+      --open             only threads not yet resolved
+      --wait [--timeout S]  block until new comments arrive (default 540s; exit 2 on timeout)
+  comment reply <id> <commentId> <text> [--resolve] [--author NAME]
+  comment resolve|reopen <id> <commentId>
   delete <id> --yes      permanently delete
   db list <id> <collection> [--limit N]
   db get|delete <id> <collection> <docId>
   db set|update <id> <collection> <docId> <json>
   db query <id> <collection> <json-where>
   asset upload <id> <file> | asset list <id>
-  config [--url URL] [--token-stdin]  save server URL / token to ${CONFIG_FILE}
+  config [--url URL] [--token-stdin] [--author NAME]  save server URL / token / comment author to ${CONFIG_FILE}
 
 Common: --json for machine output. Env: ARTIFACTS_URL, ARTIFACTS_TOKEN.`
 
@@ -71,7 +75,7 @@ function settings() {
   }
 }
 
-async function api(path, { method = 'GET', json, body, auth = false, raw = false, headers = {}, allowNotFound = false, allowConflict = false } = {}) {
+async function api(path, { method = 'GET', json, body, auth = false, raw = false, headers = {}, allowNotFound = false, allowConflict = false, hints = {} } = {}) {
   const { url, token } = settings()
   if (auth && !token) {
     fail(`no token: set ARTIFACTS_TOKEN or run "artifact config --token-stdin".`)
@@ -95,6 +99,7 @@ async function api(path, { method = 'GET', json, body, auth = false, raw = false
   if (!response.ok) {
     if (allowNotFound && response.status === 404 && payload?.error?.code === 'artifact_not_found') return null
     if (allowConflict && response.status === 409 && payload?.error?.code === 'version_conflict') return { conflict: payload.error }
+    if (Object.hasOwn(hints, payload?.error?.code)) fail(hints[payload.error.code])
     fail(`${method} ${path} → ${response.status} ${payload?.error?.code ?? ''}: ${payload?.error?.message ?? response.statusText}`)
   }
   return payload
@@ -236,6 +241,68 @@ async function checkout(target, dirArg, values) {
   print({ id: detail.id, version: detail.currentVersion, dir, files: Object.keys(detail.files) }, values.json, (r) => `checked out ${r.id} v${r.version} (${r.files.length} files) into ${r.dir}`)
 }
 
+function formatComments(comments) {
+  return comments.map((c) => `${c.parentId ? '    ↳ ' : ''}[${c.id}${c.resolved ? ' resolved' : ''}] v${c.version} ${c.author}: ${c.body}`).join('\n') || '(no comments)'
+}
+
+// A thread is open while its root is unresolved; replies follow their root.
+function openThreads(comments) {
+  const open = new Set(comments.filter((c) => !c.parentId && !c.resolved).map((c) => c.id))
+  return comments.filter((c) => open.has(c.parentId ?? c.id))
+}
+
+function commentAuthor(values) {
+  return values.author || readJson(CONFIG_FILE, {}).author || `agent@${hostname().split('.')[0]}`
+}
+
+// Follows the viewer event stream; a (re)connect or a comments change re-reads the list, so nothing is missed.
+async function waitForComments(id, timeoutSeconds) {
+  const path = `/api/artifacts/${encodeURIComponent(id)}`
+  const list = async () => (await api(`${path}/comments`)).comments
+  const seen = new Set((await list()).map((c) => c.id))
+  const deadline = Date.now() + timeoutSeconds * 1000
+  let announced = false
+  while (Date.now() < deadline) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), deadline - Date.now())
+    let found = null
+    try {
+      const response = await fetch(`${settings().url}${path}/events`, { signal: controller.signal })
+      if (!response.ok) fail(`GET ${path}/events → ${response.status}`)
+      const decoder = new TextDecoder()
+      let buffer = ''
+      stream: for await (const chunk of response.body) {
+        buffer += decoder.decode(chunk, { stream: true })
+        let end
+        while ((end = buffer.indexOf('\n\n')) !== -1) {
+          const block = buffer.slice(0, end)
+          buffer = buffer.slice(end + 2)
+          if (/"kind":"deleted"/.test(block)) fail(`${id} was deleted`)
+          if (!/^event: ready$/m.test(block) && !/"kind":"comments"/.test(block)) continue
+          if (!announced) {
+            announced = true
+            console.error(`artifact: waiting up to ${timeoutSeconds}s for new comments on ${id}…`)
+          }
+          const fresh = (await list()).filter((c) => !seen.has(c.id))
+          if (fresh.length > 0) {
+            found = fresh
+            break stream
+          }
+        }
+      }
+    } catch {
+      if (controller.signal.aborted) break
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    } finally {
+      clearTimeout(timer)
+      controller.abort()
+    }
+    if (found) return found
+  }
+  console.error(`artifact: no new comments on ${id} within ${timeoutSeconds}s`)
+  process.exit(2)
+}
+
 function parseJsonArg(text, what) {
   try {
     return JSON.parse(text)
@@ -264,6 +331,11 @@ async function main() {
       json: { type: 'boolean' },
       url: { type: 'string' },
       'token-stdin': { type: 'boolean' },
+      open: { type: 'boolean' },
+      wait: { type: 'boolean' },
+      timeout: { type: 'string' },
+      author: { type: 'string' },
+      resolve: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' }
     }
   })
@@ -302,10 +374,41 @@ async function main() {
       return
     }
     case 'comments': {
-      const data = await api(`/api/artifacts/${enc(args[0] ?? fail('comments needs an id'))}/comments`)
-      return print(data, json, (d) =>
-        d.comments.map((c) => `${c.parentId ? '    ↳ ' : ''}[${c.id}${c.resolved ? ' resolved' : ''}] v${c.version} ${c.author}: ${c.body}`).join('\n') || '(no comments)'
-      )
+      const id = args[0] ?? fail('comments needs an id')
+      if (values.wait) {
+        const timeout = Number(values.timeout ?? 540)
+        if (!(timeout > 0)) fail('--timeout is a number of seconds')
+        const fresh = await waitForComments(id, timeout)
+        return print({ comments: fresh }, json, (d) => formatComments(d.comments))
+      }
+      const data = await api(`/api/artifacts/${enc(id)}/comments`)
+      const comments = values.open ? openThreads(data.comments) : data.comments
+      return print({ comments }, json, (d) => formatComments(d.comments))
+    }
+    case 'comment': {
+      const [action, id, commentId, text] = args
+      if (!['reply', 'resolve', 'reopen'].includes(action) || !id || !commentId) fail('comment reply|resolve|reopen <id> <commentId> [text]')
+      const base = `/api/artifacts/${enc(id)}/comments`
+      const setResolved = (rootId, resolved) =>
+        api(`${base}/${enc(rootId)}`, {
+          method: 'PATCH',
+          auth: true,
+          json: { resolved },
+          hints: { comment_not_found: `${rootId} is not a thread root on ${id}; pass the id of the thread's first comment (see "artifact comments ${id}")` }
+        })
+      if (action === 'reply') {
+        if (!text) fail('comment reply needs the reply text')
+        const created = await api(base, {
+          method: 'POST',
+          auth: true,
+          json: { author: commentAuthor(values), body: text, parentId: commentId },
+          hints: { comment_not_found: `no comment ${commentId} on ${id}` }
+        })
+        if (values.resolve) await setResolved(created.parentId, true)
+        return print(created, json, (c) => `replied ${c.id} in thread ${c.parentId}${values.resolve ? ' and resolved it' : ''}`)
+      }
+      await setResolved(commentId, action === 'resolve')
+      return console.log(`${action === 'resolve' ? 'resolved' : 'reopened'} ${commentId}`)
     }
     case 'delete': {
       const id = args[0] ?? fail('delete needs an id')
@@ -348,8 +451,9 @@ async function main() {
       const file = readJson(CONFIG_FILE, {})
       if (values.url) file.url = values.url.replace(/\/+$/, '')
       if (values['token-stdin']) file.token = readFileSync(0, 'utf8').trim()
+      if (values.author) file.author = values.author
       writePrivateJson(CONFIG_FILE, file)
-      return console.log(`url ${file.url ?? DEFAULT_URL} · token ${file.token ? 'saved' : 'not set'}`)
+      return console.log(`url ${file.url ?? DEFAULT_URL} · token ${file.token ? 'saved' : 'not set'} · author ${file.author ?? '(agent@host)'}`)
     }
     default:
       console.log(USAGE)
