@@ -64,7 +64,7 @@ await artifact.uploads.list()
 
 - Collection and doc ids: 1-128 chars of `A-Za-z0-9_.:-`. Documents up to 256 KB.
 - Render from `db` on load and on every `subscribe` event, not from a value cached in the page.
-- An event with no `collection` means a full re-read is needed. The checklist template handles this by re-reading everything on any event. Do the same.
+- After the viewer reconnects (network drop, phone sleep) listeners get `{ type: 'db', resync: true }` with no `collection`: re-read everything. The checklist template handles this by re-reading everything on any event. Do the same.
 - From the shell, `node "$A" db list|get|set|update|delete|query` reads and writes the same data with the token (no capability needed), for seeding or reading back what people entered.
 
 ## Revising and feedback

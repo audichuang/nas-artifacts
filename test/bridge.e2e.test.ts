@@ -196,7 +196,8 @@ refresh()
 
   // Offline emulation alone leaves the open stream half-alive; dropping the sockets is what a sleeping phone looks like to the server.
   await context.setOffline(true)
-  ;(servers[0] as Server).closeAllConnections()
+  const appServer = servers[0]
+  if ('closeAllConnections' in appServer) appServer.closeAllConnections()
   store.setDoc(id, 'c', 'main', { n: 7 }, false)
   await viewer.waitForTimeout(1000)
   await context.setOffline(false)
@@ -215,7 +216,6 @@ test('the viewer bar fits phone widths without horizontal scroll and leaves the 
     await viewer.setViewportSize({ width, height: 700 })
     await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
     await viewer.locator('#title').waitFor({ state: 'attached' })
-    await viewer.screenshot({ path: join('/private/tmp/claude-501/t4-shots', `viewer-${width}.png`) }).catch(() => {})
     const metrics = await viewer.evaluate(() => {
       const el = document.getElementById('title')!
       return { scroll: document.documentElement.scrollWidth, inner: innerWidth, titleWidth: el.getBoundingClientRect().width, clipped: el.scrollWidth > el.clientWidth }
