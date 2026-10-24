@@ -523,3 +523,78 @@ test('a deck fits a phone: one slide in view, controls without horizontal scroll
   assert.equal(fit.docOverflow, false)
   await viewer.close()
 })
+
+test('the deck editor previews a draft live, saves it as a version, and stays on the slide', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Edit deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1300, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  await viewer.click('#edit')
+  const source = viewer.locator('#editor-source')
+  await viewer.waitForFunction(() => (document.getElementById('editor-source') as HTMLTextAreaElement).value.includes('## Three'))
+  // Typing on slide three's source shows slide three with the draft, before anything is saved.
+  await source.evaluate((el: HTMLTextAreaElement) => {
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  })
+  await viewer.keyboard.type(' draft-words')
+  await frame.locator('.slide.active#slide-3', { hasText: 'draft-words' }).waitFor({ timeout: 5000 })
+  assert.equal(store.requireSummary(id).currentVersion, 1)
+
+  await viewer.keyboard.press('ControlOrMeta+s')
+  await viewer.locator('#editor-status', { hasText: '已存成 v2' }).waitFor({ timeout: 5000 })
+  assert.match(store.blobs.read(store.requireVersion(id, 2).files['index.slides.md'].sha256).toString(), /text draft-words$/)
+  await viewer.waitForFunction(() => document.querySelector<HTMLIFrameElement>('#frame')!.src.includes('/v/2/'))
+  await frame.locator('.slide.active#slide-3', { hasText: 'draft-words' }).waitFor({ timeout: 5000 })
+
+  // Someone else saves while this viewer has an unsaved draft: the draft stays, saving reports the conflict.
+  await viewer.keyboard.type(' mine')
+  store.update(id, { files: { 'index.slides.md': { content: Buffer.from(DECK + '\n---\n## Theirs') } } })
+  await viewer.locator('#toast', { hasText: '還沒儲存' }).waitFor({ timeout: 5000 })
+  assert.match(await source.inputValue(), /draft-words mine$/)
+  viewer.once('dialog', (dialog) => dialog.dismiss())
+  await viewer.click('#save-deck')
+  await viewer.locator('#editor-status', { hasText: '別人已存了新版本' }).waitFor({ timeout: 5000 })
+  assert.equal(store.requireSummary(id).currentVersion, 3)
+  await viewer.close()
+})
+
+test('no other origin can save a deck through the viewer route', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Guarded deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const page = await browser.newPage()
+  await page.goto(`http://127.0.0.1:${CONTENT_PORT}/healthz`)
+  const outcome = await page.evaluate(async (url) => {
+    try {
+      const response = await fetch(url, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json', 'x-artifact-client': 'viewer' },
+        body: JSON.stringify({ markdown: '# pwned', baseVersion: 1 })
+      })
+      return `status ${response.status}`
+    } catch (error) {
+      return `blocked: ${(error as Error).name}`
+    }
+  }, `http://localhost:${APP_PORT}/api/artifacts/${id}/slides`)
+  assert.match(outcome, /^blocked/)
+  assert.equal(store.requireSummary(id).currentVersion, 1)
+  await page.close()
+})
+
+test('on a phone the deck editor sits under the slide, both in view, without horizontal scroll', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Phone edit', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage({ viewport: { width: 375, height: 740 } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('.slide.active').waitFor()
+  await viewer.click('#edit')
+  await viewer.locator('#editor-source').waitFor()
+  const layout = await viewer.evaluate(() => {
+    const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
+    return { frame: box('#frame'), editor: box('#editor'), overflow: document.documentElement.scrollWidth > innerWidth, height: innerHeight }
+  })
+  assert.equal(layout.overflow, false)
+  assert.ok(layout.frame.height > 150 && layout.editor.top >= layout.frame.bottom - 1, JSON.stringify(layout))
+  assert.ok(layout.editor.bottom <= layout.height + 1 && layout.editor.height > 200, JSON.stringify(layout))
+  await viewer.close()
+})

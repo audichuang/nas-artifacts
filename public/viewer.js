@@ -127,6 +127,7 @@ function show(v, path, hash = '') {
   syncUrl()
   loadErrors()
   syncChangesButton()
+  syncEditButton()
 }
 
 // Shown when a kept version older than the one on screen exists to compare against.
@@ -519,7 +520,13 @@ function setCommentsOpen(open) {
   storage.set('artifacts.commentsOpen', open ? '1' : '0')
 }
 
-toggleComments.addEventListener('click', () => setCommentsOpen(commentsPanel.hidden))
+toggleComments.addEventListener('click', () => {
+  if (commentsPanel.hidden && !editorPanel.hidden) {
+    if (dirty) return toast('先儲存或關閉編輯,再開留言')
+    closeEditor()
+  }
+  setCommentsOpen(commentsPanel.hidden)
+})
 document.getElementById('close-comments').addEventListener('click', () => setCommentsOpen(false))
 
 form.addEventListener('submit', async (event) => {
@@ -543,6 +550,171 @@ form.addEventListener('submit', async (event) => {
 bodyInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) form.requestSubmit()
   if (event.key === 'Escape') setReply(null)
+})
+
+// Deck editor: the source on the left; every pause in typing renders the slides on the server and swaps
+// them into the frame, so what is on screen is the deck as it would publish. Saving makes a new version.
+
+const editorPanel = document.getElementById('editor')
+const editButton = document.getElementById('edit')
+const sourceInput = document.getElementById('editor-source')
+const editorStatus = document.getElementById('editor-status')
+const saveButton = document.getElementById('save-deck')
+const viewerEl = document.querySelector('.viewer')
+// The version the draft started from, the version this viewer saved last, and whether the draft differs.
+let editBase = null
+let savedVersion = null
+let dirty = false
+let previewSeq = 0
+let previewTimer
+
+const canEdit = () => isDeck() && artifact.capabilities.length === 0
+function syncEditButton() {
+  editButton.hidden = !canEdit()
+}
+
+function setEditorStatus(text, isDirty = dirty) {
+  editorStatus.textContent = text
+  editorStatus.classList.toggle('dirty', isDirty)
+  saveButton.disabled = !isDirty
+}
+
+// Which slide the cursor is on, splitting the way the server does: --- lines outside fenced code.
+function slideIndexAt(text, offset) {
+  const chunks = [{ start: 0, text: '' }]
+  let fence = null
+  let at = 0
+  for (const line of text.split('\n')) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null
+    } else if (marker) {
+      fence = marker
+    } else if (/^---\s*$/.test(line)) {
+      chunks.push({ start: at + line.length + 1, text: '' })
+      at += line.length + 1
+      continue
+    }
+    chunks[chunks.length - 1].text += `${line}\n`
+    at += line.length + 1
+  }
+  const kept = chunks.filter((chunk) => chunk.text.trim())
+  let index = 0
+  kept.forEach((chunk, i) => { if (chunk.start <= offset) index = i })
+  return index
+}
+
+async function loadSource() {
+  const response = await fetch(`/api/artifacts/${id}/files/${artifact.entry.split('/').map(encodeURIComponent).join('/')}?v=${artifact.currentVersion}`)
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  return response.text()
+}
+
+async function openEditor() {
+  if (version !== artifact.currentVersion) {
+    await showKeepingPlace(artifact.currentVersion)
+  }
+  let text
+  try {
+    text = await loadSource()
+  } catch (error) {
+    toast(`讀不到簡報原始碼:${error.message}`)
+    return
+  }
+  setCommentsOpen(false)
+  editBase = artifact.currentVersion
+  dirty = false
+  sourceInput.value = text
+  editorPanel.hidden = false
+  viewerEl.classList.add('editing')
+  editButton.setAttribute('aria-expanded', 'true')
+  setEditorStatus(`根據 v${editBase}`)
+  sourceInput.focus()
+  sourceInput.setSelectionRange(0, 0)
+}
+
+function closeEditor() {
+  if (dirty && !confirm('放棄還沒儲存的修改?')) return
+  editorPanel.hidden = true
+  viewerEl.classList.remove('editing')
+  editButton.setAttribute('aria-expanded', 'false')
+  clearTimeout(previewTimer)
+  previewSeq++
+  // The frame may hold a preview of the discarded draft: show the saved deck again.
+  if (dirty) show(version, place.path ?? undefined, place.hash)
+  dirty = false
+  editBase = null
+}
+
+async function preview() {
+  const seq = ++previewSeq
+  let result
+  try {
+    result = await api('/slides/preview', { method: 'POST', json: { markdown: sourceInput.value } })
+  } catch (error) {
+    if (seq === previewSeq) setEditorStatus(`預覽失敗:${error.message}`)
+    return
+  }
+  if (seq !== previewSeq || editorPanel.hidden) return
+  notifyPage({ type: 'deck-preview', html: result.html, index: slideIndexAt(sourceInput.value, sourceInput.selectionStart) })
+}
+
+sourceInput.addEventListener('input', () => {
+  dirty = true
+  setEditorStatus(`根據 v${editBase} · 未儲存`)
+  clearTimeout(previewTimer)
+  previewTimer = setTimeout(preview, 250)
+})
+
+// Moving the cursor to another slide's source shows that slide.
+let cursorSlide = -1
+function followCursor() {
+  const index = slideIndexAt(sourceInput.value, sourceInput.selectionStart)
+  if (index === cursorSlide) return
+  cursorSlide = index
+  notifyPage({ type: 'deck-go', index })
+}
+sourceInput.addEventListener('keyup', followCursor)
+sourceInput.addEventListener('click', followCursor)
+
+async function saveDeck() {
+  if (!dirty || saveButton.disabled) return
+  saveButton.disabled = true
+  setEditorStatus('儲存中…', false)
+  try {
+    const saved = await api('/slides', { method: 'PUT', json: { markdown: sourceInput.value, baseVersion: editBase, author: viewerName() || undefined } })
+    savedVersion = saved.currentVersion
+    editBase = saved.currentVersion
+    dirty = false
+    setEditorStatus(`已存成 v${saved.currentVersion}`)
+  } catch (error) {
+    dirty = true
+    if (error.code === 'version_conflict') {
+      setEditorStatus('別人已存了新版本', true)
+      if (confirm('在你編輯時,別人已存了新版本。\n\n確定:放棄你的修改,載入最新版。\n取消:保留你的草稿(可先複製起來)。')) {
+        dirty = false
+        closeEditor()
+        await refreshArtifact()
+        await showKeepingPlace(artifact.currentVersion)
+        await openEditor()
+      }
+    } else {
+      setEditorStatus(`儲存失敗:${error.message}`, true)
+    }
+  }
+}
+
+editButton.addEventListener('click', () => (editorPanel.hidden ? openEditor() : closeEditor()))
+document.getElementById('close-editor').addEventListener('click', closeEditor)
+saveButton.addEventListener('click', saveDeck)
+sourceInput.addEventListener('keydown', (event) => {
+  if (event.key === 's' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault()
+    saveDeck()
+  }
+})
+addEventListener('beforeunload', (event) => {
+  if (dirty) event.preventDefault()
 })
 
 // Toolbar
@@ -602,7 +774,7 @@ async function resync() {
     lastSync = 0
     return
   }
-  if (artifact.currentVersion !== before && wasLatest) {
+  if (artifact.currentVersion !== before && wasLatest && editorPanel.hidden) {
     await showKeepingPlace(artifact.currentVersion)
     toast(`已更新到 ${versionLabel(artifact.currentVersion)}`)
   } else {
@@ -628,7 +800,21 @@ function connectEvents() {
     if (change.kind === 'version') {
       const wasLatest = version === artifact.currentVersion
       await refreshArtifact()
-      if (wasLatest) {
+      if (change.version === savedVersion) {
+        // This viewer's own save: show it quietly, on the same slide.
+        await showKeepingPlace(change.version)
+      } else if (!editorPanel.hidden) {
+        if (dirty) {
+          // Keep the draft and its preview; saving it will report the conflict.
+          toast(`有人存了新版本 ${versionLabel(change.version)},你的修改還沒儲存`)
+        } else {
+          await showKeepingPlace(change.version)
+          editBase = change.version
+          sourceInput.value = await loadSource().catch(() => sourceInput.value)
+          setEditorStatus(`根據 v${editBase}`)
+          toast(`已載入別人存的 ${versionLabel(change.version)}`)
+        }
+      } else if (wasLatest) {
         await showKeepingPlace(change.version)
         toast(`已更新到 ${versionLabel(change.version)}`, { label: '看變更', run: openDiff })
       } else {

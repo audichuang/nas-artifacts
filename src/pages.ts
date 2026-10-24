@@ -62,6 +62,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
     <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
     <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
+    <button id="edit" class="button" type="button" aria-expanded="false" title="編輯這份簡報" hidden>編輯</button>
     <button id="changes" class="icon-button" type="button" title="這版改了什麼" aria-label="這版改了什麼" hidden>±</button>
     <button id="errors" class="button danger" type="button" title="這頁執行時發生的錯誤" hidden>⚠ <span id="error-count"></span></button>
     <button id="toggle-comments" class="button" type="button" aria-expanded="false">留言 <span id="comment-count"></span></button>
@@ -69,6 +70,20 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
   </div>
 </header>
 <div class="viewer">
+  <section id="editor" class="editor" aria-label="編輯簡報" hidden>
+    <div class="comments-head">
+      <h2>編輯簡報</h2>
+      <div class="comments-head-actions">
+        <span id="editor-status" class="muted small" role="status"></span>
+        <button id="close-editor" class="icon-button" type="button" aria-label="關閉編輯" title="關閉編輯">×</button>
+      </div>
+    </div>
+    <textarea id="editor-source" spellcheck="false" aria-label="簡報原始碼(Markdown)"></textarea>
+    <div class="editor-foot">
+      <span class="muted small"><code>---</code> 換頁 · <code>???</code> 講稿 · <code>|||</code> 分欄</span>
+      <button id="save-deck" class="button primary" type="button" disabled>儲存(⌘S)</button>
+    </div>
+  </section>
   <iframe id="frame" title="Artifact"
     sandbox="allow-scripts allow-forms allow-modals allow-downloads"
     allow="clipboard-write; fullscreen"></iframe>

@@ -14,6 +14,10 @@ import {
 import type { Config } from './config.ts'
 import { decodeRequestPath, normalizeFilePath } from './file-paths.ts'
 import { galleryPage, viewerPage } from './pages.ts'
+import { isSlidesPath, renderSlides } from './slides.ts'
+
+/** The most a deck's source may be when edited from the viewer. */
+const SLIDES_SOURCE_BYTES = 1024 * 1024
 
 /** Mutations from the viewer must carry this header: it forces a CORS preflight, which no other origin passes. */
 export const VIEWER_HEADER = 'x-artifact-client'
@@ -235,6 +239,51 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     requirePublisher(c)
     const body = await jsonBody(c)
     return c.json(store.prune(c.req.param('id'), typeof body.keep === 'number' ? body.keep : NaN))
+  })
+
+  // Slide decks edited in the viewer. A deck that declares no capabilities is the one artifact a viewer may
+  // version: only its entry file changes, and its scripts reach nothing beyond the sandbox.
+
+  const deckSource = (body: Record<string, unknown>): string => {
+    const markdown = body.markdown
+    if (typeof markdown !== 'string' || Buffer.byteLength(markdown) > SLIDES_SOURCE_BYTES) {
+      throw new ArtifactError(400, 'invalid_field', `markdown is the deck source, at most ${SLIDES_SOURCE_BYTES} bytes.`)
+    }
+    return markdown
+  }
+  const requireEditableDeck = (c: Context, id: string) => {
+    const caller = requireCaller(c, id)
+    const summary = store.requireSummary(id)
+    if (!isSlidesPath(summary.entry)) {
+      throw new ArtifactError(409, 'not_a_deck', 'Only slide decks (*.slides.md) can be edited here.')
+    }
+    if (caller === 'viewer' && summary.capabilities.length > 0) {
+      throw new ArtifactError(403, 'deck_not_editable', 'A deck that declares capabilities is edited by publishing, not in the viewer.')
+    }
+    return summary
+  }
+
+  app.post('/api/artifacts/:id/slides/preview', async (c) => {
+    requireEditableDeck(c, c.req.param('id'))
+    return c.json(renderSlides(deckSource(await jsonBody(c))))
+  })
+
+  app.put('/api/artifacts/:id/slides', async (c) => {
+    const id = c.req.param('id')
+    const summary = requireEditableDeck(c, id)
+    const body = await jsonBody(c)
+    const markdown = deckSource(body)
+    if (typeof body.baseVersion !== 'number') {
+      throw new ArtifactError(400, 'base_version_required', 'Pass baseVersion: the version the edit started from.')
+    }
+    const author = typeof body.author === 'string' && body.author.trim() ? body.author.trim().slice(0, 40) : null
+    const saved = store.update(id, {
+      files: { [summary.entry]: { content: Buffer.from(markdown) } },
+      baseVersion: body.baseVersion,
+      label: author ? `瀏覽器編輯 · ${author}` : '瀏覽器編輯',
+      source: { host: '瀏覽器', path: author ?? '未署名' }
+    })
+    return c.json(present(saved))
   })
 
   app.get('/api/artifacts/:id/files/*', (c) => {

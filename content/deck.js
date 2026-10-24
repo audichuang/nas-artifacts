@@ -173,6 +173,7 @@
     const message = event.detail
     if (message.type === 'deck-key' && typeof message.key === 'string') onKey(message.key)
     else if (message.type === 'deck-print') actions.print()
+    else if (message.type === 'deck-go' && Number.isInteger(message.index)) go(message.index)
     else if (message.type === 'deck-preview' && typeof message.html === 'string') {
       previewing = true
       stage.innerHTML = message.html

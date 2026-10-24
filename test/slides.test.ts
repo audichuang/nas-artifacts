@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
+import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
 import { renderSlides, splitSlides } from '../src/slides.ts'
@@ -80,5 +81,77 @@ describe('serving decks', () => {
   test('index.slides.md is picked as the entry like index.md', () => {
     const { entry } = store.publish({ title: 'T', files: { 'index.slides.md': { content: Buffer.from('# A') }, 'other.md': { content: Buffer.from('b') } } })
     assert.equal(entry, 'index.slides.md')
+  })
+})
+
+describe('editing decks from the viewer', () => {
+  let dir: string
+  let store: ArtifactStore
+  let app: ReturnType<typeof createAppServer>
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), 'slides-edit-test-'))
+    store = new ArtifactStore(dir)
+    app = createAppServer(store, { dataDir: dir, appPort: 0, contentPort: 0, appOrigin: 'http://app.test', contentOrigin: 'http://content.test', tokens: ['t'] })
+  })
+  after(() => {
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+  const viewerCall = (path: string, method: string, json: unknown, viewer = true) =>
+    app.request(`http://app.test${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', ...(viewer ? { 'x-artifact-client': 'viewer' } : {}) },
+      body: JSON.stringify(json)
+    })
+  const deck = (extra: Record<string, unknown> = {}) =>
+    store.publish({
+      title: 'D',
+      files: { 'index.slides.md': { content: Buffer.from('# One') }, 'img/a.png': { content: Buffer.from('png') } },
+      ...extra
+    })
+
+  test('a viewer saves a new version that changes only the deck source', async () => {
+    const { id } = deck()
+    const response = await viewerCall(`/api/artifacts/${id}/slides`, 'PUT', { markdown: '# One\n---\n## Two', baseVersion: 1, author: 'Ann' })
+    assert.equal(response.status, 200, await response.clone().text())
+    const v1 = store.requireVersion(id, 1)
+    const v2 = store.requireVersion(id, 2)
+    assert.deepEqual(Object.keys(v2.files).sort(), ['img/a.png', 'index.slides.md'])
+    assert.equal(v2.files['img/a.png'].sha256, v1.files['img/a.png'].sha256)
+    assert.equal(store.blobs.read(v2.files['index.slides.md'].sha256).toString(), '# One\n---\n## Two')
+    assert.equal(v2.label, '瀏覽器編輯 · Ann')
+    assert.deepEqual(v2.source, { host: '瀏覽器', path: 'Ann' })
+  })
+
+  test('a stale base is a conflict that names the changed file, not an overwrite', async () => {
+    const { id } = deck()
+    store.update(id, { files: { 'index.slides.md': { content: Buffer.from('# Someone else') } } })
+    const response = await viewerCall(`/api/artifacts/${id}/slides`, 'PUT', { markdown: '# Mine', baseVersion: 1 })
+    assert.equal(response.status, 409)
+    const body = (await response.json()) as { error: { code: string; details: { changedFiles: string[] } } }
+    assert.equal(body.error.code, 'version_conflict')
+    assert.deepEqual(body.error.details.changedFiles, ['index.slides.md'])
+    assert.equal(store.requireSummary(id).currentVersion, 2)
+  })
+
+  test('the viewer cannot edit a deck with capabilities, a page that is not a deck, or without the viewer header', async () => {
+    const withDb = deck({ capabilities: ['db'] })
+    assert.equal((await viewerCall(`/api/artifacts/${withDb.id}/slides`, 'PUT', { markdown: 'x', baseVersion: 1 })).status, 403)
+    assert.equal((await viewerCall(`/api/artifacts/${withDb.id}/slides/preview`, 'POST', { markdown: 'x' })).status, 403)
+    const page = store.publish({ title: 'P', files: { 'index.html': { content: Buffer.from('<p>x</p>') } } })
+    assert.equal((await viewerCall(`/api/artifacts/${page.id}/slides`, 'PUT', { markdown: 'x', baseVersion: 1 })).status, 409)
+    const plain = deck()
+    assert.equal((await viewerCall(`/api/artifacts/${plain.id}/slides`, 'PUT', { markdown: 'x', baseVersion: 1 }, false)).status, 401)
+    assert.equal((await viewerCall(`/api/artifacts/${plain.id}/slides`, 'PUT', { markdown: 'x' })).status, 400)
+    assert.equal(store.requireSummary(plain.id).currentVersion, 1)
+  })
+
+  test('preview renders a draft without saving it', async () => {
+    const { id } = deck()
+    const response = await viewerCall(`/api/artifacts/${id}/slides/preview`, 'POST', { markdown: '# A\n---\n## B' })
+    const body = (await response.json()) as { html: string; count: number }
+    assert.equal(body.count, 2)
+    assert.match(body.html, /<h2>B<\/h2>/)
+    assert.equal(store.requireSummary(id).currentVersion, 1)
   })
 })
