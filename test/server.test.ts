@@ -527,6 +527,10 @@ describe('search', () => {
     assert.match(hit.snippet ?? '', /倉庫驗貨流程/)
     assert.ok((hit.snippet ?? '').length < 120)
     assert.ok((await search('welcome')).artifacts.some((a) => a.id === id))
+    const words = await publish({ 'index.md': '- 用 nas-artifacts 的 search_text 表\n\n**粗體**與 `code_name`\n' })
+    for (const q of ['nas-artifacts', 'search_text', 'code_name', '粗體與']) {
+      assert.ok((await search(q)).artifacts.some((a) => a.id === words.id), q)
+    }
     assert.ok((await search('Hello & welcome')).artifacts.some((a) => a.id === id))
     assert.ok(!(await search('giraffe')).artifacts.some((a) => a.id === id), 'script text is not page text')
     assert.ok(!(await search('zebra')).artifacts.some((a) => a.id === id), 'style text is not page text')

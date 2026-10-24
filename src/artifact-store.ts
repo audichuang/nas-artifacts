@@ -221,8 +221,14 @@ const SEARCH_CHARS = 500_000
 
 /** The words a reader sees: markup, scripts, styles and link targets dropped, entities decoded. */
 function pageText(path: string, content: string): string {
+  // Markdown: line-leading markers and emphasis go, but - and _ inside words stay (nas-artifacts, search_text).
   const text = isMarkdownPath(path)
-    ? content.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/<[^>]+>/g, ' ').replace(/[#*_>`~|-]+/g, ' ')
+    ? content
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/^[ \t]*(?:[#>*+-]+|\d+\.)[ \t]+/gm, ' ')
+        .replace(/[*`~]+|(?<![\p{L}\p{N}])[_-]+|[_-]+(?![\p{L}\p{N}])/gu, '')
+        .replace(/\|/g, ' ')
     : content
         .replace(/<(script|style|template)\b[\s\S]*?<\/\1\s*>/gi, ' ')
         .replace(/<!--[\s\S]*?-->/g, ' ')
@@ -781,9 +787,10 @@ export class ArtifactStore {
       ? `WHERE ${[like('a.title'), like("IFNULL(a.description, '')"), 'a.id = ?', like("IFNULL(a.source_host, '')"), like("IFNULL(a.source_path, '')"), like("IFNULL(t.text, '')")].join(' OR ')}`
       : ''
     const params = query ? [pattern, pattern, query, pattern, pattern, pattern] : []
-    const from = 'FROM artifacts a LEFT JOIN search_text t ON t.artifact_id = a.id'
+    // The page text is read only to search it; a plain gallery listing never carries it.
+    const from = query ? 'FROM artifacts a LEFT JOIN search_text t ON t.artifact_id = a.id' : 'FROM artifacts a'
     const rows = this.db
-      .prepare(`SELECT a.*, t.text AS search_text ${from} ${where} ORDER BY a.pinned DESC, a.updated_at DESC LIMIT ? OFFSET ?`)
+      .prepare(`SELECT a.*, ${query ? 't.text' : 'NULL'} AS search_text ${from} ${where} ORDER BY a.pinned DESC, a.updated_at DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset)
     const total = this.db.prepare(`SELECT COUNT(*) AS n ${from} ${where}`).get(...params)
     return {

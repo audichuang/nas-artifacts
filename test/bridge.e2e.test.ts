@@ -242,12 +242,14 @@ refresh()
 test('the viewer bar fits phone widths without horizontal scroll and leaves the title room', { skip: !chromiumPath && 'no Chromium found' }, async () => {
   const title = '季度營運回顧與下一季的重點工作清單'
   const { id } = store.publish({ title, icon: '📊', files: { 'index.html': { content: Buffer.from('<!doctype html><title>x</title><p>hi</p>') } } })
+  // A second version shows the ± button, the widest the bar gets without page errors.
+  store.update(id, { files: { 'index.html': { content: Buffer.from('<!doctype html><title>x</title><p>hi 2</p>') } } })
   const context = await browser.newContext()
   const viewer = await context.newPage()
   for (const width of [320, 375, 414, 1280]) {
     await viewer.setViewportSize({ width, height: 700 })
     await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
-    await viewer.locator('#title').waitFor({ state: 'attached' })
+    await viewer.locator('#changes').waitFor()
     const metrics = await viewer.evaluate(() => {
       const el = document.getElementById('title')!
       return { scroll: document.documentElement.scrollWidth, inner: innerWidth, titleWidth: el.getBoundingClientRect().width, clipped: el.scrollWidth > el.clientWidth }

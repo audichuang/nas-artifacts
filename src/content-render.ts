@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import hljs from 'highlight.js/lib/common'
 import { Marked, type Tokens } from 'marked'
 import { render as renderDiagram } from 'pele'
@@ -5,8 +6,14 @@ import { render as renderDiagram } from 'pele'
 export const BRIDGE_PATH = '/_/bridge.js'
 export const MARKDOWN_CSS_PATH = '/_/markdown.css'
 
-/** Bump when the markdown output changes, so pages browsers already hold revalidate. */
-export const RENDER_VERSION = 'md-2'
+const packageVersion = (name: string) =>
+  (JSON.parse(readFileSync(new URL(`../node_modules/${name}/package.json`, import.meta.url), 'utf8')) as { version: string }).version
+
+/**
+ * Part of every rendered page's ETag, so pages browsers already hold revalidate when the output changes.
+ * Library upgrades count themselves; bump the leading tag when you change what renderMarkdown emits.
+ */
+export const RENDER_VERSION = ['md-2', ...['marked', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)
