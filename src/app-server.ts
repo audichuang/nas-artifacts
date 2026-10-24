@@ -190,6 +190,10 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
   app.put('/api/artifacts/:id', async (c) => {
     requirePublisher(c)
     const body = await jsonBody(c)
+    const force = body.force === true
+    if (typeof body.baseVersion !== 'number' && !force) {
+      throw new ArtifactError(400, 'base_version_required', 'Pass baseVersion (the version you edited from), or force: true to overwrite.')
+    }
     const summary = store.update(c.req.param('id'), {
       title: body.title as string | undefined,
       description: body.description as string | null | undefined,
@@ -199,7 +203,7 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
       capabilities: optionalStringArray(body.capabilities, 'capabilities'),
       files: parseFiles(body.files),
       baseVersion: typeof body.baseVersion === 'number' ? body.baseVersion : undefined,
-      force: body.force === true
+      force
     })
     return c.json(present(summary))
   })
@@ -400,7 +404,7 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
 
   app.onError((error, c) => {
     if (error instanceof ArtifactError) {
-      return c.json({ error: { code: error.code, message: error.message } }, error.status)
+      return c.json({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }, error.status)
     }
     console.error(error)
     return c.json({ error: { code: 'internal', message: 'Internal error' } }, 500)

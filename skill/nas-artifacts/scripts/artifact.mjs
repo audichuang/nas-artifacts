@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // artifact — publish and manage pages on a nas-artifacts server. Zero dependencies; Node 20+.
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
@@ -18,6 +19,9 @@ const USAGE = `artifact <command> [options]
       --cap db,uploads   page capabilities (db = shared database, uploads = files people add)
       --id ID            update this artifact instead of the one remembered for the path
       --new              always create a new artifact
+      --force            overwrite newer remote changes (default: stop on a conflict)
+  checkout <id|url> [dir]  download the current version into dir (default ./<id>) and remember it,
+                         so the next publish from dir sends only your changes; --force reuses a non-empty dir
   list [--q TEXT]        list artifacts
   get <id>               metadata and version history
   read <id> [path] [--v N]          print a published file (default: the entry)
@@ -67,7 +71,7 @@ function settings() {
   }
 }
 
-async function api(path, { method = 'GET', json, body, auth = false, raw = false, headers = {}, allowNotFound = false } = {}) {
+async function api(path, { method = 'GET', json, body, auth = false, raw = false, headers = {}, allowNotFound = false, allowConflict = false } = {}) {
   const { url, token } = settings()
   if (auth && !token) {
     fail(`no token: set ARTIFACTS_TOKEN or run "artifact config --token-stdin".`)
@@ -90,9 +94,18 @@ async function api(path, { method = 'GET', json, body, auth = false, raw = false
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
     if (allowNotFound && response.status === 404 && payload?.error?.code === 'artifact_not_found') return null
+    if (allowConflict && response.status === 409 && payload?.error?.code === 'version_conflict') return { conflict: payload.error }
     fail(`${method} ${path} → ${response.status} ${payload?.error?.code ?? ''}: ${payload?.error?.message ?? response.statusText}`)
   }
   return payload
+}
+
+const isSkipped = (name) => name.startsWith('.') || SKIP_DIRS.has(name)
+
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
+
+function hashFiles(paths) {
+  return Object.fromEntries(Object.entries(paths).map(([path, full]) => [path, sha256(readFileSync(full))]))
 }
 
 function collectFiles(root) {
@@ -103,7 +116,7 @@ function collectFiles(root) {
   const files = {}
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue
+      if (isSkipped(entry.name)) continue
       const full = join(dir, entry.name)
       if (entry.isDirectory()) walk(full)
       else if (entry.isFile()) files[relative(root, full).split(sep).join('/')] = full
@@ -136,6 +149,16 @@ function print(value, json, human) {
   else console.log(human(value))
 }
 
+function reportConflict(conflict, id, recordedVersion) {
+  const details = conflict.details ?? {}
+  console.error(`artifact: ${id} is at v${details.currentVersion ?? '?'}, but your copy was based on v${recordedVersion}. Nothing was uploaded.`)
+  const changed = details.changedFiles ?? []
+  console.error(`changed remotely since v${recordedVersion}: ${changed.length ? changed.join(', ') : '(metadata only)'}`)
+  console.error(`  1. artifact checkout ${id} <newdir>   fetch the current version, merge your edits by hand, publish from <newdir>`)
+  console.error('  2. rerun the same publish with --force   overwrite those remote changes with your files')
+  process.exit(1)
+}
+
 async function publish(target, values) {
   const source = resolve(target)
   if (!existsSync(source)) fail(`${target} does not exist`)
@@ -143,7 +166,7 @@ async function publish(target, values) {
   if (Object.keys(paths).length === 0) fail(`${target} has no files to publish`)
   const state = readJson(STATE_FILE, {})
   const knownId = values.new ? undefined : values.id ?? state[source]?.id
-  const files = Object.fromEntries(Object.entries(paths).map(([path, full]) => [path, encodeFile(full)]))
+  const hashes = hashFiles(paths)
   const capabilities = values.cap === undefined ? undefined : values.cap.split(',').map((cap) => cap.trim()).filter(Boolean)
   const common = {
     description: values.description,
@@ -152,30 +175,65 @@ async function publish(target, values) {
     label: values.label,
     capabilities
   }
+  const encode = (changed) => Object.fromEntries(changed.map((path) => [path, encodeFile(paths[path])]))
+  const entry = state[source]
+  const recorded = entry && entry.id === knownId && Number.isInteger(entry.version) && entry.files ? entry : null
   let result
   if (knownId) {
-    const current = await api(`/api/artifacts/${encodeURIComponent(knownId)}`, { allowNotFound: true })
-    // A path that no longer exists on the server falls through to a fresh publish.
-    if (current) {
-      for (const stale of Object.keys(current.files)) {
-        if (!(stale in files)) files[stale] = null
+    const id = encodeURIComponent(knownId)
+    let body
+    if (recorded) {
+      const files = encode(Object.keys(paths).filter((path) => recorded.files[path] !== hashes[path]))
+      for (const path of Object.keys(recorded.files)) if (!(path in paths)) files[path] = null
+      body = { ...common, title: values.title, files, baseVersion: recorded.version }
+    } else {
+      const current = await api(`/api/artifacts/${id}`, { allowNotFound: true })
+      if (current) {
+        console.error(`artifact: no recorded version for ${target}; publishing a full snapshot on top of v${current.currentVersion}.`)
+        const files = encode(Object.keys(paths))
+        for (const stale of Object.keys(current.files)) if (!(stale in files)) files[stale] = null
+        body = { ...common, title: values.title, files, baseVersion: current.currentVersion }
       }
-      result = await api(`/api/artifacts/${encodeURIComponent(knownId)}`, {
-        method: 'PUT',
-        auth: true,
-        json: { ...common, title: values.title, files, baseVersion: current.currentVersion }
-      })
+    }
+    // A path that no longer exists on the server falls through to a fresh publish.
+    if (body) {
+      if (values.force) body.force = true
+      result = await api(`/api/artifacts/${id}`, { method: 'PUT', auth: true, json: body, allowNotFound: true, allowConflict: true })
+      if (result?.conflict) reportConflict(result.conflict, knownId, recorded?.version ?? body.baseVersion)
     }
   }
   if (!result) {
     const title = values.title ?? guessTitle(paths, values.entry) ?? basename(source)
-    result = await api('/api/artifacts', { method: 'POST', auth: true, json: { ...common, title, files } })
+    result = await api('/api/artifacts', { method: 'POST', auth: true, json: { ...common, title, files: encode(Object.keys(paths)) } })
   }
-  const recorded = { id: result.id, url: result.url }
+  const recordedNow = { id: result.id, url: result.url, version: result.currentVersion, files: hashes }
   updateState((latest) => {
-    latest[source] = recorded
+    latest[source] = recordedNow
   })
   print(result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})`)
+}
+
+async function checkout(target, dirArg, values) {
+  const id = /^https?:\/\//.test(target) ? /\/a\/([^/?#]+)/.exec(new URL(target).pathname)?.[1] : target
+  if (!id) fail(`cannot find an artifact id in ${target}`)
+  const enc = encodeURIComponent
+  const detail = await api(`/api/artifacts/${enc(id)}`)
+  const dir = resolve(dirArg ?? id)
+  if (existsSync(dir) && readdirSync(dir).length > 0 && !values.force) fail(`${dirArg ?? id} is not empty; pass --force to write into it`)
+  const hashes = {}
+  for (const path of Object.keys(detail.files)) {
+    const full = resolve(dir, ...path.split('/'))
+    if (!full.startsWith(dir + sep)) fail(`refusing unsafe path ${path}`)
+    const bytes = await api(`/api/artifacts/${enc(id)}/files/${path.split('/').map(enc).join('/')}?v=${detail.currentVersion}`, { raw: true })
+    mkdirSync(dirname(full), { recursive: true })
+    writeFileSync(full, bytes)
+    // Files publish skips stay out of the record so a later publish never deletes them remotely.
+    if (!path.split('/').some(isSkipped)) hashes[path] = sha256(bytes)
+  }
+  updateState((latest) => {
+    latest[dir] = { id: detail.id, url: detail.url, version: detail.currentVersion, files: hashes }
+  })
+  print({ id: detail.id, version: detail.currentVersion, dir, files: Object.keys(detail.files) }, values.json, (r) => `checked out ${r.id} v${r.version} (${r.files.length} files) into ${r.dir}`)
 }
 
 function parseJsonArg(text, what) {
@@ -198,6 +256,7 @@ async function main() {
       cap: { type: 'string' },
       id: { type: 'string' },
       new: { type: 'boolean' },
+      force: { type: 'boolean' },
       q: { type: 'string' },
       v: { type: 'string' },
       limit: { type: 'string' },
@@ -216,6 +275,9 @@ async function main() {
     case 'publish':
       if (!args[0]) fail('publish needs a file or directory')
       return publish(args[0], values)
+    case 'checkout':
+      if (!args[0]) fail('checkout needs an id or viewer URL')
+      return checkout(args[0], args[1], values)
     case 'list': {
       const params = new URLSearchParams({ limit: '200' })
       if (values.q) params.set('q', values.q)

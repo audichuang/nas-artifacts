@@ -75,18 +75,37 @@ describe('publishing', () => {
     assert.equal((await content.request(`http://content.test/a/${id}/v/2/a.css`)).status, 200)
   })
 
-  test('a stale baseVersion is a conflict unless forced', async () => {
+  test('PUT without baseVersion is rejected unless forced', async () => {
     const { id } = await publish({ 'index.html': 'x' })
-    await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: { 'index.html': { content: 'y' } } } })
+    const missing = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: { 'index.html': { content: 'y' } } } })
+    assert.equal(missing.status, 400)
+    assert.equal(((await missing.json()) as { error: { code: string } }).error.code, 'base_version_required')
+    const forced = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: { 'index.html': { content: 'y' } }, force: true } })
+    assert.equal(forced.status, 200)
+  })
+
+  test('a stale baseVersion is a conflict that names the files changed since, unless forced', async () => {
+    const { id } = await publish({ 'index.html': 'x', 'keep.txt': 'k', 'gone.txt': 'g', 'edit.txt': 'e' })
+    const other = await call(`/api/artifacts/${id}`, {
+      method: 'PUT',
+      token: TOKEN,
+      json: { files: { 'edit.txt': { content: 'e2' }, 'new.txt': { content: 'n' }, 'gone.txt': null }, baseVersion: 1 }
+    })
+    assert.equal(other.status, 200)
     const stale = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: {}, baseVersion: 1 } })
     assert.equal(stale.status, 409)
+    const { error } = (await stale.json()) as { error: { code: string; details: { currentVersion: number; baseVersion: number; changedFiles: string[] } } }
+    assert.equal(error.code, 'version_conflict')
+    assert.equal(error.details.currentVersion, 2)
+    assert.equal(error.details.baseVersion, 1)
+    assert.deepEqual([...error.details.changedFiles].sort(), ['edit.txt', 'gone.txt', 'new.txt'])
     const forced = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: {}, baseVersion: 1, force: true } })
     assert.equal(forced.status, 200)
   })
 
   test('null removes a file, and removing the entry needs a new one', async () => {
     const { id } = await publish({ 'index.html': 'x', 'b.html': 'b' })
-    const response = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: { 'index.html': null } } })
+    const response = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: { 'index.html': null }, baseVersion: 1 } })
     assert.equal(response.status, 200)
     assert.equal(((await response.json()) as { entry: string }).entry, 'b.html')
   })
@@ -133,7 +152,7 @@ describe('store hardening', () => {
 
     const { id } = await publish({ 'index.html': unique('base') })
     const kept = store.blobs.list().length
-    const rejected = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { entry: 'nope.html', files: { 'extra.txt': { content: unique('upd') } } } })
+    const rejected = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { entry: 'nope.html', files: { 'extra.txt': { content: unique('upd') } }, baseVersion: 1 } })
     assert.equal(rejected.status, 400)
     assert.equal(store.blobs.list().length, kept)
   })

@@ -72,11 +72,13 @@ export type CommentRow = {
 export class ArtifactError extends Error {
   readonly status: 400 | 401 | 403 | 404 | 409 | 413
   readonly code: string
+  readonly details?: Record<string, unknown>
 
-  constructor(status: ArtifactError['status'], code: string, message: string) {
+  constructor(status: ArtifactError['status'], code: string, message: string, details?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -373,7 +375,16 @@ export class ArtifactStore {
   update(id: string, input: UpdateInput): ArtifactSummary {
     const current = this.requireSummary(id)
     if (input.baseVersion !== undefined && input.baseVersion !== current.currentVersion && !input.force) {
-      throw new ArtifactError(409, 'version_conflict', `Version ${current.currentVersion} is newer than baseVersion ${input.baseVersion}; re-read it or pass force.`)
+      throw new ArtifactError(
+        409,
+        'version_conflict',
+        `Version ${current.currentVersion} is newer than baseVersion ${input.baseVersion}; re-read it or pass force.`,
+        {
+          currentVersion: current.currentVersion,
+          baseVersion: input.baseVersion,
+          changedFiles: this.changedFilesSince(id, input.baseVersion, current.currentVersion)
+        }
+      )
     }
     const previous = this.requireVersion(id, current.currentVersion)
     const title = input.title === undefined ? current.title : requireText(input.title, 'title', 200)
@@ -396,6 +407,20 @@ export class ArtifactStore {
     }))
     this.emit(id, { kind: 'version', version })
     return this.requireSummary(id)
+  }
+
+  /** Paths added, removed or changed between two versions; a base that no longer exists counts as empty. */
+  private changedFilesSince(id: string, baseVersion: number, currentVersion: number): string[] {
+    let base: FileMap = {}
+    try {
+      base = this.requireVersion(id, baseVersion).files
+    } catch (error) {
+      if (!(error instanceof ArtifactError)) throw error
+    }
+    const latest = this.requireVersion(id, currentVersion).files
+    return [...new Set([...Object.keys(base), ...Object.keys(latest)])]
+      .filter((path) => base[path]?.sha256 !== latest[path]?.sha256)
+      .sort()
   }
 
   setPinned(id: string, pinned: boolean): ArtifactSummary {
