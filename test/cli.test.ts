@@ -211,3 +211,15 @@ describe('source', () => {
     assert.match(list.stdout, new RegExp(`${id}.*${source.host}`))
   })
 })
+
+describe('prune', () => {
+  test('prune keeps the newest versions and reports what it freed', async () => {
+    const { id } = page('<!doctype html><title>p</title><p>1</p>')
+    for (let v = 1; v <= 3; v++) store.update(id, { files: { 'index.html': { content: Buffer.from(`<!doctype html><title>p</title><p>${v + 1}</p>`) } } })
+    assert.equal((await cli(['prune', id])).code, 1)
+    const run = await cli(['prune', id, '--keep', '2'])
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.stdout, new RegExp(`${id}: dropped v2, v1, freed`))
+    assert.deepEqual(store.detail(id).versions.map((v) => v.version), [4, 3])
+  })
+})

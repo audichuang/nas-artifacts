@@ -32,6 +32,7 @@ const USAGE = `artifact <command> [options]
       --wait [--timeout S]  block until new comments arrive (default 540s; exit 2 on timeout)
   comment reply <id> <commentId> <text> [--resolve] [--author NAME]
   comment resolve|reopen <id> <commentId>
+  prune <id>|--all --keep N  drop all but the newest N versions (frees the files only they used)
   delete <id> --yes      permanently delete
   db list <id> <collection> [--limit N]
   db get|delete <id> <collection> <docId>
@@ -440,6 +441,8 @@ async function main() {
       timeout: { type: 'string' },
       author: { type: 'string' },
       machine: { type: 'string' },
+      all: { type: 'boolean' },
+      keep: { type: 'string' },
       resolve: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' }
     }
@@ -530,6 +533,27 @@ async function main() {
       }
       await setResolved(commentId, action === 'resolve')
       return console.log(`${action === 'resolve' ? 'resolved' : 'reopened'} ${commentId}`)
+    }
+    case 'prune': {
+      const keep = Number(values.keep)
+      if (!Number.isInteger(keep) || keep < 1) fail('prune needs --keep N (N ≥ 1 versions to keep)')
+      if (!values.all && !args[0]) fail('prune <id> --keep N, or prune --all --keep N')
+      let ids = [args[0]]
+      if (values.all) {
+        ids = []
+        for (let offset = 0; ; offset += 200) {
+          const page = await api(`/api/artifacts?limit=200&offset=${offset}`)
+          ids.push(...page.artifacts.filter((a) => a.currentVersion > keep).map((a) => a.id))
+          if (offset + 200 >= page.total) break
+        }
+      }
+      const hints = { not_found: 'this server cannot prune yet; it needs a newer nas-artifacts image' }
+      const results = []
+      for (const id of ids) results.push({ id, ...(await api(`/api/artifacts/${enc(id)}/prune`, { method: 'POST', auth: true, json: { keep }, hints })) })
+      const kb = (bytes) => `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`
+      return print({ results }, json, (d) =>
+        d.results.map((r) => `${r.id}: ${r.removed.length ? `dropped v${r.removed.join(', v')}, freed ${kb(r.freedBytes)}` : 'nothing to drop'}`).join('\n') || 'nothing to drop'
+      )
     }
     case 'delete': {
       const id = args[0] ?? fail('delete needs an id')

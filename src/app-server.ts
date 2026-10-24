@@ -226,6 +226,12 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     return c.body(null, 204)
   })
 
+  app.post('/api/artifacts/:id/prune', async (c) => {
+    requirePublisher(c)
+    const body = await jsonBody(c)
+    return c.json(store.prune(c.req.param('id'), typeof body.keep === 'number' ? body.keep : NaN))
+  })
+
   app.get('/api/artifacts/:id/files/*', (c) => {
     const id = c.req.param('id')
     const summary = store.requireSummary(id)

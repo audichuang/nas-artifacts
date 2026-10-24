@@ -547,6 +547,12 @@ function connectEvents() {
       notifyPage({ type: 'uploads' })
     } else if (change.kind === 'errors' && change.version === version) {
       loadErrors()
+    } else if (change.kind === 'pruned') {
+      await refreshArtifact()
+      if (change.versions.includes(version)) {
+        await showKeepingPlace(artifact.currentVersion)
+        toast(`這個版本已被清理,改看最新版 v${artifact.currentVersion}`)
+      }
     }
   })
 }

@@ -460,3 +460,56 @@ describe('source', () => {
     assert.equal(bad.status, 400)
   })
 })
+
+describe('pruning old versions', () => {
+  const put = (id: string, baseVersion: number, files: Record<string, string>) =>
+    call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { baseVersion, files: Object.fromEntries(Object.entries(files).map(([p, t]) => [p, { content: t }])) } })
+
+  test('keeps the newest N versions, frees blobs only nothing else references, and needs the token', async () => {
+    const { id } = await publish({ 'index.html': 'shared', 'a.txt': 'only-v1' })
+    await put(id, 1, { 'a.txt': 'only-v2' })
+    await put(id, 2, { 'a.txt': 'v3' })
+    await put(id, 3, { 'a.txt': 'v4' })
+    const other = await publish({ 'index.html': 'only-v2' })
+    assert.equal((await call(`/api/artifacts/${id}/prune`, { method: 'POST', viewer: true, json: { keep: 1 } })).status, 401)
+    assert.equal((await call(`/api/artifacts/${id}/prune`, { method: 'POST', token: TOKEN, json: { keep: 0 } })).status, 400)
+    store.recordErrors(id, { version: 1, path: 'index.html', errors: [{ kind: 'error', message: 'old' }] })
+
+    const response = await call(`/api/artifacts/${id}/prune`, { method: 'POST', token: TOKEN, json: { keep: 2 } })
+    assert.equal(response.status, 200)
+    const result = (await response.json()) as { removed: number[]; freedBytes: number }
+    assert.deepEqual(result.removed, [2, 1])
+    assert.equal(result.freedBytes, 'only-v1'.length)
+    const detail = (await (await call(`/api/artifacts/${id}`)).json()) as { versions: { version: number }[]; currentVersion: number }
+    assert.deepEqual(detail.versions.map((v) => v.version), [4, 3])
+    assert.equal(detail.currentVersion, 4)
+    // Still referenced: by the kept versions (index.html) or by another artifact (only-v2).
+    assert.equal((await content.request(`http://content.test/a/${id}/v/4/`)).status, 200)
+    assert.equal((await content.request(`http://content.test/a/${other.id}/v/1/`)).status, 200)
+    assert.equal(store.collectGarbage(), 0)
+    assert.equal((await call(`/api/artifacts/${id}/errors?v=1`)).status, 404)
+
+    const again = (await (await call(`/api/artifacts/${id}/prune`, { method: 'POST', token: TOKEN, json: { keep: 5 } })).json()) as { removed: number[] }
+    assert.deepEqual(again.removed, [])
+  })
+
+  test('a publish based on a pruned version is still a conflict naming every file, not a missing version', async () => {
+    const { id } = await publish({ 'index.html': 'a', 'b.txt': 'b' })
+    await put(id, 1, { 'index.html': 'a2' })
+    await put(id, 2, { 'index.html': 'a3' })
+    await call(`/api/artifacts/${id}/prune`, { method: 'POST', token: TOKEN, json: { keep: 1 } })
+    const response = await put(id, 1, { 'index.html': 'mine' })
+    assert.equal(response.status, 409)
+    const body = (await response.json()) as { error: { code: string; details: { changedFiles: string[] } } }
+    assert.equal(body.error.code, 'version_conflict')
+    assert.deepEqual(body.error.details.changedFiles, ['b.txt', 'index.html'])
+  })
+
+  test('the viewer asked for a pruned version opens the current one', async () => {
+    const { id } = await publish({ 'index.html': 'a' })
+    await put(id, 1, { 'index.html': 'b' })
+    await call(`/api/artifacts/${id}/prune`, { method: 'POST', token: TOKEN, json: { keep: 1 } })
+    const page = await (await call(`/a/${id}?v=1`)).text()
+    assert.match(page, /"version":2/)
+  })
+})

@@ -405,3 +405,16 @@ test('a page cannot load other files from the shared /_/ path', { skip: !chromiu
   await viewer.frameLocator('#frame').locator('#r').filter({ hasText: 'blocked' }).waitFor({ timeout: 5000 })
   await viewer.close()
 })
+
+test('a viewer on a version that gets pruned moves to the current one', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const page = (n: number) => ({ 'index.html': { content: Buffer.from(`<!doctype html><html><head></head><body><p id="n">v${n}</p></body></html>`) } })
+  const { id } = store.publish({ title: 'Prune', files: page(1) })
+  store.update(id, { files: page(2) })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}?v=1`)
+  await viewer.frameLocator('#frame').locator('#n').filter({ hasText: 'v1' }).waitFor()
+  store.prune(id, 1)
+  await viewer.frameLocator('#frame').locator('#n').filter({ hasText: 'v2' }).waitFor({ timeout: 5000 })
+  assert.deepEqual(await viewer.locator('#version option').allTextContents(), ['v2 · 最新'])
+  await viewer.close()
+})

@@ -129,6 +129,7 @@ export type ArtifactChange =
   | { kind: 'comments' }
   | { kind: 'assets' }
   | { kind: 'errors'; version: number }
+  | { kind: 'pruned'; versions: number[] }
 
 const ID_ALPHABET = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
@@ -506,8 +507,9 @@ export class ArtifactStore {
     this.removeUnreferenced(candidates)
   }
 
-  /** Removes the given blobs unless a remaining version or asset still references them. */
-  private removeUnreferenced(candidates: string[]): void {
+  /** Removes the given blobs unless a remaining version or asset still references them; returns the ones removed. */
+  private removeUnreferenced(candidates: string[]): string[] {
+    const removed: string[] = []
     for (let start = 0; start < candidates.length; start += 500) {
       const chunk = candidates.slice(start, start + 500)
       const marks = chunk.map(() => '?').join(',')
@@ -523,9 +525,41 @@ export class ArtifactStore {
       for (const sha256 of chunk) {
         if (!referenced.has(sha256)) {
           this.blobs.remove(sha256)
+          removed.push(sha256)
         }
       }
     }
+    return removed
+  }
+
+  /**
+   * Drops all but the newest `keep` versions (the current one always stays). Comments keep their version
+   * number; a publish based on a dropped version is still a 409 that names every file (changedFilesSince).
+   */
+  prune(id: string, keep: number): { removed: number[]; freedBytes: number } {
+    if (!Number.isInteger(keep) || keep < 1) {
+      throw new ArtifactError(400, 'invalid_field', 'keep is a whole number of versions, at least 1.')
+    }
+    this.requireSummary(id)
+    const rows = this.db.prepare('SELECT version, files FROM versions WHERE artifact_id = ? ORDER BY version DESC').all(id).slice(keep)
+    if (rows.length === 0) {
+      return { removed: [], freedBytes: 0 }
+    }
+    const removed = rows.map((row) => Number(row.version))
+    const sizes = new Map<string, number>()
+    for (const row of rows) {
+      for (const file of Object.values(JSON.parse(String(row.files)) as FileMap)) {
+        sizes.set(file.sha256, file.size)
+      }
+    }
+    const marks = removed.map(() => '?').join(',')
+    this.transaction(() => {
+      this.db.prepare(`DELETE FROM versions WHERE artifact_id = ? AND version IN (${marks})`).run(id, ...removed)
+      this.db.prepare(`DELETE FROM page_errors WHERE artifact_id = ? AND version IN (${marks})`).run(id, ...removed)
+      this.emit(id, { kind: 'pruned', versions: removed })
+    })
+    const freed = this.removeUnreferenced([...sizes.keys()])
+    return { removed, freedBytes: freed.reduce((total, sha256) => total + (sizes.get(sha256) ?? 0), 0) }
   }
 
   /** Maintenance sweep over the whole blob directory; delete paths use removeUnreferenced instead. */
