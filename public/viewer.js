@@ -565,6 +565,8 @@ const viewerEl = document.querySelector('.viewer')
 let editBase = null
 let savedVersion = null
 let dirty = false
+// The save on its way: a version event can arrive before the PUT answers, so it waits for this first.
+let saveInFlight = null
 let previewSeq = 0
 let previewTimer
 
@@ -685,7 +687,8 @@ async function saveDeck() {
   saveButton.disabled = true
   setEditorStatus('儲存中…', false)
   try {
-    const saved = await api('/slides', { method: 'PUT', json: { markdown: sourceInput.value, baseVersion: editBase, author: viewerName() || undefined } })
+    saveInFlight = api('/slides', { method: 'PUT', json: { markdown: sourceInput.value, baseVersion: editBase, author: viewerName() || undefined } })
+    const saved = await saveInFlight
     savedVersion = saved.currentVersion
     editBase = saved.currentVersion
     dirty = false
@@ -704,6 +707,8 @@ async function saveDeck() {
     } else {
       setEditorStatus(`儲存失敗:${error.message}`, true)
     }
+  } finally {
+    saveInFlight = null
   }
 }
 
@@ -802,6 +807,7 @@ function connectEvents() {
     const change = JSON.parse(event.data)
     if (change.kind === 'version') {
       const wasLatest = version === artifact.currentVersion
+      await saveInFlight?.catch(() => {})
       await refreshArtifact()
       if (change.version === savedVersion) {
         // This viewer's own save: show it quietly, on the same slide.

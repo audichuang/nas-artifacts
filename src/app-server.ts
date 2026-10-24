@@ -281,8 +281,8 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     const saved = store.update(id, {
       files: { [summary.entry]: { content: Buffer.from(markdown) } },
       baseVersion: body.baseVersion,
-      label: author ? `瀏覽器編輯 · ${author}` : '瀏覽器編輯',
-      source: { host: '瀏覽器', path: author ?? '未署名' }
+      // No source: the artifact keeps showing the machine and folder it is published from; the label names the editor.
+      label: author ? `瀏覽器編輯 · ${author}` : '瀏覽器編輯'
     })
     return c.json(present(saved))
   })

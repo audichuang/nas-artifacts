@@ -121,7 +121,7 @@ describe('editing decks from the viewer', () => {
     assert.equal(v2.files['img/a.png'].sha256, v1.files['img/a.png'].sha256)
     assert.equal(store.blobs.read(v2.files['index.slides.md'].sha256).toString(), '# One\n---\n## Two')
     assert.equal(v2.label, '瀏覽器編輯 · Ann')
-    assert.deepEqual(v2.source, { host: '瀏覽器', path: 'Ann' })
+    assert.equal(v2.source, null)
   })
 
   test('a stale base is a conflict that names the changed file, not an overwrite', async () => {
