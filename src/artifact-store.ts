@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { BlobStore } from './blob-store.ts'
 import { contentTypeFor, isHtmlPath, isMarkdownPath, normalizeFilePath } from './file-paths.ts'
+import { diffLines, hunks, type ShownLine } from './text-diff.ts'
 
 export const CAPABILITIES = ['db', 'uploads'] as const
 export type Capability = (typeof CAPABILITIES)[number]
@@ -51,6 +52,26 @@ export type ArtifactSummary = {
   createdAt: string
   updatedAt: string
 }
+
+export type FileChange = {
+  path: string
+  status: 'added' | 'removed' | 'modified'
+  /** Unified lines; absent when the file is not text, too large, or rewritten past showing (see note). */
+  lines?: ShownLine[]
+  note?: 'binary' | 'too_large' | 'rewritten'
+}
+
+export type VersionDiff = {
+  from: number | null
+  to: number
+  label: string | null
+  source: Source | null
+  createdAt: string
+  files: FileChange[]
+}
+
+const DIFF_LIMITS = { bytes: 1024 * 1024, lines: 20_000, edits: 2000, shown: 1000, lineChars: 2000 }
+const isTextType = (type: string) => /^text\/|json|javascript|xml|svg/.test(type)
 
 export type ArtifactListing = ArtifactSummary & { snippet?: string | null }
 
@@ -552,6 +573,39 @@ export class ArtifactStore {
     return [...new Set([...Object.keys(base), ...Object.keys(latest)])]
       .filter((path) => base[path]?.sha256 !== latest[path]?.sha256)
       .sort()
+  }
+
+  /** What changed from `from` (default: the nearest older version still kept) to `to` (default: current). */
+  diff(id: string, to?: number, from?: number): VersionDiff {
+    const summary = this.requireSummary(id)
+    const target = this.requireVersion(id, to ?? summary.currentVersion)
+    const previous = from ?? Number(this.db.prepare('SELECT MAX(version) AS v FROM versions WHERE artifact_id = ? AND version < ?').get(id, target.version)?.v ?? NaN)
+    const base = Number.isInteger(previous) ? this.requireVersion(id, previous) : null
+    const before = base?.files ?? {}
+    const after = target.files
+    const read = (entry: FileEntry) => this.blobs.read(entry.sha256).toString('utf8').split(/\r?\n/)
+    const files = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+      .sort()
+      .filter((path) => before[path]?.sha256 !== after[path]?.sha256)
+      .map((path): FileChange => {
+        const old = before[path]
+        const now = after[path]
+        const change: FileChange = { path, status: !old ? 'added' : !now ? 'removed' : 'modified' }
+        const entries = [old, now].filter((entry): entry is FileEntry => Boolean(entry))
+        if (!entries.every((entry) => isTextType(entry.type))) return { ...change, note: 'binary' }
+        if (entries.some((entry) => entry.size > DIFF_LIMITS.bytes)) return { ...change, note: 'too_large' }
+        const a = old ? read(old) : []
+        const b = now ? read(now) : []
+        if (a.length > DIFF_LIMITS.lines || b.length > DIFF_LIMITS.lines) return { ...change, note: 'too_large' }
+        const ops = diffLines(a, b, DIFF_LIMITS.edits)
+        if (!ops) return { ...change, note: 'rewritten' }
+        const shown = hunks(ops).map((line) => ('text' in line && line.text.length > DIFF_LIMITS.lineChars ? { ...line, text: `${line.text.slice(0, DIFF_LIMITS.lineChars)}…` } : line))
+        if (shown.length > DIFF_LIMITS.shown) {
+          shown.splice(DIFF_LIMITS.shown, shown.length, { op: '…', skipped: shown.length - DIFF_LIMITS.shown })
+        }
+        return { ...change, lines: shown }
+      })
+    return { from: base?.version ?? null, to: target.version, label: target.label, source: target.source, createdAt: target.createdAt, files }
   }
 
   setPinned(id: string, pinned: boolean): ArtifactSummary {

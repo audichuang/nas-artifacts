@@ -27,6 +27,7 @@ const USAGE = `artifact <command> [options]
   read <id> [path] [--v N]          print a published file (default: the entry)
   check <file|dir>       report what the page sandbox will block or cannot find (publish runs it too)
   errors <id> [--v N]    errors viewers' browsers hit on a version (default: the current one)
+  diff <id> [--from N] [--to M]  what a version changed (default: current against the one before)
   comments <id>          print the viewer comments
       --open             only threads not yet resolved
       --wait [--timeout S]  block until new comments arrive (default 540s; exit 2 on timeout)
@@ -443,6 +444,8 @@ async function main() {
       machine: { type: 'string' },
       all: { type: 'boolean' },
       keep: { type: 'string' },
+      from: { type: 'string' },
+      to: { type: 'string' },
       resolve: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' }
     }
@@ -470,6 +473,22 @@ async function main() {
       return print(data, json, (d) =>
         d.errors.map((e) => `[${e.kind}] ${e.path} ×${e.count}  ${e.message}${e.source ? `  (${e.source})` : ''}`).join('\n') || '(no errors reported for this version)'
       )
+    }
+    case 'diff': {
+      const id = args[0] ?? fail('diff needs an id')
+      const params = new URLSearchParams()
+      if (values.from) params.set('from', values.from)
+      if (values.to) params.set('to', values.to)
+      const data = await api(`/api/artifacts/${enc(id)}/diff?${params}`, { hints: { not_found: 'this server cannot diff versions yet; it needs a newer nas-artifacts image' } })
+      const notes = { binary: '(not text)', too_large: '(too large to show)', rewritten: '(rewritten past showing)' }
+      return print(data, json, (d) => {
+        const head = `v${d.to}${d.from ? ` against v${d.from}` : ' (oldest kept)'}${d.label ? ` · ${d.label}` : ''}${d.source ? ` · ${d.source.host} ${d.source.path}` : ''}`
+        const files = d.files.map((f) => {
+          const lines = (f.lines ?? []).map((l) => (l.op === '…' ? `@@ ${l.skipped} unchanged lines` : `${l.op}${l.text}`))
+          return [`${f.status} ${f.path} ${f.note ? notes[f.note] : ''}`.trimEnd(), ...lines].join('\n')
+        })
+        return [head, ...files].join('\n\n') + (d.files.length ? '' : '\n(no file changes)')
+      })
     }
     case 'checkout':
       if (!args[0]) fail('checkout needs an id or viewer URL')

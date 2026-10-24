@@ -9,6 +9,10 @@ const titleEl = document.getElementById('title')
 const fullscreenButton = document.getElementById('fullscreen')
 const pinButton = document.getElementById('pin')
 const toastEl = document.getElementById('toast')
+const toastText = document.getElementById('toast-text')
+const toastAction = document.getElementById('toast-action')
+const changesButton = document.getElementById('changes')
+const diffDialog = document.getElementById('diff-dialog')
 const commentsPanel = document.getElementById('comments')
 const toggleComments = document.getElementById('toggle-comments')
 const commentCount = document.getElementById('comment-count')
@@ -32,12 +36,20 @@ const storage = {
 }
 
 let toastTimer
-function toast(message) {
-  toastEl.textContent = message
+let toastRun = null
+function toast(message, action) {
+  toastText.textContent = message
+  toastAction.hidden = !action
+  toastAction.textContent = action?.label ?? ''
+  toastRun = action?.run ?? null
   toastEl.hidden = false
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => { toastEl.hidden = true }, 2600)
+  toastTimer = setTimeout(() => { toastEl.hidden = true }, action ? 6000 : 2600)
 }
+toastAction.addEventListener('click', () => {
+  toastEl.hidden = true
+  toastRun?.()
+})
 
 async function api(path, options = {}) {
   const headers = { 'x-artifact-client': 'viewer', ...(options.headers || {}) }
@@ -102,6 +114,12 @@ function show(v, path) {
   place = { path: path ?? null, scrollY: 0 }
   syncUrl()
   loadErrors()
+  syncChangesButton()
+}
+
+// Shown when a kept version older than the one on screen exists to compare against.
+function syncChangesButton() {
+  changesButton.hidden = !artifact.versions.some((candidate) => candidate.version < version)
 }
 
 // Opens version v on the file the reader is on, scrolled where they were, if that file exists there.
@@ -159,6 +177,7 @@ function versionLabel(v) {
 async function refreshArtifact() {
   artifact = await api('')
   renderVersions()
+  syncChangesButton()
   pinButton.textContent = artifact.pinned ? '★' : '☆'
   pinButton.setAttribute('aria-pressed', String(artifact.pinned))
 }
@@ -257,6 +276,62 @@ window.addEventListener('message', async (event) => {
 function notifyPage(event) {
   frame.contentWindow?.postMessage({ __artifact: 1, event }, '*')
 }
+
+// What this version changed against the one before it.
+
+const STATUS = { added: '新增', removed: '刪除', modified: '修改' }
+const NOTES = { binary: '非文字檔,只列出有變更', too_large: '檔案太大,只列出有變更', rewritten: '改動太多,幾乎整份重寫' }
+
+async function openDiff() {
+  const shown = version
+  let diff
+  try {
+    diff = await api(`/diff?to=${shown}`)
+  } catch (error) {
+    toast(`讀不到變更:${error.message}`)
+    return
+  }
+  document.getElementById('diff-title').textContent = diff.from ? `v${diff.to} 相較 v${diff.from}` : `v${diff.to}(第一個保留的版本)`
+  const meta = [diff.label, diff.source && `${diff.source.host} · ${diff.source.path}`, new Date(diff.createdAt).toLocaleString('zh-Hant', { dateStyle: 'short', timeStyle: 'short' })]
+  document.getElementById('diff-meta').textContent = `${meta.filter(Boolean).join(' · ')} · ${diff.files.length} 個檔案有變更`
+  document.getElementById('diff-files').replaceChildren(
+    ...diff.files.map((file) => {
+      const section = document.createElement('section')
+      section.className = 'diff-file'
+      const head = document.createElement('div')
+      head.className = 'diff-file-head'
+      const status = document.createElement('span')
+      status.className = `diff-status diff-${file.status}`
+      status.textContent = STATUS[file.status]
+      const path = document.createElement('span')
+      path.className = 'diff-path'
+      path.textContent = file.path
+      head.append(status, path)
+      section.append(head)
+      if (file.note) {
+        const note = document.createElement('p')
+        note.className = 'muted small'
+        note.textContent = NOTES[file.note]
+        section.append(note)
+      } else if (file.lines) {
+        const pre = document.createElement('pre')
+        pre.className = 'diff-lines'
+        for (const line of file.lines) {
+          const row = document.createElement('span')
+          row.className = line.op === '+' ? 'add' : line.op === '-' ? 'del' : line.op === '…' ? 'gap' : 'same'
+          row.textContent = line.op === '…' ? `⋯ ${line.skipped} 行未變` : `${line.op} ${line.text}`
+          pre.append(row)
+        }
+        section.append(pre)
+      }
+      return section
+    })
+  )
+  diffDialog.showModal()
+}
+
+changesButton.addEventListener('click', openDiff)
+document.getElementById('close-diff').addEventListener('click', () => diffDialog.close())
 
 // Page errors: the page reports what broke, the server keeps a bounded log per version.
 
@@ -532,7 +607,7 @@ function connectEvents() {
       await refreshArtifact()
       if (wasLatest) {
         await showKeepingPlace(change.version)
-        toast(`已更新到 ${versionLabel(change.version)}`)
+        toast(`已更新到 ${versionLabel(change.version)}`, { label: '看變更', run: openDiff })
       } else {
         toast(`有新版本 ${versionLabel(change.version)}`)
       }

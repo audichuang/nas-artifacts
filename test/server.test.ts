@@ -558,3 +558,32 @@ describe('search', () => {
     }
   })
 })
+
+describe('version diff', () => {
+  test('lists changed files with line changes, defaulting to the current version against the one before', async () => {
+    const md = (middle: string) => `# 報告\n\n${Array.from({ length: 20 }, (_, i) => `第 ${i} 段`).join('\n')}\n${middle}\n結尾\n`
+    const { id } = await publish({ 'index.md': md('舊結論'), 'logo.png': 'PNGDATA', 'gone.txt': 'bye' })
+    await call(`/api/artifacts/${id}`, {
+      method: 'PUT',
+      token: TOKEN,
+      json: { baseVersion: 1, label: '改結論', source: { host: 'mbp', path: '~/r' }, files: { 'index.md': { content: md('新結論') }, 'logo.png': { content: 'PNG2' }, 'gone.txt': null, 'new.txt': { content: 'hi' } } }
+    })
+    const diff = (await (await call(`/api/artifacts/${id}/diff`)).json()) as { from: number; to: number; label: string; source: { host: string }; files: { path: string; status: string; note?: string; lines?: { op: string; text?: string; skipped?: number }[] }[] }
+    assert.equal(diff.from, 1)
+    assert.equal(diff.to, 2)
+    assert.equal(diff.label, '改結論')
+    assert.equal(diff.source.host, 'mbp')
+    assert.deepEqual(diff.files.map((f) => [f.path, f.status, f.note ?? null]), [
+      ['gone.txt', 'removed', null],
+      ['index.md', 'modified', null],
+      ['logo.png', 'modified', 'binary'],
+      ['new.txt', 'added', null]
+    ])
+    const lines = diff.files[1].lines ?? []
+    assert.deepEqual(lines.filter((l) => l.op === '-' || l.op === '+'), [{ op: '-', text: '舊結論' }, { op: '+', text: '新結論' }])
+    assert.equal(lines[0].op, '…')
+    const first = (await (await call(`/api/artifacts/${id}/diff?to=1`)).json()) as { from: number | null; files: { status: string }[] }
+    assert.equal(first.from, null)
+    assert.ok(first.files.every((f) => f.status === 'added'))
+  })
+})

@@ -62,6 +62,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
     <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
     <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
+    <button id="changes" class="icon-button" type="button" title="這版改了什麼" aria-label="這版改了什麼" hidden>±</button>
     <button id="errors" class="button danger" type="button" title="這頁執行時發生的錯誤" hidden>⚠ <span id="error-count"></span></button>
     <button id="toggle-comments" class="button" type="button" aria-expanded="false">留言 <span id="comment-count"></span></button>
     <button id="menu-delete" class="icon-button danger" type="button" title="刪除">🗑</button>
@@ -97,7 +98,15 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
   <p class="muted small error-hint">這個版本被開啟時發生的錯誤。Agent 可用 <code>artifact errors ${escapeHtml(detail.id)}</code> 讀取。</p>
   <ol id="error-list" class="threads"></ol>
 </dialog>
-<div id="toast" class="toast" role="status" hidden></div>`,
+<dialog id="diff-dialog" class="error-dialog diff-dialog">
+  <div class="comments-head">
+    <h2 id="diff-title">這版改了什麼</h2>
+    <button id="close-diff" class="icon-button" type="button" aria-label="關閉" title="關閉">×</button>
+  </div>
+  <p id="diff-meta" class="muted small error-hint"></p>
+  <div id="diff-files" class="diff-files"></div>
+</dialog>
+<div id="toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="toast-action" class="link-button toast-action" type="button" hidden></button></div>`,
     'viewer.js',
     {
       appOrigin: config.appOrigin,

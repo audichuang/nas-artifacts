@@ -223,3 +223,14 @@ describe('prune', () => {
     assert.deepEqual(store.detail(id).versions.map((v) => v.version), [4, 3])
   })
 })
+
+describe('diff', () => {
+  test('diff prints what the current version changed', async () => {
+    const { id } = page('<!doctype html><title>d</title>\n<p>old</p>\n')
+    store.update(id, { label: 'fix', files: { 'index.html': { content: Buffer.from('<!doctype html><title>d</title>\n<p>new</p>\n') } } })
+    const run = await cli(['diff', id])
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.stdout, /^v2 against v1 · fix/)
+    assert.match(run.stdout, /modified index\.html\n <!doctype html><title>d<\/title>\n-<p>old<\/p>\n\+<p>new<\/p>/)
+  })
+})

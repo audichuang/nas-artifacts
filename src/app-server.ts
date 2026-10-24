@@ -226,6 +226,11 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     return c.body(null, 204)
   })
 
+  app.get('/api/artifacts/:id/diff', (c) => {
+    const number = (value: string | undefined) => (value === undefined ? undefined : Number(value))
+    return c.json(store.diff(c.req.param('id'), number(c.req.query('to')), number(c.req.query('from'))))
+  })
+
   app.post('/api/artifacts/:id/prune', async (c) => {
     requirePublisher(c)
     const body = await jsonBody(c)

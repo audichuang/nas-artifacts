@@ -131,3 +131,18 @@ textarea { resize: vertical; }
 .error-dialog::backdrop { background: rgb(0 0 0 / 30%); }
 .error-hint { margin: 10px 14px 0; }
 .error-source { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 4px 0 0; }
+.diff-dialog { width: min(860px, calc(100vw - 32px)); max-height: 80vh; }
+.diff-files { overflow: auto; padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+.diff-file-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.diff-path { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.diff-status { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); flex: none; }
+.diff-added { color: #1a7f37; border-color: currentColor; }
+.diff-removed { color: var(--danger); border-color: currentColor; }
+.diff-modified { color: var(--accent); border-color: currentColor; }
+.diff-lines { margin: 0; border: 1px solid var(--border); border-radius: 8px; overflow: auto; font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); }
+.diff-lines span { display: block; padding: 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-lines .add { background: color-mix(in srgb, #2da44e 16%, transparent); }
+.diff-lines .del { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.diff-lines .gap { color: var(--muted); background: var(--surface-2); text-align: center; }
+.toast { display: flex; align-items: center; gap: 12px; }
+.toast-action { color: inherit; text-decoration: underline; font-size: 13px; }
