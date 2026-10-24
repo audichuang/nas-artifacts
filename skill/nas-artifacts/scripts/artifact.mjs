@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // artifact — publish and manage pages on a nas-artifacts server. Zero dependencies; Node 20+.
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
@@ -349,11 +350,22 @@ function openThreads(comments) {
   return comments.filter((c) => open.has(c.parentId ?? c.id))
 }
 
+// macOS has a readable computer name ("Audi's Mac mini"); elsewhere the short host name.
+function machineName() {
+  if (process.platform === 'darwin') {
+    try {
+      const name = execFileSync('scutil', ['--get', 'ComputerName'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+      if (name) return name
+    } catch {}
+  }
+  return hostname().split('.')[0]
+}
+
 // Shown in the gallery so the reader knows which machine and folder to continue from.
 function publishSource(source) {
   const home = homedir()
   const path = source === home || source.startsWith(home + sep) ? `~${source.slice(home.length).split(sep).join('/')}` : source
-  const host = process.env.ARTIFACTS_MACHINE || readJson(CONFIG_FILE, {}).machine || hostname().split('.')[0]
+  const host = process.env.ARTIFACTS_MACHINE || readJson(CONFIG_FILE, {}).machine || machineName()
   return { host: host.slice(0, 100), path: path.slice(0, 500) }
 }
 
@@ -569,7 +581,7 @@ async function main() {
       const hints = { not_found: 'this server cannot prune yet; it needs a newer nas-artifacts image' }
       const results = []
       for (const id of ids) results.push({ id, ...(await api(`/api/artifacts/${enc(id)}/prune`, { method: 'POST', auth: true, json: { keep }, hints })) })
-      const kb = (bytes) => `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`
+      const kb = (bytes) => (bytes < 1024 ? `${bytes} bytes` : `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`)
       return print({ results }, json, (d) =>
         d.results.map((r) => `${r.id}: ${r.removed.length ? `dropped v${r.removed.join(', v')}, freed ${kb(r.freedBytes)}` : 'nothing to drop'}`).join('\n') || 'nothing to drop'
       )
@@ -618,7 +630,7 @@ async function main() {
       if (values.author) file.author = values.author
       if (values.machine) file.machine = values.machine
       writePrivateJson(CONFIG_FILE, file)
-      return console.log(`url ${file.url ?? DEFAULT_URL} · token ${file.token ? 'saved' : 'not set'} · author ${file.author ?? '(agent@host)'} · machine ${file.machine ?? hostname().split('.')[0]}`)
+      return console.log(`url ${file.url ?? DEFAULT_URL} · token ${file.token ? 'saved' : 'not set'} · author ${file.author ?? '(agent@host)'} · machine ${file.machine ?? machineName()}`)
     }
     default:
       console.log(USAGE)
