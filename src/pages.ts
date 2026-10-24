@@ -62,6 +62,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
     <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
     <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
+    <a id="export-pptx" class="button" href="#" download title="下載成 PowerPoint(.pptx)" hidden>PPTX</a>
     <button id="edit" class="button" type="button" aria-expanded="false" title="編輯這份簡報" hidden>編輯</button>
     <button id="changes" class="icon-button" type="button" title="這版改了什麼" aria-label="這版改了什麼" hidden>±</button>
     <button id="errors" class="button danger" type="button" title="這頁執行時發生的錯誤" hidden>⚠ <span id="error-count"></span></button>

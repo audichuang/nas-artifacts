@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
@@ -232,5 +232,19 @@ describe('diff', () => {
     assert.equal(run.code, 0, run.stderr)
     assert.match(run.stdout, /^v2 against v1 · fix/)
     assert.match(run.stdout, /modified index\.html\n <!doctype html><title>d<\/title>\n-<p>old<\/p>\n\+<p>new<\/p>/)
+  })
+})
+
+describe('export', () => {
+  test('saves a deck as .pptx, and names what is wrong for a page that is not a deck', async () => {
+    const { id } = store.publish({ title: 'D', files: { 'index.slides.md': { content: Buffer.from('# One\n---\n## Two') } } })
+    const out = join(dir, 'talk.pptx')
+    const run = await cli(['export', id, '--out', out])
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.stdout, /saved .*talk\.pptx \(\d+(\.\d)? KB\)/)
+    assert.equal(readFileSync(out).subarray(0, 2).toString(), 'PK')
+    const notDeck = await cli(['export', page().id])
+    assert.equal(notDeck.code, 1)
+    assert.match(notDeck.stderr, /only slide decks/)
   })
 })

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { inflateRawSync } from 'node:zlib'
 import { after, before, describe, test } from 'node:test'
 import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
@@ -153,5 +154,73 @@ describe('editing decks from the viewer', () => {
     assert.equal(body.count, 2)
     assert.match(body.html, /<h2>B<\/h2>/)
     assert.equal(store.requireSummary(id).currentVersion, 1)
+  })
+})
+
+/** The entries of a zip file by name, inflated (enough of the format for a .pptx). */
+function unzip(zip: Buffer): Map<string, string> {
+  const entries = new Map<string, string>()
+  const end = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]))
+  let at = zip.readUInt32LE(end + 16)
+  for (let n = zip.readUInt16LE(end + 10); n > 0; n--) {
+    const method = zip.readUInt16LE(at + 10)
+    const size = zip.readUInt32LE(at + 20)
+    const nameLength = zip.readUInt16LE(at + 28)
+    const name = zip.toString('utf8', at + 46, at + 46 + nameLength)
+    const local = zip.readUInt32LE(at + 42)
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28)
+    const data = zip.subarray(start, start + size)
+    entries.set(name, (method === 8 ? inflateRawSync(data) : data).toString('utf8'))
+    at += 46 + nameLength + zip.readUInt16LE(at + 30) + zip.readUInt16LE(at + 32)
+  }
+  return entries
+}
+
+describe('exporting decks', () => {
+  let dir: string
+  let store: ArtifactStore
+  let app: ReturnType<typeof createAppServer>
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), 'slides-export-test-'))
+    store = new ArtifactStore(dir)
+    app = createAppServer(store, { dataDir: dir, appPort: 0, contentPort: 0, appOrigin: 'http://app.test', contentOrigin: 'http://content.test', tokens: ['t'] })
+  })
+  after(() => {
+    store.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  // A 1×1 PNG.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+
+  test('a deck downloads as a .pptx with its text, tables, pictures, diagrams and speaker notes', async () => {
+    const source = [
+      '# 年度報告', '副標', '???', '開場白', '---',
+      '## 清單', '- **粗體** 與 `code`', '- 第二點', '---',
+      '## 表格', '| A | B |', '|---|---|', '| 1 | 2 |', '---',
+      '## 圖', '![logo](img/logo.png)', '```mermaid', 'flowchart LR', '  A --> B', '```'
+    ].join('\n')
+    const { id } = store.publish({ title: '報告 <v1>', files: { 'deck/index.slides.md': { content: Buffer.from(source) }, 'deck/img/logo.png': { content: PNG } }, entry: 'deck/index.slides.md' })
+    const response = await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)
+    assert.equal(response.status, 200)
+    assert.match(response.headers.get('content-disposition') ?? '', /^attachment; .*filename\*=UTF-8''%E5%A0%B1%E5%91%8A%20_v1_\.pptx$/)
+    const entries = unzip(Buffer.from(await response.arrayBuffer()))
+    const slides = [...entries.keys()].filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    assert.equal(slides.length, 4)
+    assert.match(entries.get('ppt/slides/slide1.xml')!, /年度報告/)
+    assert.match(entries.get('ppt/slides/slide2.xml')!, /<a:rPr[^>]* b="1"[^>]*>(?:(?!<\/a:r>).)*<a:t>粗體<\/a:t>/)
+    assert.match(entries.get('ppt/slides/slide3.xml')!, /<a:tbl>/)
+    const media = [...entries.keys()].filter((name) => name.startsWith('ppt/media/'))
+    assert.ok(media.some((name) => name.endsWith('.svg')), media.join(' '))
+    // The logo, plus the fallback picture PowerPoint keeps beside every SVG.
+    assert.equal(media.filter((name) => name.endsWith('.png')).length, 2, media.join(' '))
+    const diagram = [...entries].find(([name]) => name.endsWith('.svg'))![1]
+    assert.doesNotMatch(diagram, /var\(/)
+    assert.ok([...entries].some(([name, xml]) => name.startsWith('ppt/notesSlides/') && xml.includes('開場白')))
+  })
+
+  test('a page that is not a deck does not export', async () => {
+    const { id } = store.publish({ title: 'P', files: { 'index.md': { content: Buffer.from('# x') } } })
+    assert.equal((await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)).status, 409)
   })
 })

@@ -598,3 +598,32 @@ test('on a phone the deck editor sits under the slide, both in view, without hor
   assert.ok(layout.editor.bottom <= layout.height + 1 && layout.editor.height > 200, JSON.stringify(layout))
   await viewer.close()
 })
+
+test('a deck prints one slide per page, and the toolbar offers it as .pptx', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: 'Print deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
+  const viewer = await browser.newPage({ viewport: { width: 1200, height: 800 } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  const page = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  // The PDF button prints from inside the sandbox (allowed by allow-modals).
+  await page.evaluate(() => { (window as unknown as { print: () => void }).print = () => document.body.setAttribute('data-printed', '1') })
+  await frame.locator('[data-deck="print"]').click()
+  await frame.locator('body[data-printed="1"]').waitFor()
+  await viewer.emulateMedia({ media: 'print' })
+  const printed = await page.evaluate(() =>
+    [...document.querySelectorAll('.slide')].map((slide) => {
+      const style = getComputedStyle(slide)
+      return { visible: style.visibility === 'visible', breaks: style.breakAfter === 'page' }
+    })
+  )
+  assert.deepEqual(printed, [1, 2, 3].map(() => ({ visible: true, breaks: true })))
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.deck-bar')!).display), 'none')
+  await viewer.emulateMedia({ media: 'screen' })
+
+  const link = viewer.locator('#export-pptx')
+  assert.equal(await link.isVisible(), true)
+  const [download] = await Promise.all([viewer.waitForEvent('download'), link.click()])
+  assert.equal(download.suggestedFilename(), 'Print deck.pptx')
+  await viewer.close()
+})

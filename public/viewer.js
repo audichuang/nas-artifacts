@@ -569,8 +569,11 @@ let previewSeq = 0
 let previewTimer
 
 const canEdit = () => isDeck() && artifact.capabilities.length === 0
+const exportLink = document.getElementById('export-pptx')
 function syncEditButton() {
   editButton.hidden = !canEdit()
+  exportLink.hidden = !isDeck()
+  exportLink.href = `/api/artifacts/${id}/export.pptx?v=${version}`
 }
 
 function setEditorStatus(text, isDirty = dirty) {

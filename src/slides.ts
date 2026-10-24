@@ -1,3 +1,4 @@
+import { lexer } from 'marked'
 import { MARKDOWN_CSS_PATH, escapeHtml, injectBridge, markdownParser } from './content-render.ts'
 
 /** A deck is a Markdown file named *.slides.md: one slide per `---` line, speaker notes after `???`. */
@@ -40,34 +41,47 @@ export function splitSlides(source: string): SlideSource[] {
 
 const LAYOUT_COMMENT = /<!--\s*layout:\s*([a-z-]+)\s*-->/i
 
-function renderSlide(slide: SlideSource, index: number): string {
+/** What a slide is made of: its layout, and for columns the heading above them and each column's Markdown. */
+export type SlideModel = { layout: Layout; body: string; heading: string | null; columns: string[] | null; notes: string }
+
+export function analyzeSlide(slide: SlideSource, index: number): SlideModel {
   const requested = LAYOUT_COMMENT.exec(slide.body)?.[1]?.toLowerCase()
   const body = slide.body.replace(LAYOUT_COMMENT, '').trim()
-  const marked = markdownParser({ anchors: false, diagramPrefix: `s${index}-` })
-  const md = (text: string) => marked.parse(text, { async: false })
-  const columns = splitLines(body, /^\|\|\|\s*$/)
+  const parts = splitLines(body, /^\|\|\|\s*$/)
   let layout: Layout
-  let html: string
-  if (columns.length > 1) {
+  let heading: string | null = null
+  let columns: string[] | null = null
+  if (parts.length > 1) {
     // The heading above the first column spans them all.
-    const heading = /^\s*(#{1,3} [^\n]*)\n?/.exec(columns[0])
-    if (heading) columns[0] = columns[0].slice(heading[0].length)
-    const cells = columns.filter((column, at) => at > 0 || column.trim())
-    html = `${heading ? md(heading[1]) : ''}<div class="columns" style="--cols:${cells.length}">${cells
-      .map((column) => `<div class="column">${md(column)}</div>`)
-      .join('')}</div>`
+    const match = /^\s*(#{1,3} [^\n]*)\n?/.exec(parts[0])
+    if (match) {
+      heading = match[1]
+      parts[0] = parts[0].slice(match[0].length)
+    }
+    columns = parts.filter((column, at) => at > 0 || column.trim())
     layout = 'columns'
   } else {
-    html = md(body)
-    const blocks = marked.lexer(body).filter((token) => token.type !== 'space')
+    const blocks = lexer(body).filter((token) => token.type !== 'space')
     if (index === 0 && blocks[0]?.type === 'heading' && blocks[0].depth === 1) layout = 'cover'
     else if (blocks.length > 0 && blocks.every((token) => token.type === 'heading')) layout = 'section'
     else layout = 'default'
   }
   if (requested && (LAYOUTS as readonly string[]).includes(requested) && requested !== 'columns') layout = requested as Layout
-  const notes = slide.notes ? `<aside class="slide-notes" hidden>${md(slide.notes)}</aside>` : ''
+  return { layout, body, heading, columns, notes: slide.notes }
+}
+
+function renderSlide(slide: SlideSource, index: number): string {
+  const model = analyzeSlide(slide, index)
+  const marked = markdownParser({ anchors: false, diagramPrefix: `s${index}-` })
+  const md = (text: string) => marked.parse(text, { async: false })
+  const html = model.columns
+    ? `${model.heading ? md(model.heading) : ''}<div class="columns" style="--cols:${model.columns.length}">${model.columns
+        .map((column) => `<div class="column">${md(column)}</div>`)
+        .join('')}</div>`
+    : md(model.body)
+  const notes = model.notes ? `<aside class="slide-notes" hidden>${md(model.notes)}</aside>` : ''
   const number = index + 1
-  return `<section class="slide layout-${layout}" id="slide-${number}" data-number="${number}" aria-label="第 ${number} 頁"><div class="slide-inner">${html}</div>${notes}</section>\n`
+  return `<section class="slide layout-${model.layout}" id="slide-${number}" data-number="${number}" aria-label="第 ${number} 頁"><div class="slide-inner">${html}</div>${notes}</section>\n`
 }
 
 /** The slides alone, as the deck page holds them; the editor's live preview swaps exactly this. */

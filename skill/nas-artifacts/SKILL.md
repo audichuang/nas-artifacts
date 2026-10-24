@@ -55,6 +55,8 @@ For a presentation, write a Markdown file named `*.slides.md` (`index.slides.md`
 - Everything Markdown pages support works on slides: highlighted code, tables, ```` ```mermaid ```` diagrams (they fill the room left on the slide), images as published files.
 - Keep a slide to a title plus about six lines. Text shrinks to fit down to 55%; a slide still too full lands in `artifact errors` as 「第 N 頁內容太多」, so split it.
 - Link to one slide with `#<number>` on the viewer URL.
+- The user can edit a deck in the viewer (「編輯」, saved as a new version labelled 瀏覽器編輯) when it declares no capabilities. Before revising a deck, `checkout` it so you work from their edits, not your local copy.
+- `node "$A" export <id> [--out file.pptx]` saves the deck as PowerPoint (text stays editable; layout close to the web deck, not identical; diagrams are SVG, which PowerPoint 2016 and later show). Readers get the same from the 「PPTX」 button and print to PDF from the deck's 「PDF」 button.
 
 ## Page capabilities
 

@@ -19,7 +19,8 @@
     "highlight.js": "11.10.0",
     "hono": "4.10.4",
     "marked": "16.4.1",
-    "pele": "1.9.0"
+    "pele": "1.9.0",
+    "pptxgenjs": "4.0.1"
   },
   "devDependencies": {
     "@types/node": "24.9.1",
