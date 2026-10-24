@@ -61,7 +61,7 @@
       list: (collection, options = {}) => call('db.list', { collection, ...options }),
       query: (collection, where, options = {}) => call('db.query', { collection, where, ...options }),
       batch: (ops) => call('db.batch', { ops }),
-      /** listener({ collection, id, deleted }) runs for every write by any viewer, including this one. */
+      /** listener({ collection, id, deleted }) runs for every write by any viewer, including this one; { resync: true } (no collection) means events may have been missed, so re-read. */
       subscribe: on('db')
     }),
     uploads: Object.freeze({

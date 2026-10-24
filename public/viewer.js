@@ -342,8 +342,41 @@ document.getElementById('menu-delete').addEventListener('click', async () => {
 
 // Live changes
 
+let lastSync = 0
+
+// Events emitted while the stream was down are lost, so a reconnect or a wake-up re-reads everything.
+async function resync() {
+  if (Date.now() - lastSync < 2000) return
+  lastSync = Date.now()
+  const before = artifact.currentVersion
+  const wasLatest = version === before
+  try {
+    await refreshArtifact()
+    await loadComments()
+  } catch {
+    lastSync = 0
+    return
+  }
+  if (artifact.currentVersion !== before && wasLatest) {
+    show(artifact.currentVersion)
+    toast(`已更新到 v${artifact.currentVersion}`)
+  } else if (artifact.currentVersion === before) {
+    notifyPage({ type: 'db', resync: true })
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') resync()
+})
+
 function connectEvents() {
   const source = new EventSource(`/api/artifacts/${id}/events`)
+  let connected = false
+  source.addEventListener('ready', () => {
+    if (connected) resync()
+    else lastSync = Date.now()
+    connected = true
+  })
   source.addEventListener('change', async (event) => {
     const change = JSON.parse(event.data)
     if (change.kind === 'version') {

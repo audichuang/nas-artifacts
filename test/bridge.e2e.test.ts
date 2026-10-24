@@ -178,3 +178,51 @@ test('links between pages of one artifact navigate inside the viewer frame', { s
   assert.ok(viewer.frames().some((frame) => frame.url().endsWith('/other.html')))
   await viewer.close()
 })
+
+test('a viewer that lost its event stream catches up on reconnect without reloading the page', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const page = `<!doctype html><html><head></head><body><input id="draft"><p id="value">?</p>
+<script>
+async function refresh() { const doc = await artifact.db.get('c', 'main'); document.getElementById('value').textContent = String(doc?.data?.n ?? 0) }
+artifact.db.subscribe(refresh)
+refresh()
+</script></body></html>`
+  const { id } = store.publish({ title: 'Resync', capabilities: ['db'], files: { 'index.html': { content: Buffer.from(page) } } })
+  const context = await browser.newContext()
+  const viewer = await context.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('#value').filter({ hasText: '0' }).waitFor()
+  await frame.locator('#draft').fill('typed before the drop')
+
+  // Offline emulation alone leaves the open stream half-alive; dropping the sockets is what a sleeping phone looks like to the server.
+  await context.setOffline(true)
+  ;(servers[0] as Server).closeAllConnections()
+  store.setDoc(id, 'c', 'main', { n: 7 }, false)
+  await viewer.waitForTimeout(1000)
+  await context.setOffline(false)
+
+  await frame.locator('#value').filter({ hasText: '7' }).waitFor({ timeout: 8000 })
+  assert.equal(await frame.locator('#draft').inputValue(), 'typed before the drop')
+  await context.close()
+})
+
+test('the viewer bar fits phone widths without horizontal scroll and leaves the title room', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const title = '季度營運回顧與下一季的重點工作清單'
+  const { id } = store.publish({ title, icon: '📊', files: { 'index.html': { content: Buffer.from('<!doctype html><title>x</title><p>hi</p>') } } })
+  const context = await browser.newContext()
+  const viewer = await context.newPage()
+  for (const width of [320, 375, 414, 1280]) {
+    await viewer.setViewportSize({ width, height: 700 })
+    await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+    await viewer.locator('#title').waitFor({ state: 'attached' })
+    await viewer.screenshot({ path: join('/private/tmp/claude-501/t4-shots', `viewer-${width}.png`) }).catch(() => {})
+    const metrics = await viewer.evaluate(() => {
+      const el = document.getElementById('title')!
+      return { scroll: document.documentElement.scrollWidth, inner: innerWidth, titleWidth: el.getBoundingClientRect().width, clipped: el.scrollWidth > el.clientWidth }
+    })
+    assert.ok(metrics.scroll <= metrics.inner, `${width}px overflows: ${metrics.scroll} > ${metrics.inner}`)
+    if (width <= 414) assert.ok(metrics.titleWidth >= 220, `${width}px title only ${metrics.titleWidth}px wide`)
+    if (width >= 375) assert.equal(metrics.clipped, false, `${width}px title is cut off`)
+  }
+  await context.close()
+})
