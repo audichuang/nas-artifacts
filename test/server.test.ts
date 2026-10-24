@@ -206,8 +206,50 @@ describe('content origin', () => {
   test('markdown entries render to HTML', async () => {
     const { id } = await publish({ 'index.md': '# Hi\n\n*there*' })
     const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
-    assert.match(html, /<h1>Hi<\/h1>/)
+    assert.match(html, /<h1 id="hi">.*Hi<\/h1>/)
     assert.match(html, /<em>there<\/em>/)
+    assert.doesNotMatch(html, /class="toc"|mermaid/)
+  })
+
+  test('markdown headings get unique ids that keep CJK, and three or more sections get a table of contents', async () => {
+    const md = '# 報告\n\n## 背景說明\n\n## 背景說明\n\n### API **設計**\n\n## Q&A: 問題?\n'
+    const { id } = await publish({ 'index.md': md })
+    const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
+    assert.match(html, /<h2 id="背景說明">/)
+    assert.match(html, /<h2 id="背景說明-1">/)
+    assert.match(html, /<h3 id="api-設計">/)
+    assert.match(html, /<h2 id="qa-問題">/)
+    assert.match(html, /<nav class="toc"[^>]*>[\s\S]*href="#背景說明-1"[\s\S]*<\/nav>/)
+    assert.doesNotMatch(/<nav class="toc"[\s\S]*<\/nav>/.exec(html)?.[0] ?? '', /#報告/)
+  })
+
+  test('markdown code blocks are highlighted on the server; unknown languages are only escaped', async () => {
+    const md = '```js\nconst a = "<b>"\n```\n\n```nosuchlang\n<b>raw</b>\n```\n'
+    const { id } = await publish({ 'index.md': md })
+    const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
+    assert.match(html, /<code class="hljs language-js"><span class="hljs-keyword">const<\/span>/)
+    assert.match(html, /&#60;b&#62;raw&#60;\/b&#62;/)
+    assert.doesNotMatch(html, /<b>raw<\/b>/)
+  })
+
+  test('mermaid is drawn on the server as SVG themed by CSS, with no script; a broken diagram keeps its source', async () => {
+    const md = '```mermaid\nflowchart LR\n  A[寫檔] --> B[發布]\n```\n\n```mermaid\nflowchart LR\n  A -->\n```\n'
+    const { id } = await publish({ 'index.md': md })
+    const response = await content.request(`http://content.test/a/${id}/v/1/`)
+    const html = await response.text()
+    assert.match(html, /<figure class="diagram"><svg [^>]*class="pele pele-flowchart"[^>]*>[\s\S]*寫檔[\s\S]*<\/svg><\/figure>/)
+    assert.match(html, /var\(--pele-fg/)
+    assert.match(html, /<div class="diagram-failed"><p>Mermaid: [^<]*line 3/)
+    assert.match(html, /<pre><code>flowchart LR\n {2}A --&#62;\n<\/code><\/pre>/)
+    assert.equal(html.match(/<script>/g)?.length, 1)
+    assert.doesNotMatch(response.headers.get('content-security-policy') ?? '', /mermaid|pele/)
+  })
+
+  test('a renderer change revalidates markdown pages browsers already hold', async () => {
+    const { id } = await publish({ 'index.md': '# x' })
+    const etag = async (server: ReturnType<typeof createContentServer>) => (await server.request(`http://content.test/a/${id}/v/1/`)).headers.get('etag')
+    const bumped = createContentServer(store, config(dir), { renderVersion: 'test-bump' })
+    assert.notEqual(await etag(content), await etag(bumped))
   })
 })
 

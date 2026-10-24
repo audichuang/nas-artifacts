@@ -379,3 +379,29 @@ test('errors a page hits reach the error log and the viewer badge', { skip: !chr
   assert.equal(await badge.isVisible(), false)
   await viewer.close()
 })
+
+test('markdown shows mermaid diagrams in the sandbox and its table of contents jumps within the page', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = `# 圖\n\n## 第一節\n\n\`\`\`mermaid\nflowchart LR\n  A[寫檔] --> B[發布]\n\`\`\`\n\n## 第二節\n\n${'段落\n\n'.repeat(200)}## 第三節\n\n結尾\n`
+  const { id } = store.publish({ title: 'Mermaid', files: { 'index.md': { content: Buffer.from(md) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1280, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('figure.diagram svg').waitFor({ timeout: 10000 })
+  assert.match(await frame.locator('figure.diagram svg').innerHTML(), /寫檔/)
+  await frame.locator('nav.toc a[href="#第三節"]').click()
+  const pageFrame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  await pageFrame.waitForFunction(() => scrollY > 1000)
+  assert.equal(await pageFrame.evaluate(() => decodeURIComponent(location.hash)), '#第三節')
+  assert.deepEqual(store.listErrors(id, 1), [])
+  await viewer.close()
+})
+
+test('a page cannot load other files from the shared /_/ path', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const page = '<!doctype html><html><head></head><body><p id="r">?</p><script src="/_/markdown.css" onerror="document.getElementById(\'r\').textContent = \'blocked\'" onload="document.getElementById(\'r\').textContent = \'loaded\'"></script></body></html>'
+  const { id } = store.publish({ title: 'Shared', files: { 'index.html': { content: Buffer.from(page) } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('#r').filter({ hasText: 'blocked' }).waitFor({ timeout: 5000 })
+  await viewer.close()
+})

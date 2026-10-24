@@ -16,8 +16,10 @@
   },
   "dependencies": {
     "@hono/node-server": "1.19.5",
+    "highlight.js": "11.10.0",
     "hono": "4.10.4",
-    "marked": "16.4.1"
+    "marked": "16.4.1",
+    "pele": "1.9.0"
   },
   "devDependencies": {
     "@types/node": "24.9.1",

@@ -4,7 +4,7 @@ import { Hono } from 'hono'
 import type { ArtifactStore, FileEntry } from './artifact-store.ts'
 import { ArtifactError } from './artifact-store.ts'
 import type { Config } from './config.ts'
-import { BRIDGE_PATH, MARKDOWN_CSS_PATH, injectBridge, renderMarkdown } from './content-render.ts'
+import { BRIDGE_PATH, MARKDOWN_CSS_PATH, RENDER_VERSION, injectBridge, renderMarkdown } from './content-render.ts'
 import { decodeRequestPath, isHtmlPath, isMarkdownPath, isServableType } from './file-paths.ts'
 
 // Same CDN allowlist as Claude's artifacts; everything else must be inline or published with the page.
@@ -39,11 +39,12 @@ export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, 
 const STATIC_ROOT = new URL('../content/', import.meta.url)
 const staticFile = (name: string): string => readFileSync(new URL(name, STATIC_ROOT), 'utf8')
 
-export function createContentServer(store: ArtifactStore, config: Config): Hono {
+export function createContentServer(store: ArtifactStore, config: Config, options: { renderVersion?: string } = {}): Hono {
   const app = new Hono()
   const bridge = staticFile('bridge.js').replace('__APP_ORIGIN__', JSON.stringify(config.appOrigin))
   const markdownCss = staticFile('markdown.css')
-  const renderTag = createHash('sha256').update(bridge).digest('hex').slice(0, 16)
+  // Everything a rendered page is built from, so a change to any of them revalidates the pages browsers hold.
+  const renderTag = createHash('sha256').update(bridge).update(markdownCss).update(options.renderVersion ?? RENDER_VERSION).digest('hex').slice(0, 16)
 
   app.use('*', async (c, next) => {
     await next()
