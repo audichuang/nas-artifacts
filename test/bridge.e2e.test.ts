@@ -355,3 +355,27 @@ refresh()
   assert.match(viewer.url(), /v=1/)
   await context.close()
 })
+
+test('errors a page hits reach the error log and the viewer badge', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const page = `<!doctype html><html><head></head><body><img src="missing.png">
+<script>fetch('https://example.invalid/x').catch(() => {}); setTimeout(() => { throw new Error('boom from page') })</script></body></html>`
+  const { id } = store.publish({ title: 'Errors', files: { 'index.html': { content: Buffer.from(page) } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const badge = viewer.locator('#errors')
+  await badge.filter({ hasText: '3' }).waitFor({ timeout: 5000 })
+  const kinds = store.listErrors(id, 1).map((e) => `${e.kind}:${e.path}`).sort()
+  assert.deepEqual(kinds, ['csp:index.html', 'error:index.html', 'resource:index.html'])
+  assert.match(store.listErrors(id, 1).find((e) => e.kind === 'csp')?.message ?? '', /connect-src/)
+  assert.match(store.listErrors(id, 1).find((e) => e.kind === 'error')?.source ?? '', /^index\.html:\d+:\d+$/)
+  await badge.click()
+  await viewer.locator('#error-list').filter({ hasText: 'boom from page' }).waitFor()
+
+  // A clean page shows no badge.
+  const clean = store.publish({ title: 'Clean', files: { 'index.html': { content: Buffer.from('<!doctype html><title>x</title><p id="ok">ok</p>') } } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${clean.id}`)
+  await viewer.frameLocator('#frame').locator('#ok').waitFor()
+  await viewer.waitForTimeout(500)
+  assert.equal(await badge.isVisible(), false)
+  await viewer.close()
+})

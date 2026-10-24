@@ -62,6 +62,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
     <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
     <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
+    <button id="errors" class="button danger" type="button" title="這頁執行時發生的錯誤" hidden>⚠ <span id="error-count"></span></button>
     <button id="toggle-comments" class="button" type="button" aria-expanded="false">留言 <span id="comment-count"></span></button>
     <button id="menu-delete" class="icon-button danger" type="button" title="刪除">🗑</button>
   </div>
@@ -88,6 +89,14 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     </form>
   </aside>
 </div>
+<dialog id="error-dialog" class="error-dialog">
+  <div class="comments-head">
+    <h2>頁面錯誤</h2>
+    <button id="close-errors" class="icon-button" type="button" aria-label="關閉" title="關閉">×</button>
+  </div>
+  <p class="muted small error-hint">這個版本被開啟時發生的錯誤。Agent 可用 <code>artifact errors ${escapeHtml(detail.id)}</code> 讀取。</p>
+  <ol id="error-list" class="threads"></ol>
+</dialog>
 <div id="toast" class="toast" role="status" hidden></div>`,
     'viewer.js',
     {

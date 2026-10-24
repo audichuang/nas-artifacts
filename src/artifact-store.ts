@@ -15,7 +15,10 @@ export const LIMITS = {
   assetBytes: 15 * 1024 * 1024,
   docBytes: 256 * 1024,
   docsPerArtifact: 50_000,
-  commentChars: 10_000
+  commentChars: 10_000,
+  errorsPerReport: 20,
+  errorsPerVersion: 100,
+  errorChars: 500
 }
 
 export type FileEntry = { sha256: string; size: number; type: string }
@@ -57,6 +60,19 @@ export type AssetRow = {
 }
 
 export type DocRow = { id: string; data: unknown; createdAt: string; updatedAt: string }
+
+export const PAGE_ERROR_KINDS = ['error', 'rejection', 'resource', 'csp'] as const
+
+export type PageErrorRow = {
+  version: number
+  path: string
+  kind: (typeof PAGE_ERROR_KINDS)[number]
+  message: string
+  source: string | null
+  count: number
+  firstAt: string
+  lastAt: string
+}
 
 export type CommentRow = {
   id: string
@@ -106,6 +122,7 @@ export type ArtifactChange =
   | { kind: 'db'; collection: string; docId: string; deleted: boolean }
   | { kind: 'comments' }
   | { kind: 'assets' }
+  | { kind: 'errors'; version: number }
 
 const ID_ALPHABET = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
@@ -248,6 +265,18 @@ export class ArtifactStore {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS comments_by_artifact ON comments(artifact_id, created_at);
+      CREATE TABLE IF NOT EXISTS page_errors (
+        artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        message TEXT NOT NULL,
+        source TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        first_at TEXT NOT NULL,
+        last_at TEXT NOT NULL,
+        PRIMARY KEY (artifact_id, version, path, kind, message, source)
+      );
     `)
   }
 
@@ -791,5 +820,68 @@ export class ArtifactStore {
       throw new ArtifactError(404, 'comment_not_found', `No comment ${commentId}.`)
     }
     this.emit(id, { kind: 'comments' })
+  }
+
+  // Page errors: what broke while someone viewed a page, reported through the viewer. Diagnostic only;
+  // the text comes from the page, so it is data, never instructions.
+
+  recordErrors(id: string, input: { version?: unknown; path?: unknown; errors?: unknown }): void {
+    const version = typeof input.version === 'number' ? input.version : NaN
+    const row = this.requireVersion(id, version)
+    const path = typeof input.path === 'string' ? input.path : ''
+    if (!row.files[path]) {
+      throw new ArtifactError(400, 'invalid_field', `Version ${version} has no file ${path}.`)
+    }
+    if (!Array.isArray(input.errors) || input.errors.length > LIMITS.errorsPerReport) {
+      throw new ArtifactError(400, 'invalid_field', `errors is an array of at most ${LIMITS.errorsPerReport} reports.`)
+    }
+    const errors = input.errors.map((raw) => {
+      const { kind, message, source } = (raw ?? {}) as { kind?: unknown; message?: unknown; source?: unknown }
+      if (!(PAGE_ERROR_KINDS as readonly unknown[]).includes(kind) || typeof message !== 'string') {
+        throw new ArtifactError(400, 'invalid_field', `Each error has a kind (${PAGE_ERROR_KINDS.join(', ')}) and a message.`)
+      }
+      return {
+        kind: kind as string,
+        message: message.slice(0, LIMITS.errorChars),
+        source: typeof source === 'string' ? source.slice(0, LIMITS.errorChars) : ''
+      }
+    })
+    if (errors.length === 0) {
+      return
+    }
+    this.transaction(() => {
+      const at = now()
+      const key = [id, version, path]
+      const exists = this.db.prepare('SELECT 1 FROM page_errors WHERE artifact_id = ? AND version = ? AND path = ? AND kind = ? AND message = ? AND source = ?')
+      const stored = this.db.prepare('SELECT COUNT(*) AS n FROM page_errors WHERE artifact_id = ? AND version = ?')
+      const bump = this.db.prepare('UPDATE page_errors SET count = count + 1, last_at = ? WHERE artifact_id = ? AND version = ? AND path = ? AND kind = ? AND message = ? AND source = ?')
+      const insert = this.db.prepare('INSERT INTO page_errors (artifact_id, version, path, kind, message, source, count, first_at, last_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)')
+      for (const error of errors) {
+        const fields = [...key, error.kind, error.message, error.source]
+        if (exists.get(...fields)) {
+          bump.run(at, ...fields)
+        } else if (Number(stored.get(id, version)?.n ?? 0) < LIMITS.errorsPerVersion) {
+          insert.run(...fields, at, at)
+        }
+      }
+      this.emit(id, { kind: 'errors', version })
+    })
+  }
+
+  listErrors(id: string, version: number): PageErrorRow[] {
+    this.requireVersion(id, version)
+    return this.db
+      .prepare('SELECT * FROM page_errors WHERE artifact_id = ? AND version = ? ORDER BY last_at DESC, path, message')
+      .all(id, version)
+      .map((row) => ({
+        version: Number(row.version),
+        path: String(row.path),
+        kind: String(row.kind) as PageErrorRow['kind'],
+        message: String(row.message),
+        source: row.source === '' ? null : String(row.source),
+        count: Number(row.count),
+        firstAt: String(row.first_at),
+        lastAt: String(row.last_at)
+      }))
   }
 }

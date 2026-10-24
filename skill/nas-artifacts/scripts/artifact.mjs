@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, join, posix, relative, resolve, sep } from 'node:path'
 import { parseArgs } from 'node:util'
 
 const CONFIG_DIR = process.env.ARTIFACTS_CONFIG_DIR ?? join(homedir(), '.config', 'nas-artifacts')
@@ -25,6 +25,8 @@ const USAGE = `artifact <command> [options]
   list [--q TEXT]        list artifacts
   get <id>               metadata and version history
   read <id> [path] [--v N]          print a published file (default: the entry)
+  check <file|dir>       report what the page sandbox will block or cannot find (publish runs it too)
+  errors <id> [--v N]    errors viewers' browsers hit on a version (default: the current one)
   comments <id>          print the viewer comments
       --open             only threads not yet resolved
       --wait [--timeout S]  block until new comments arrive (default 540s; exit 2 on timeout)
@@ -149,6 +151,96 @@ function guessTitle(files, entry) {
   return (fromHtml ?? fromMd ?? '').trim() || null
 }
 
+// What the content sandbox allows (src/content-server.ts), repeated so the CLI stays one file.
+const SCRIPT_HOSTS = ['cdnjs.cloudflare.com', 'cdn.jsdelivr.net', 'unpkg.com', 'cdn.tailwindcss.com', 'code.jquery.com']
+const STYLE_HOSTS = [...SCRIPT_HOSTS, 'fonts.googleapis.com']
+const FONT_HOSTS = [...SCRIPT_HOSTS, 'fonts.gstatic.com']
+const MEDIA_TAGS = new Set(['img', 'video', 'audio', 'source', 'track', 'iframe', 'embed', 'object', 'input'])
+const CODE_RULES = [
+  [/\b(fetch\s*\(|new\s+XMLHttpRequest|new\s+WebSocket|new\s+EventSource|navigator\.sendBeacon)/, (m) => `${m} is blocked: pages have no network (connect-src 'none'); inline the data, publish it as a .js file, or use the db capability`],
+  [/\b(localStorage|sessionStorage|document\.cookie|indexedDB)\b/, (m) => `${m} throws in the sandbox (opaque origin); keep state in the db capability`],
+  [/\bwindow\.open\s*\(/, () => 'window.open does nothing: the sandbox has no popups; show the URL as text']
+]
+
+/** Heuristic, not a parser: names what the sandbox will block or what is missing, before anyone opens the page. */
+function checkFiles(paths) {
+  const warnings = []
+  const warn = (file, message) => {
+    const line = `${file}: ${message}`
+    if (!warnings.includes(line)) warnings.push(line)
+  }
+  for (const [file, full] of Object.entries(paths)) {
+    const isPage = /\.(html?|md)$/i.test(file)
+    const isCss = /\.css$/i.test(file)
+    const isJs = /\.m?js$/i.test(file) && !/\.min\.js$/i.test(file)
+    if (!isPage && !isCss && !isJs) continue
+    let text = readFileSync(full, 'utf8')
+    let externalLinks = 0
+    const checkRef = (tag, rel, ref) => {
+      if (!ref || ref.startsWith('#') || /^(data|blob|mailto|tel|javascript|about):/i.test(ref) || /\$\{|\{\{/.test(ref)) return
+      if (/^(https?:)?\/\//i.test(ref)) {
+        let url
+        try { url = new URL(ref, 'https://base.invalid') } catch { return }
+        const host = url.host
+        if (tag === 'a' || tag === 'area') externalLinks++
+        else if (tag === 'script') {
+          if (!SCRIPT_HOSTS.includes(host)) warn(file, `<script> from ${host} is blocked; use ${SCRIPT_HOSTS.join(', ')}, or publish the file`)
+          else checkPinned(ref, url)
+        } else if (tag === 'link' && /\bstylesheet\b/.test(rel)) {
+          if (!STYLE_HOSTS.includes(host)) warn(file, `stylesheet from ${host} is blocked; use Google Fonts, the script CDNs, or publish the file`)
+          else checkPinned(ref, url)
+        } else if (MEDIA_TAGS.has(tag)) warn(file, `<${tag}> from ${host} is blocked; publish the file, use a data URI, or "artifact asset upload"`)
+        else if (tag === 'css' && !FONT_HOSTS.includes(host)) warn(file, `url(${ref}) is blocked; only fonts from the CDNs load from other hosts`)
+        return
+      }
+      if (ref.startsWith('/')) {
+        warn(file, `${ref} is root-relative and resolves outside the artifact; make it relative to ${file}`)
+        return
+      }
+      let target
+      try { target = decodeURI(ref.replace(/[?#].*$/, '')) } catch { target = ref }
+      const resolved = posix.normalize(posix.join(posix.dirname(file), target))
+      if (resolved.startsWith('..')) warn(file, `${ref} points outside the published files`)
+      else if (!(resolved in paths) && !(posix.join(resolved, 'index.html') in paths)) warn(file, `${ref} is not among the published files`)
+    }
+    const checkPinned = (ref, url) => {
+      if (url.host !== 'unpkg.com' && !(url.host === 'cdn.jsdelivr.net' && url.pathname.startsWith('/npm/'))) return
+      const spec = /^\/(?:npm\/)?((?:@[^/]+\/)?[^/@]+)(?:@([^/]+))?/.exec(url.pathname)
+      if (spec && !/^\d+\.\d+\.\d+/.test(spec[2] ?? '')) warn(file, `${ref} has no exact version; pin one (${spec[1]}@1.2.3) so the page cannot change under you`)
+    }
+    let code = isJs ? text : ''
+    if (isPage) {
+      if (/\.md$/i.test(file)) {
+        text = text.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '')
+        for (const m of text.matchAll(/(!?)\[[^\]]*\]\(\s*<?([^)\s>]+)/g)) checkRef(m[1] ? 'img' : 'a', '', m[2])
+      }
+      text = text.replace(/<!--[\s\S]*?-->/g, '')
+      for (const m of text.matchAll(/<([a-z][\w-]*)\b([^>]*)>/gi)) {
+        const tag = m[1].toLowerCase()
+        const attrs = m[2]
+        const rel = (/\brel\s*=\s*["']?([^"'>]+)/i.exec(attrs)?.[1] ?? '').toLowerCase()
+        for (const ref of attrs.matchAll(/(?:^|\s)(?:src|href)\s*=\s*["']([^"']*)["']/gi)) checkRef(tag, rel, ref[1].trim())
+        if (/\btarget\s*=\s*["']?_blank/i.test(attrs)) warn(file, 'target="_blank" does nothing: the sandbox has no popups; show the URL as text')
+        for (const handler of attrs.matchAll(/\son\w+\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) code += `\n${handler[1] ?? handler[2]}`
+      }
+      for (const m of text.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) if (!/\bsrc\s*=/i.test(m[1])) code += `\n${m[2]}`
+    }
+    if (isCss) for (const m of text.matchAll(/url\(\s*["']?([^"')]+)/gi)) checkRef('css', '', m[1].trim())
+    for (const [pattern, message] of CODE_RULES) {
+      const found = pattern.exec(code)?.[1] ?? pattern.exec(code)?.[0]
+      if (found) warn(file, message(found.replace(/\s+/g, ' ')))
+    }
+    if (externalLinks > 0) warn(file, `${externalLinks} link(s) leave the artifact and will not open from the viewer; show those URLs as text`)
+  }
+  return warnings
+}
+
+function reportWarnings(warnings) {
+  if (warnings.length === 0) return
+  console.error(`artifact: ${warnings.length} problem(s) the page sandbox will hit (published anyway; "artifact check" rechecks):`)
+  for (const line of warnings) console.error(`  ${line}`)
+}
+
 function print(value, json, human) {
   if (json) console.log(JSON.stringify(value, null, 2))
   else console.log(human(value))
@@ -169,6 +261,8 @@ async function publish(target, values) {
   if (!existsSync(source)) fail(`${target} does not exist`)
   const paths = collectFiles(source)
   if (Object.keys(paths).length === 0) fail(`${target} has no files to publish`)
+  const warnings = checkFiles(paths)
+  reportWarnings(warnings)
   const state = readJson(STATE_FILE, {})
   const knownId = values.new ? undefined : values.id ?? state[source]?.id
   const hashes = hashFiles(paths)
@@ -215,7 +309,7 @@ async function publish(target, values) {
   updateState((latest) => {
     latest[source] = recordedNow
   })
-  print(result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})`)
+  print(values.json ? { ...result, warnings } : result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})`)
 }
 
 async function checkout(target, dirArg, values) {
@@ -347,6 +441,22 @@ async function main() {
     case 'publish':
       if (!args[0]) fail('publish needs a file or directory')
       return publish(args[0], values)
+    case 'check': {
+      if (!args[0]) fail('check needs a file or directory')
+      const source = resolve(args[0])
+      if (!existsSync(source)) fail(`${args[0]} does not exist`)
+      const warnings = checkFiles(collectFiles(source))
+      print({ warnings }, json, (d) => d.warnings.join('\n') || 'no problems found')
+      return process.exit(warnings.length ? 1 : 0)
+    }
+    case 'errors': {
+      const id = args[0] ?? fail('errors needs an id')
+      const query = values.v ? `?v=${enc(values.v)}` : ''
+      const data = await api(`/api/artifacts/${enc(id)}/errors${query}`, { hints: { not_found: 'this server keeps no page errors yet; it needs a newer nas-artifacts image' } })
+      return print(data, json, (d) =>
+        d.errors.map((e) => `[${e.kind}] ${e.path} ×${e.count}  ${e.message}${e.source ? `  (${e.source})` : ''}`).join('\n') || '(no errors reported for this version)'
+      )
+    }
     case 'checkout':
       if (!args[0]) fail('checkout needs an id or viewer URL')
       return checkout(args[0], args[1], values)

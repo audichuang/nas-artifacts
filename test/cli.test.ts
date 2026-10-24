@@ -134,3 +134,65 @@ describe('comments', () => {
     assert.match(run.stderr, /no new comments/)
   })
 })
+
+describe('page checks', () => {
+  const BAD = `<!doctype html><html><head>
+<script src="https://evil.example/lib.js"></script>
+<script src="https://unpkg.com/react/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<link rel="stylesheet" href="/site.css">
+</head><body>
+<img src="img/missing.png"><img src="https://images.example/a.png"><img src="data:image/png;base64,AAAA">
+<a href="#top">top</a><a href="https://example.com" target="_blank">out</a>
+<script src="data.js"></script>
+<pre><code>fetch('/api') is how you would do it elsewhere</code></pre>
+<script>fetch('/api/x'); localStorage.setItem('k', 'v')</script>
+</body></html>`
+
+  function site(files: Record<string, string>) {
+    const root = mkdtempSync(join(dir, 'site-'))
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(root, name), text)
+    return root
+  }
+
+  test('check names what will break in the sandbox and passes what will not', async () => {
+    const root = site({ 'index.html': BAD, 'data.js': 'window.DATA = 1' })
+    const run = await cli(['check', root])
+    assert.equal(run.code, 1)
+    const out = run.stdout
+    assert.match(out, /evil\.example/)
+    assert.match(out, /unpkg\.com\/react\/.*exact version/)
+    assert.doesNotMatch(out, /d3\.min\.js/)
+    assert.match(out, /\/site\.css/)
+    assert.match(out, /img\/missing\.png/)
+    assert.match(out, /images\.example/)
+    assert.match(out, /_blank/)
+    assert.match(out, /fetch/)
+    assert.match(out, /localStorage/)
+    assert.doesNotMatch(out, /data\.js|data:image|#top/)
+    assert.equal(out.match(/fetch/g)?.length, 1)
+  })
+
+  test('the bundled templates pass the check', async () => {
+    for (const name of ['report', 'dashboard', 'checklist']) {
+      const run = await cli(['check', new URL(`../skill/nas-artifacts/templates/${name}`, import.meta.url).pathname])
+      assert.equal(run.code, 0, `${name}: ${run.stdout}`)
+    }
+  })
+
+  test('publish warns about the same problems but still publishes', async () => {
+    const root = site({ 'index.html': BAD, 'data.js': 'window.DATA = 1' })
+    const run = await cli(['publish', root])
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.stderr, /img\/missing\.png/)
+    assert.match(run.stdout, /\/a\//)
+  })
+
+  test('errors prints what viewers hit on the current version', async () => {
+    const { id } = page()
+    store.recordErrors(id, { version: 1, path: 'index.html', errors: [{ kind: 'csp', message: 'connect-src blocked https://x.test/', source: null }] })
+    const run = await cli(['errors', id])
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.stdout, /\[csp\] index\.html ×1 {2}connect-src blocked/)
+  })
+})

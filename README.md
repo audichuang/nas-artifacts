@@ -8,7 +8,8 @@
 
 - **發佈與更新**:單檔或整個資料夾(多檔、圖片、JS/CSS);同一個本機路徑再發佈就是同網址的新版本,`?v=N` 看舊版,開著的頁面即時切到新版,並停在原本看的檔案與捲動位置;網址列跟著頁面內的換頁走,複製連結就是正在看的那頁。
 - **圖庫**:首頁列出全部 artifact,可搜尋、釘選。
-- **留言**:每個 artifact 都有留言串(回覆、解決),agent 用 `artifact comments <id>` 讀回饋。
+- **留言**:每個 artifact 都有留言串(回覆、解決)。Agent 用 `artifact comments <id> --open` 讀未解決的回饋,`--wait` 等新留言,`artifact comment reply … --resolve` 回覆並結案。
+- **頁面錯誤**:頁面執行時的腳本錯誤、載入失敗的檔案與被沙箱擋下的請求會記在該版本底下,檢視頁顯示 ⚠ 數量,agent 用 `artifact errors <id>` 讀。發佈前 CLI 也會先靜態檢查一次(`artifact check`)。
 - **頁面互動能力**(發佈時用 `--cap` 宣告):
   - `db`:每個 artifact 自己的共享資料庫(set/update/get/list/query/batch),所有看的人即時同步。
   - `uploads`:讓看的人上傳檔案。

@@ -17,6 +17,10 @@ const form = document.getElementById('comment-form')
 const bodyInput = document.getElementById('comment-body')
 const replyTarget = document.getElementById('reply-target')
 const showResolved = document.getElementById('show-resolved')
+const errorsButton = document.getElementById('errors')
+const errorCount = document.getElementById('error-count')
+const errorDialog = document.getElementById('error-dialog')
+const errorList = document.getElementById('error-list')
 
 const storage = {
   get(key) {
@@ -97,6 +101,7 @@ function show(v, path) {
   versionSelect.value = String(v)
   place = { path: path ?? null, scrollY: 0 }
   syncUrl()
+  loadErrors()
 }
 
 // Opens version v on the file the reader is on, scrolled where they were, if that file exists there.
@@ -115,15 +120,26 @@ frame.addEventListener('load', () => {
   pendingScroll = null
 })
 
+const currentEntry = () => artifact.versions.find((row) => row.version === version)?.entry ?? artifact.entry
+
+// The file a page URL in the frame names, for the version on show; undefined for anything else.
+function framePath(pathname) {
+  if (typeof pathname !== 'string' || pathname.length > 4096) return undefined
+  const match = /^\/a\/([^/]+)\/v\/(\d+)\/(.*)$/.exec(pathname)
+  if (!match || match[1] !== id || Number(match[2]) !== version) return undefined
+  try {
+    const path = match[3].split('/').map(decodeURIComponent).join('/')
+    return path === '' ? currentEntry() : path
+  } catch {
+    return undefined
+  }
+}
+
 // The page is untrusted: its report only picks which of this version's files the address bar names.
 function onPlaceReport(report) {
-  if (typeof report.path !== 'string' || report.path.length > 4096 || !Number.isFinite(report.scrollY)) return
-  const match = /^\/a\/([^/]+)\/v\/(\d+)\/(.*)$/.exec(report.path)
-  if (!match || match[1] !== id || Number(match[2]) !== version) return
-  let path
-  try { path = match[3].split('/').map(decodeURIComponent).join('/') } catch { return }
-  const row = artifact.versions.find((candidate) => candidate.version === version)
-  const next = path === '' || path === row?.entry ? null : path
+  const path = framePath(report.path)
+  if (path === undefined || !Number.isFinite(report.scrollY)) return
+  const next = path === currentEntry() ? null : path
   const moved = next !== place.path
   place = { path: next, scrollY: Math.max(0, report.scrollY) }
   if (moved) syncUrl()
@@ -220,6 +236,10 @@ window.addEventListener('message', async (event) => {
     onPlaceReport(message.report)
     return
   }
+  if (message.report?.type === 'errors') {
+    onErrorReport(message.report)
+    return
+  }
   if (typeof message.method !== 'string') return
   const reply = (payload) => frame.contentWindow?.postMessage({ __artifact: 1, id: message.id, ...payload }, '*')
   const handler = Object.hasOwn(methods, message.method) ? methods[message.method] : null
@@ -237,6 +257,75 @@ window.addEventListener('message', async (event) => {
 function notifyPage(event) {
   frame.contentWindow?.postMessage({ __artifact: 1, event }, '*')
 }
+
+// Page errors: the page reports what broke, the server keeps a bounded log per version.
+
+let pageErrors = []
+const ERROR_KINDS = { error: '腳本錯誤', rejection: '未處理的 Promise', resource: '載入失敗', csp: '被沙箱擋下' }
+
+// "<content>/a/<id>/v/<n>/x.js:3:9" reads as "x.js:3:9"; other sources stay as they are.
+function shortSource(source) {
+  if (!source.startsWith(`${data.contentOrigin}/`)) return source
+  const match = /^([^:]*?)((?::\d+)*)$/.exec(source.slice(data.contentOrigin.length))
+  const path = match && framePath(match[1].replace(/[?#].*$/, ''))
+  return path === undefined || path === null ? source : `${path}${match[2]}`
+}
+
+function onErrorReport(report) {
+  const path = framePath(report.path)
+  if (path === undefined || !Array.isArray(report.errors)) return
+  const errors = report.errors.slice(0, 20).map((error) => ({
+    kind: String(error?.kind),
+    message: String(error?.message ?? ''),
+    source: typeof error?.source === 'string' ? shortSource(error.source) : null
+  }))
+  api('/errors', { method: 'POST', json: { version, path, errors } }).catch(() => {})
+}
+
+async function loadErrors() {
+  const shown = version
+  let errors
+  try {
+    errors = (await api(`/errors?v=${shown}`)).errors
+  } catch {
+    return
+  }
+  if (shown !== version) return
+  pageErrors = errors
+  renderErrors()
+}
+
+function renderErrors() {
+  errorsButton.hidden = pageErrors.length === 0
+  errorCount.textContent = String(pageErrors.length)
+  errorList.replaceChildren(
+    ...pageErrors.map((error) => {
+      const item = document.createElement('li')
+      item.className = 'thread'
+      const meta = document.createElement('div')
+      meta.className = 'comment-meta'
+      for (const text of [ERROR_KINDS[error.kind] ?? error.kind, error.path, `×${error.count}`]) {
+        const span = document.createElement('span')
+        span.textContent = text
+        meta.append(span)
+      }
+      const message = document.createElement('p')
+      message.className = 'comment-body'
+      message.textContent = error.message
+      item.append(meta, message)
+      if (error.source) {
+        const source = document.createElement('p')
+        source.className = 'error-source'
+        source.textContent = error.source
+        item.append(source)
+      }
+      return item
+    })
+  )
+}
+
+errorsButton.addEventListener('click', () => errorDialog.showModal())
+document.getElementById('close-errors').addEventListener('click', () => errorDialog.close())
 
 // Comments
 
@@ -406,6 +495,7 @@ async function resync() {
   try {
     await refreshArtifact()
     await loadComments()
+    loadErrors()
   } catch {
     lastSync = 0
     return
@@ -451,6 +541,8 @@ function connectEvents() {
       notifyPage({ type: 'db', collection: change.collection, id: change.docId, deleted: change.deleted })
     } else if (change.kind === 'assets') {
       notifyPage({ type: 'uploads' })
+    } else if (change.kind === 'errors' && change.version === version) {
+      loadErrors()
     }
   })
 }

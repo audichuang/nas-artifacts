@@ -70,6 +70,36 @@
     if (document.readyState === 'complete') attempt()
     else addEventListener('load', attempt, { once: true })
   }
+  // What breaks while the page runs (script errors, missing files, sandbox blocks) goes to the viewer's error log.
+  const errorQueue = []
+  let errorTimer = null
+  let errorsReported = 0
+  function reportError(kind, message, source) {
+    if (!framed || errorsReported >= 20) return
+    errorsReported++
+    errorQueue.push({ kind, message: String(message).slice(0, 500), source: source ? String(source).slice(0, 500) : null })
+    errorTimer ??= setTimeout(() => {
+      errorTimer = null
+      window.parent.postMessage({ __artifact: 1, report: { type: 'errors', path: location.pathname, errors: errorQueue.splice(0) } }, APP_ORIGIN)
+    }, 300)
+  }
+  const where = (file, line, column) => (file ? `${file}:${line ?? 0}:${column ?? 0}` : null)
+  addEventListener('error', (event) => {
+    const target = event.target
+    if (target instanceof Element) {
+      reportError('resource', `<${target.localName}> failed to load`, target.getAttribute('src') ?? target.getAttribute('href'))
+    } else {
+      reportError('error', event.message || 'Script error', where(event.filename, event.lineno, event.colno))
+    }
+  }, true)
+  addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason
+    reportError('rejection', reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason), reason?.stack?.split('\n')[1]?.trim())
+  })
+  addEventListener('securitypolicyviolation', (event) => {
+    reportError('csp', `${event.effectiveDirective} blocked ${event.blockedURI || 'inline code'}`, where(event.sourceFile, event.lineNumber, event.columnNumber))
+  })
+
   if (framed) {
     addEventListener('DOMContentLoaded', reportPlace)
     addEventListener('hashchange', reportPlace)

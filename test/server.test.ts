@@ -366,3 +366,38 @@ describe('page capabilities', () => {
     assert.equal((await call(`/api/artifacts/${id}/comments/${root.id}`, { method: 'PATCH', viewer: true, json: { resolved: true } })).status, 204)
   })
 })
+
+describe('page errors', () => {
+  const report = (id: string, body: unknown, viewer = true) => call(`/api/artifacts/${id}/errors`, { method: 'POST', viewer, json: body })
+  const list = async (id: string, query = '') =>
+    ((await (await call(`/api/artifacts/${id}/errors${query}`)).json()) as { errors: { kind: string; message: string; path: string; count: number; version: number }[] }).errors
+
+  test('the viewer records them per version, counting repeats instead of storing them again', async () => {
+    const { id } = await publish({ 'index.html': 'x', 'b.html': 'y' })
+    const one = { kind: 'csp', message: 'connect-src blocked https://x.test/', source: 'index.html:3' }
+    assert.equal((await report(id, { version: 1, path: 'index.html', errors: [one] }, false)).status, 401)
+    assert.equal((await report(id, { version: 1, path: 'index.html', errors: [one, one] })).status, 204)
+    assert.equal((await report(id, { version: 1, path: 'b.html', errors: [{ kind: 'error', message: 'boom', source: null }] })).status, 204)
+    const errors = await list(id)
+    assert.deepEqual(errors.map((e) => [e.kind, e.path, e.count]).sort(), [['csp', 'index.html', 2], ['error', 'b.html', 1]])
+
+    await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { baseVersion: 1, files: { 'index.html': { content: 'z' } } } })
+    assert.deepEqual(await list(id), [])
+    assert.equal((await list(id, '?v=1')).length, 2)
+  })
+
+  test('reports are bounded and validated', async () => {
+    const { id } = await publish({ 'index.html': 'x' })
+    assert.equal((await report(id, { version: 9, path: 'index.html', errors: [] })).status, 404)
+    assert.equal((await report(id, { version: 1, path: 'index.html', errors: [{ kind: 'nope', message: 'm' }] })).status, 400)
+    const many = Array.from({ length: 21 }, (_, i) => ({ kind: 'error', message: `e${i}` }))
+    assert.equal((await report(id, { version: 1, path: 'index.html', errors: many })).status, 400)
+    for (let batch = 0; batch < 8; batch++) {
+      const errors = Array.from({ length: 20 }, (_, i) => ({ kind: 'error', message: `${batch}-${i}${'m'.repeat(2000)}` }))
+      assert.equal((await report(id, { version: 1, path: 'index.html', errors })).status, 204)
+    }
+    const stored = await list(id)
+    assert.equal(stored.length, 100)
+    assert.ok(stored.every((e) => e.message.length <= 500))
+  })
+})

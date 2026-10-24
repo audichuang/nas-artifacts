@@ -362,6 +362,21 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     return c.body(null, 204)
   })
 
+  // Page errors: reported by the viewer while a page runs; any tailnet reader may read them.
+
+  app.get('/api/artifacts/:id/errors', (c) => {
+    const id = c.req.param('id')
+    const version = Number(c.req.query('v') ?? store.requireSummary(id).currentVersion)
+    return c.json({ errors: store.listErrors(id, version) })
+  })
+
+  app.post('/api/artifacts/:id/errors', async (c) => {
+    const id = c.req.param('id')
+    requireCaller(c, id)
+    store.recordErrors(id, await jsonBody(c))
+    return c.body(null, 204)
+  })
+
   // Live changes for the viewer: new versions, db writes, comments, assets.
 
   app.get('/api/artifacts/:id/events', (c) => {
