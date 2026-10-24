@@ -1,0 +1,28 @@
+{
+  "name": "nas-artifacts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted, tailnet-only artifact publishing: HTML/Markdown pages with versions, assets and page capabilities.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "dev": "DATA_DIR=.data ARTIFACTS_TOKENS=dev-token node --watch src/server.ts",
+    "tc": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "1.19.5",
+    "hono": "4.10.4",
+    "marked": "16.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.9.1",
+    "playwright-core": "1.56.1",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@12.14.0"
+}
