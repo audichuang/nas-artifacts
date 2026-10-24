@@ -174,8 +174,40 @@ test('links between pages of one artifact navigate inside the viewer frame', { s
   await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
   await viewer.frameLocator('#frame').locator('#next').click()
   await viewer.frameLocator('#frame').locator('#here').waitFor()
-  assert.equal(viewer.url(), `http://localhost:${APP_PORT}/a/${id}`)
   assert.ok(viewer.frames().some((frame) => frame.url().endsWith('/other.html')))
+  // The address bar follows the reader, so 複製連結 and a reload land on the page they are reading.
+  await viewer.waitForURL(`http://localhost:${APP_PORT}/a/${id}?path=other.html`)
+  await viewer.close()
+})
+
+test('a new version keeps the reader on the same file and scroll position', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const tall = (marker: string) => `<!doctype html><html><head></head><body><p id="here">${marker}</p><div style="height:5000px"></div></body></html>`
+  const { id } = store.publish({
+    title: 'Keep place',
+    files: {
+      'index.html': { content: Buffer.from('<!doctype html><html><head></head><body><a id="next" href="guide/other.html">next</a></body></html>') },
+      'guide/other.html': { content: Buffer.from(tall('v1')) }
+    }
+  })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1000, height: 700 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('#next').click()
+  await frame.locator('#here').filter({ hasText: 'v1' }).waitFor()
+  const pageFrame = () => viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  await pageFrame().evaluate(() => scrollTo(0, 1200))
+  await viewer.waitForTimeout(500)
+
+  store.update(id, { files: { 'guide/other.html': { content: Buffer.from(tall('v2')) } } })
+  await frame.locator('#here').filter({ hasText: 'v2' }).waitFor({ timeout: 5000 })
+  assert.ok(pageFrame().url().endsWith('/v/2/guide/other.html'), pageFrame().url())
+  await pageFrame().waitForFunction(() => Math.abs(scrollY - 1200) < 5, undefined, { timeout: 5000 })
+
+  // A version without that file falls back to the entry instead of a 404.
+  store.update(id, { files: { 'guide/other.html': null } })
+  await frame.locator('#next').waitFor({ timeout: 5000 })
+  assert.ok(pageFrame().url().includes('/v/3/'), pageFrame().url())
   await viewer.close()
 })
 

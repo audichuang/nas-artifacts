@@ -28,6 +28,10 @@
     if (event.source !== window.parent || event.origin !== APP_ORIGIN) return
     const message = event.data
     if (!message || message.__artifact !== 1) return
+    if (message.event?.type === 'restore') {
+      restoreScroll(message.event.scrollY)
+      return
+    }
     if (message.event) {
       for (const listener of listeners[message.event.type] || []) {
         try { listener(message.event) } catch (error) { console.error(error) }
@@ -44,6 +48,33 @@
       entry.resolve(message.result)
     }
   })
+
+  // Where the reader is, so the viewer can keep them there across versions and in its address bar.
+  let reportTimer = null
+  function reportPlace() {
+    reportTimer = null
+    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, scrollY: Math.round(scrollY) } }, APP_ORIGIN)
+  }
+  // Content drawn by scripts may not be tall enough yet, so keep trying briefly unless the reader scrolls first.
+  function restoreScroll(target) {
+    if (typeof target !== 'number' || !Number.isFinite(target)) return
+    let tries = 0
+    const stop = () => { tries = Infinity }
+    addEventListener('wheel', stop, { once: true, passive: true })
+    addEventListener('touchstart', stop, { once: true, passive: true })
+    const attempt = () => {
+      if (tries++ > 40) return
+      scrollTo(0, target)
+      if (Math.abs(scrollY - target) > 2) setTimeout(attempt, 50)
+    }
+    if (document.readyState === 'complete') attempt()
+    else addEventListener('load', attempt, { once: true })
+  }
+  if (framed) {
+    addEventListener('DOMContentLoaded', reportPlace)
+    addEventListener('hashchange', reportPlace)
+    addEventListener('scroll', () => { reportTimer ??= setTimeout(reportPlace, 250) }, { passive: true })
+  }
 
   const on = (type) => (listener) => {
     listeners[type].add(listener)

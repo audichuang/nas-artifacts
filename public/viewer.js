@@ -74,6 +74,20 @@ function renderVersions() {
   versionSelect.value = String(version)
 }
 
+// The file and scroll position the page last reported; path null is the entry.
+let place = { path: null, scrollY: 0 }
+let pendingScroll = null
+
+function syncUrl() {
+  const url = new URL(location.href)
+  if (version === artifact.currentVersion) url.searchParams.delete('v')
+  else url.searchParams.set('v', String(version))
+  if (place.path) url.searchParams.set('path', place.path)
+  else url.searchParams.delete('path')
+  // Safari throws once a page replaces its URL too often; the address bar is a convenience.
+  try { history.replaceState(null, '', url) } catch {}
+}
+
 function show(v, path) {
   version = v
   const row = artifact.versions.find((candidate) => candidate.version === v)
@@ -81,19 +95,50 @@ function show(v, path) {
   document.title = titleEl.textContent
   frame.src = contentUrl(v, path)
   versionSelect.value = String(v)
-  const url = new URL(location.href)
-  if (v === artifact.currentVersion) url.searchParams.delete('v')
-  else url.searchParams.set('v', String(v))
-  if (path) url.searchParams.set('path', path)
-  else url.searchParams.delete('path')
-  history.replaceState(null, '', url)
+  place = { path: path ?? null, scrollY: 0 }
+  syncUrl()
+}
+
+// Opens version v on the file the reader is on, scrolled where they were, if that file exists there.
+async function showKeepingPlace(v) {
+  const { path, scrollY } = place
+  let files = v === artifact.currentVersion ? artifact.files : undefined
+  if (path && !files) files = (await api(`?v=${v}`).catch(() => null))?.files
+  const keep = !path || (files ? Object.hasOwn(files, path) : false)
+  show(v, keep ? path ?? undefined : undefined)
+  pendingScroll = keep ? scrollY : null
+}
+
+frame.addEventListener('load', () => {
+  if (pendingScroll === null) return
+  notifyPage({ type: 'restore', scrollY: pendingScroll })
+  pendingScroll = null
+})
+
+// The page is untrusted: its report only picks which of this version's files the address bar names.
+function onPlaceReport(report) {
+  if (typeof report.path !== 'string' || report.path.length > 4096 || !Number.isFinite(report.scrollY)) return
+  const match = /^\/a\/([^/]+)\/v\/(\d+)\/(.*)$/.exec(report.path)
+  if (!match || match[1] !== id || Number(match[2]) !== version) return
+  let path
+  try { path = match[3].split('/').map(decodeURIComponent).join('/') } catch { return }
+  const row = artifact.versions.find((candidate) => candidate.version === version)
+  const next = path === '' || path === row?.entry ? null : path
+  const moved = next !== place.path
+  place = { path: next, scrollY: Math.max(0, report.scrollY) }
+  if (moved) syncUrl()
 }
 
 fullscreenButton.addEventListener('click', () => {
   frame.requestFullscreen?.().catch(() => toast('無法進入全螢幕'))
 })
 
-versionSelect.addEventListener('change', () => show(Number(versionSelect.value)))
+versionSelect.addEventListener('change', () => showKeepingPlace(Number(versionSelect.value)))
+
+function versionLabel(v) {
+  const label = artifact.versions.find((row) => row.version === v)?.label
+  return `v${v}${label ? ` · ${label}` : ''}`
+}
 
 async function refreshArtifact() {
   artifact = await api('')
@@ -170,7 +215,12 @@ const methods = {
 window.addEventListener('message', async (event) => {
   if (event.source !== frame.contentWindow) return
   const message = event.data
-  if (!message || message.__artifact !== 1 || typeof message.method !== 'string') return
+  if (!message || message.__artifact !== 1) return
+  if (message.report?.type === 'place') {
+    onPlaceReport(message.report)
+    return
+  }
+  if (typeof message.method !== 'string') return
   const reply = (payload) => frame.contentWindow?.postMessage({ __artifact: 1, id: message.id, ...payload }, '*')
   const handler = Object.hasOwn(methods, message.method) ? methods[message.method] : null
   if (!handler) {
@@ -361,8 +411,8 @@ async function resync() {
     return
   }
   if (artifact.currentVersion !== before && wasLatest) {
-    show(artifact.currentVersion)
-    toast(`已更新到 v${artifact.currentVersion}`)
+    await showKeepingPlace(artifact.currentVersion)
+    toast(`已更新到 ${versionLabel(artifact.currentVersion)}`)
   } else {
     // A retained frame keeps its stale db data unless told; a reloaded one re-reads on load.
     notifyPage({ type: 'db', resync: true })
@@ -387,10 +437,10 @@ function connectEvents() {
       const wasLatest = version === artifact.currentVersion
       await refreshArtifact()
       if (wasLatest) {
-        show(change.version)
-        toast(`已更新到 v${change.version}`)
+        await showKeepingPlace(change.version)
+        toast(`已更新到 ${versionLabel(change.version)}`)
       } else {
-        toast(`有新版本 v${change.version}`)
+        toast(`有新版本 ${versionLabel(change.version)}`)
       }
     } else if (change.kind === 'deleted') {
       toast('這個 artifact 已被刪除')
