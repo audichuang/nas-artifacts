@@ -12,7 +12,7 @@ import {
   type IncomingFile
 } from './artifact-store.ts'
 import type { Config } from './config.ts'
-import { normalizeFilePath } from './file-paths.ts'
+import { decodeRequestPath } from './file-paths.ts'
 import { galleryPage, viewerPage } from './pages.ts'
 
 /** Mutations from the viewer must carry this header: it forces a CORS preflight, which no other origin passes. */
@@ -137,8 +137,14 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
       return c.text('Not found', 404)
     }
     const type = name.endsWith('.css') ? 'text/css' : name.endsWith('.js') ? 'text/javascript' : 'image/svg+xml'
+    let body: Buffer
+    try {
+      body = readFileSync(new URL(name, staticRoot))
+    } catch {
+      return c.text('Not found', 404)
+    }
     c.header('Cache-Control', 'no-cache')
-    return c.body(readFileSync(new URL(name, staticRoot)), 200, { 'Content-Type': `${type}; charset=utf-8` })
+    return c.body(new Uint8Array(body), 200, { 'Content-Type': `${type}; charset=utf-8` })
   })
   app.get('/healthz', (c) => c.text('ok'))
 
@@ -212,11 +218,12 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     const id = c.req.param('id')
     const summary = store.requireSummary(id)
     const prefix = `/api/artifacts/${id}/files/`
-    const path = normalizeFilePath(decodeURIComponent(new URL(c.req.url).pathname.slice(prefix.length)))
+    const requested = new URL(c.req.url).pathname.slice(prefix.length)
+    const path = decodeRequestPath(requested)
     const row = store.requireVersion(id, Number(c.req.query('v') ?? summary.currentVersion))
     const entry = path ? row.files[path] : undefined
     if (!path || !entry) {
-      throw new ArtifactError(404, 'file_not_found', `Version ${row.version} has no file ${path}.`)
+      throw new ArtifactError(404, 'file_not_found', `Version ${row.version} has no file ${path ?? requested}.`)
     }
     return c.body(new Uint8Array(store.blobs.read(entry.sha256)), 200, {
       'Content-Type': 'application/octet-stream',

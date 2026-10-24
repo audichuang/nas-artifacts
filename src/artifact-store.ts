@@ -150,6 +150,12 @@ function optionalText(value: unknown, field: string, max: number): string | null
   return requireText(value, field, max)
 }
 
+/** Truncates to an integer in [min, max]; anything non-finite falls back to the default. */
+function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  const number = typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback
+  return Math.min(Math.max(number, min), max)
+}
+
 function chooseEntry(files: FileMap, requested: string | undefined): string {
   if (requested !== undefined) {
     const entry = normalizeFilePath(requested)
@@ -290,8 +296,10 @@ export class ArtifactStore {
     }
   }
 
-  private storeFiles(base: FileMap, incoming: Record<string, IncomingFile>): FileMap {
+  /** Validates and hashes only; bodies reach disk through writeBlobs once the version is going to be committed. */
+  private planFiles(base: FileMap, incoming: Record<string, IncomingFile>): { files: FileMap; bodies: Map<string, Buffer> } {
     const files: FileMap = { ...base }
+    const bodies = new Map<string, Buffer>()
     let total = 0
     for (const [rawPath, file] of Object.entries(incoming)) {
       const path = normalizeFilePath(rawPath)
@@ -309,7 +317,9 @@ export class ArtifactStore {
       if (total > LIMITS.publishBytes) {
         throw new ArtifactError(413, 'publish_too_large', `One publish may send at most ${LIMITS.publishBytes} bytes.`)
       }
-      files[path] = { sha256: this.blobs.put(file.content), size: file.content.byteLength, type: contentTypeFor(path) }
+      const sha256 = BlobStore.hash(file.content)
+      bodies.set(sha256, file.content)
+      files[path] = { sha256, size: file.content.byteLength, type: contentTypeFor(path) }
     }
     if (Object.keys(files).length === 0) {
       throw new ArtifactError(400, 'no_files', 'An artifact needs at least one file.')
@@ -317,7 +327,24 @@ export class ArtifactStore {
     if (Object.keys(files).length > LIMITS.filesPerVersion) {
       throw new ArtifactError(413, 'too_many_files', `A version may hold at most ${LIMITS.filesPerVersion} files.`)
     }
-    return files
+    return { files, bodies }
+  }
+
+  /** Runs the commit after writing the bodies; if it throws, blobs this call created and nothing references are removed. */
+  private commitWithBlobs<T>(bodies: Map<string, Buffer>, commit: () => T): T {
+    const created: string[] = []
+    try {
+      for (const [sha256, body] of bodies) {
+        if (!this.blobs.has(sha256)) {
+          created.push(sha256)
+        }
+        this.blobs.put(body)
+      }
+      return commit()
+    } catch (error) {
+      this.removeUnreferenced(created)
+      throw error
+    }
   }
 
   publish(input: PublishInput): ArtifactSummary {
@@ -326,11 +353,11 @@ export class ArtifactStore {
     const icon = optionalText(input.icon, 'icon', 40)
     const label = optionalText(input.label, 'label', 60)
     const capabilities = parseCapabilities(input.capabilities)
-    const files = this.storeFiles({}, input.files ?? {})
+    const { files, bodies } = this.planFiles({}, input.files ?? {})
     const entry = chooseEntry(files, input.entry)
     const id = newId(12)
     const at = now()
-    this.transaction(() => {
+    this.commitWithBlobs(bodies, () => this.transaction(() => {
       this.db
         .prepare(`INSERT INTO artifacts (id, title, description, icon, entry, current_version, capabilities, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`)
@@ -339,7 +366,7 @@ export class ArtifactStore {
         .prepare(`INSERT INTO versions (artifact_id, version, label, title, description, entry, files, created_at)
           VALUES (?, 1, ?, ?, ?, ?, ?, ?)`)
         .run(id, label, title, description, entry, JSON.stringify(files), at)
-    })
+    }))
     return this.requireSummary(id)
   }
 
@@ -354,11 +381,11 @@ export class ArtifactStore {
     const icon = input.icon === undefined ? current.icon : optionalText(input.icon, 'icon', 40)
     const label = optionalText(input.label, 'label', 60)
     const capabilities = input.capabilities === undefined ? current.capabilities : parseCapabilities(input.capabilities)
-    const files = this.storeFiles(previous.files, input.files ?? {})
+    const { files, bodies } = this.planFiles(previous.files, input.files ?? {})
     const entry = input.entry !== undefined ? chooseEntry(files, input.entry) : files[current.entry] ? current.entry : chooseEntry(files, undefined)
     const version = current.currentVersion + 1
     const at = now()
-    this.transaction(() => {
+    this.commitWithBlobs(bodies, () => this.transaction(() => {
       this.db
         .prepare(`INSERT INTO versions (artifact_id, version, label, title, description, entry, files, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -366,7 +393,7 @@ export class ArtifactStore {
       this.db
         .prepare(`UPDATE artifacts SET title = ?, description = ?, icon = ?, entry = ?, current_version = ?, capabilities = ?, updated_at = ? WHERE id = ?`)
         .run(title, description, icon, entry, version, JSON.stringify(capabilities), at, id)
-    })
+    }))
     this.emit(id, { kind: 'version', version })
     return this.requireSummary(id)
   }
@@ -379,12 +406,39 @@ export class ArtifactStore {
 
   delete(id: string): void {
     this.requireSummary(id)
+    const candidates = this.db
+      .prepare(`SELECT json_extract(f.value, '$.sha256') AS sha256 FROM versions v, json_each(v.files) f WHERE v.artifact_id = ?
+        UNION SELECT sha256 FROM assets WHERE artifact_id = ?`)
+      .all(id, id)
+      .map((row) => String(row.sha256))
     this.db.prepare('DELETE FROM artifacts WHERE id = ?').run(id)
     this.emit(id, { kind: 'deleted' })
-    this.collectGarbage()
+    this.removeUnreferenced(candidates)
   }
 
-  /** Drops blobs no version or asset references any more. */
+  /** Removes the given blobs unless a remaining version or asset still references them. */
+  private removeUnreferenced(candidates: string[]): void {
+    for (let start = 0; start < candidates.length; start += 500) {
+      const chunk = candidates.slice(start, start + 500)
+      const marks = chunk.map(() => '?').join(',')
+      const referenced = new Set(
+        this.db
+          .prepare(`SELECT sha256 FROM (
+              SELECT json_extract(f.value, '$.sha256') AS sha256 FROM versions v, json_each(v.files) f
+              UNION SELECT sha256 FROM assets
+            ) WHERE sha256 IN (${marks})`)
+          .all(...chunk)
+          .map((row) => String(row.sha256))
+      )
+      for (const sha256 of chunk) {
+        if (!referenced.has(sha256)) {
+          this.blobs.remove(sha256)
+        }
+      }
+    }
+  }
+
+  /** Maintenance sweep over the whole blob directory; delete paths use removeUnreferenced instead. */
   collectGarbage(): number {
     const referenced = new Set<string>()
     for (const row of this.db.prepare('SELECT files FROM versions').all()) {
@@ -466,8 +520,8 @@ export class ArtifactStore {
   }
 
   list(options: { query?: string; limit?: number; offset?: number } = {}): { artifacts: ArtifactSummary[]; total: number } {
-    const limit = Math.min(Math.max(options.limit ?? 50, 1), 200)
-    const offset = Math.max(options.offset ?? 0, 0)
+    const limit = clampInt(options.limit, 50, 1, 200)
+    const offset = clampInt(options.offset, 0, 0, Number.MAX_SAFE_INTEGER)
     const pattern = `%${(options.query ?? '').trim().replace(/[\\%_]/g, (char) => `\\${char}`)}%`
     const where = "WHERE title LIKE ? ESCAPE '\\' OR IFNULL(description, '') LIKE ? ESCAPE '\\' OR id = ?"
     const rows = this.db
@@ -488,17 +542,31 @@ export class ArtifactStore {
     const asset: AssetRow = {
       id: randomBytes(16).toString('hex'),
       name: safeName,
-      sha256: this.blobs.put(content),
+      sha256: BlobStore.hash(content),
       size: content.byteLength,
       type: contentTypeFor(safeName),
       source,
       createdAt: now()
     }
-    this.db
-      .prepare('INSERT INTO assets (artifact_id, id, name, sha256, size, type, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, asset.id, asset.name, asset.sha256, asset.size, asset.type, asset.source, asset.createdAt)
+    this.commitWithBlobs(new Map([[asset.sha256, content]]), () =>
+      this.db
+        .prepare('INSERT INTO assets (artifact_id, id, name, sha256, size, type, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, asset.id, asset.name, asset.sha256, asset.size, asset.type, asset.source, asset.createdAt)
+    )
     this.emit(id, { kind: 'assets' })
     return asset
+  }
+
+  private assetFromRow(row: Record<string, unknown>): AssetRow {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      sha256: String(row.sha256),
+      size: Number(row.size),
+      type: String(row.type),
+      source: String(row.source) === 'page' ? 'page' : 'publisher',
+      createdAt: String(row.created_at)
+    }
   }
 
   listAssets(id: string): AssetRow[] {
@@ -506,30 +574,23 @@ export class ArtifactStore {
     return this.db
       .prepare('SELECT * FROM assets WHERE artifact_id = ? ORDER BY created_at DESC')
       .all(id)
-      .map((row) => ({
-        id: String(row.id),
-        name: String(row.name),
-        sha256: String(row.sha256),
-        size: Number(row.size),
-        type: String(row.type),
-        source: String(row.source) === 'page' ? 'page' : 'publisher',
-        createdAt: String(row.created_at)
-      }))
+      .map((row) => this.assetFromRow(row))
   }
 
   getAsset(id: string, assetId: string): AssetRow {
-    const asset = this.listAssets(id).find((candidate) => candidate.id === assetId)
-    if (!asset) {
+    this.requireSummary(id)
+    const row = this.db.prepare('SELECT * FROM assets WHERE artifact_id = ? AND id = ?').get(id, assetId)
+    if (!row) {
       throw new ArtifactError(404, 'asset_not_found', `No asset ${assetId}.`)
     }
-    return asset
+    return this.assetFromRow(row)
   }
 
   deleteAsset(id: string, assetId: string): void {
-    this.getAsset(id, assetId)
+    const asset = this.getAsset(id, assetId)
     this.db.prepare('DELETE FROM assets WHERE artifact_id = ? AND id = ?').run(id, assetId)
     this.emit(id, { kind: 'assets' })
-    this.collectGarbage()
+    this.removeUnreferenced([asset.sha256])
   }
 
   // Docs: the per-artifact shared database behind the db capability.
@@ -624,7 +685,7 @@ export class ArtifactStore {
   listDocs(id: string, collection: string, options: { limit?: number; after?: string; where?: Record<string, unknown> } = {}): { docs: DocRow[]; next: string | null } {
     this.requireSummary(id)
     this.docKey(collection, 'collection')
-    const limit = Math.min(Math.max(options.limit ?? 100, 1), 500)
+    const limit = clampInt(options.limit, 100, 1, 500)
     const clauses = ['artifact_id = ?', 'collection = ?']
     const params: (string | number | null)[] = [id, collection]
     if (options.after) {
