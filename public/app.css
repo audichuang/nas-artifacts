@@ -114,5 +114,5 @@ textarea { resize: vertical; }
 @media (max-width: 720px) {
   .comments { position: fixed; inset: 52px 0 0 auto; width: min(100%, 360px); z-index: 3; }
   .search { max-width: none; }
-  #open-raw, #copy { display: none; }
+  #fullscreen, #copy { display: none; }
 }

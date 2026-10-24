@@ -243,6 +243,49 @@ describe('content origin paths and caching', () => {
   })
 })
 
+describe('rendered pages opened as a top-level document', () => {
+  const get = (path: string, dest?: string) =>
+    content.request(`http://content.test${path}`, { headers: dest ? { 'sec-fetch-dest': dest } : {} })
+
+  test('a document navigation to a rendered page goes back to the viewer, with version and path', async () => {
+    const { id } = await publish({ 'index.html': '<p>x</p>', 'docs/other.md': '# o', 'a.css': 'a{}' })
+    const entry = await get(`/a/${id}/v/1/`, 'document')
+    assert.equal(entry.status, 302)
+    assert.equal(entry.headers.get('location'), `http://app.test/a/${id}?v=1`)
+    assert.match(entry.headers.get('vary') ?? '', /sec-fetch-dest/i)
+
+    const nested = await get(`/a/${id}/v/1/docs/other.md`, 'document')
+    assert.equal(nested.status, 302)
+    assert.equal(nested.headers.get('location'), `http://app.test/a/${id}?v=1&path=docs%2Fother.md`)
+  })
+
+  test('the viewer frame and header-less clients still get the page', async () => {
+    const { id } = await publish({ 'index.html': '<p>x</p>' })
+    for (const dest of ['iframe', undefined]) {
+      const response = await get(`/a/${id}/v/1/`, dest)
+      assert.equal(response.status, 200)
+      assert.match(response.headers.get('vary') ?? '', /sec-fetch-dest/i)
+    }
+  })
+
+  test('non-rendered files are served to documents unchanged', async () => {
+    const { id } = await publish({ 'index.html': 'x', 'a.css': 'a{}' })
+    assert.equal((await get(`/a/${id}/v/1/a.css`, 'document')).status, 200)
+  })
+
+  test('the viewer loads a requested file only when it exists in that version', async () => {
+    const { id } = await publish({ 'index.html': 'x', 'docs/other.md': '# o' })
+    const pathOf = async (query: string) => {
+      const html = await (await call(`/a/${id}?${query}`)).text()
+      const json = /<script id="page-data" type="application\/json">(.*?)<\/script>/s.exec(html)?.[1] ?? '{}'
+      return (JSON.parse(json) as { path?: string }).path
+    }
+    assert.equal(await pathOf('path=docs/other.md'), 'docs/other.md')
+    assert.equal(await pathOf('path=../x'), undefined)
+    assert.equal(await pathOf('path=missing.html'), undefined)
+  })
+})
+
 describe('app origin framing', () => {
   test('the viewer may frame only its own artifact; the gallery frames nothing', async () => {
     const { id } = await publish({ 'index.html': 'x' })

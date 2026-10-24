@@ -79,6 +79,9 @@ export function createContentServer(store: ArtifactStore, config: Config): Hono 
       'Cache-Control': immutable && !rendered ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag: etag
     }
+    if (rendered) {
+      headers.Vary = 'Sec-Fetch-Dest'
+    }
     if (!isMarkdownPath(path) && !isHtmlPath(path) && !isServableType(entry.type)) {
       throw new ArtifactError(404, 'not_servable', `${path} is not a web media type.`)
     }
@@ -136,6 +139,15 @@ export function createContentServer(store: ArtifactStore, config: Config): Hono 
       const entry = path ? row.files[path] : undefined
       if (!path || !entry) {
         return c.text('Not found', 404)
+      }
+      // A rendered page opened as its own document has no frame-src to confine it, so it goes back into the viewer.
+      if ((isHtmlPath(path) || isMarkdownPath(path)) && c.req.header('sec-fetch-dest') === 'document') {
+        const query = new URLSearchParams({ v: String(version) })
+        if (path !== row.entry) {
+          query.set('path', path)
+        }
+        c.header('Vary', 'Sec-Fetch-Dest')
+        return c.redirect(`${config.appOrigin}/a/${id}?${query}`, 302)
       }
       return serveFile(() => store.blobs.read(entry.sha256), entry, path, row.title, true, c.req.header('if-none-match'))
     }

