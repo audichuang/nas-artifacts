@@ -60,3 +60,12 @@ export function isMarkdownPath(path: string): boolean {
 export function isHtmlPath(path: string): boolean {
   return ['.html', '.htm'].includes(extname(path).toLowerCase())
 }
+
+/** Decodes and normalizes a path taken from a request URL; malformed escapes are null, not a throw. */
+export function decodeRequestPath(encoded: string): string | null {
+  try {
+    return normalizeFilePath(decodeURIComponent(encoded))
+  } catch {
+    return null
+  }
+}
