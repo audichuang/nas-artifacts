@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>共用待辦清單</title>
+<style>
+:root{
+  --bg:#fafaf9;--surface:#ffffff;--surface-2:#f5f5f4;--text:#1c1917;--muted:#57534e;--border:#e7e5e4;
+  --accent:#2563eb;--accent-soft:#dbeafe;--ok:#15803d;--ok-soft:#dcfce7;--warn:#b45309;--warn-soft:#fef3c7;--bad:#b91c1c;--bad-soft:#fee2e2;
+  --c1:#0072b2;--c2:#e69f00;--c3:#009e73;
+  --font:system-ui,-apple-system,"Segoe UI","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:40px;--radius:10px;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#171717;--surface:#1f1f1f;--surface-2:#262626;--text:#f5f5f4;--muted:#a8a29e;--border:#3a3a3a;
+  --accent:#60a5fa;--accent-soft:#1e3a5f;--ok:#4ade80;--ok-soft:#14321f;--warn:#fbbf24;--warn-soft:#3b2f0d;--bad:#f87171;--bad-soft:#3f1d1d;
+  --c1:#56b4e9;--c2:#e69f00;--c3:#009e73;
+}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+main{max-width:560px;margin:0 auto;padding:var(--s5) var(--s4) var(--s6)}
+h1{font-size:clamp(24px,5vw,30px);line-height:1.25;margin:0 0 var(--s1)}
+.meta{color:var(--muted);font-size:14px;margin-bottom:var(--s4)}
+form{display:flex;gap:var(--s2);margin-bottom:var(--s4)}
+input[type=text]{flex:1;min-width:0;font:inherit;padding:var(--s3);border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text)}
+button{font:inherit;padding:var(--s3) var(--s4);border:0;border-radius:var(--radius);background:var(--accent);color:#fff;cursor:pointer;min-height:44px}
+@media (prefers-color-scheme:dark){button{color:#0b1220}}
+button:disabled{opacity:.5;cursor:default}
+button.ghost{background:transparent;color:var(--muted);padding:var(--s2) var(--s3);min-height:44px}
+button.ghost:hover{color:var(--bad)}
+ul{list-style:none;margin:0;padding:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
+li{display:flex;align-items:center;gap:var(--s3);padding:0 var(--s3) 0 var(--s4);border-bottom:1px solid var(--border)}
+li:last-child{border-bottom:0}
+label{flex:1;display:flex;align-items:center;gap:var(--s3);padding:var(--s3) 0;min-width:0;cursor:pointer}
+label span{overflow-wrap:anywhere}
+input[type=checkbox]{width:20px;height:20px;flex:none;accent-color:var(--accent)}
+li.done label span{color:var(--muted);text-decoration:line-through}
+.status{color:var(--muted);font-size:14px;margin-top:var(--s3)}
+.notice{border-left:4px solid var(--warn);background:var(--warn-soft);border-radius:0 var(--radius) var(--radius) 0;padding:var(--s3) var(--s4);margin:var(--s4) 0}
+.notice.error{border-color:var(--bad);background:var(--bad-soft)}
+.empty{padding:var(--s5) var(--s4);color:var(--muted);text-align:center}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <h1>共用待辦清單</h1>
+  <div class="meta" id="count">載入中…</div>
+  <div class="notice" id="outside" hidden><strong>請在 Artifacts 檢視頁開啟</strong><br>這份清單需要檢視頁提供的共用資料庫,直接開啟內容網址時無法使用。</div>
+  <div class="notice error" id="error" hidden></div>
+  <form id="form" autocomplete="off">
+    <input type="text" id="text" maxlength="200" placeholder="新增一個待辦事項" aria-label="待辦事項內容" required>
+    <button type="submit" id="add">新增</button>
+  </form>
+  <ul id="list" aria-live="polite"></ul>
+  <div class="status" id="status"></div>
+</main>
+<script>
+(function(){
+  var COLLECTION='items';
+  var $=function(id){return document.getElementById(id)};
+  var list=$('list'), form=$('form'), text=$('text');
+  var items=[], gen=0, running=false, again=false, ready=false;
+
+  function show(el,msg){el.hidden=false;if(msg)el.textContent=msg}
+  function fail(e){
+    var msg=(e&&e.message)||String(e);
+    if(!window.artifact||/viewer|timed out/i.test(msg)){show($('outside'));form.hidden=true;list.hidden=true;$('count').textContent='';return}
+    show($('error'),'發生錯誤:'+msg);
+  }
+
+  async function fetchAll(){
+    var docs=[],after;
+    do{
+      var page=await artifact.db.list(COLLECTION,after?{limit:100,after:after}:{limit:100});
+      docs=docs.concat(page.docs);after=page.next;
+    }while(after);
+    return docs.map(function(d){return{id:d.id,title:d.data.title,done:!!d.data.done,at:d.data.createdAt||0}})
+      .sort(function(a,b){return a.at-b.at||(a.id<b.id?-1:1)});
+  }
+
+  function render(){
+    list.innerHTML='';
+    if(!items.length){var e=document.createElement('li');e.className='empty';e.textContent='還沒有項目,在上面新增第一個吧。';e.style.display='block';list.appendChild(e)}
+    items.forEach(function(it){
+      var li=document.createElement('li');li.className=it.done?'done':'';
+      var label=document.createElement('label'),cb=document.createElement('input'),sp=document.createElement('span');
+      cb.type='checkbox';cb.checked=it.done;sp.textContent=it.title;
+      cb.addEventListener('change',function(){artifact.db.update(COLLECTION,it.id,{done:cb.checked}).catch(fail)});
+      label.appendChild(cb);label.appendChild(sp);
+      var del=document.createElement('button');del.type='button';del.className='ghost';del.textContent='刪除';
+      del.setAttribute('aria-label','刪除:'+it.title);
+      del.addEventListener('click',function(){artifact.db.delete(COLLECTION,it.id).catch(fail)});
+      li.appendChild(label);li.appendChild(del);list.appendChild(li);
+    });
+    var done=items.filter(function(i){return i.done}).length;
+    $('count').textContent='共 '+items.length+' 項,已完成 '+done+' 項';
+  }
+
+  // 任何事件(含重連後的 resync)都整份重新讀取;重疊的請求合併成一次
+  async function refresh(){
+    if(running){again=true;return}
+    running=true;
+    try{
+      do{again=false;items=await fetchAll();render();$('error').hidden=true;ready=true}while(again);
+    }catch(e){fail(e)}finally{running=false}
+  }
+
+  form.addEventListener('submit',function(ev){
+    ev.preventDefault();
+    var title=text.value.trim();if(!title)return;
+    var id='i'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+    text.value='';
+    artifact.db.set(COLLECTION,id,{title:title,done:false,createdAt:Date.now()}).catch(fail);
+    text.focus();
+  });
+
+  if(!window.artifact){fail(null);return}
+  artifact.db.subscribe(function(){refresh()});
+  refresh();
+})();
+</script>
+</body>
+</html>

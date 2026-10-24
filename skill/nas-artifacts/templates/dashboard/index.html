@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>營運儀表板</title>
+<style>
+:root{
+  --bg:#fafaf9;--surface:#ffffff;--surface-2:#f5f5f4;--text:#1c1917;--muted:#57534e;--border:#e7e5e4;
+  --accent:#2563eb;--accent-soft:#dbeafe;--ok:#15803d;--ok-soft:#dcfce7;--warn:#b45309;--warn-soft:#fef3c7;--bad:#b91c1c;--bad-soft:#fee2e2;
+  --c1:#0072b2;--c2:#e69f00;--c3:#009e73;
+  --font:system-ui,-apple-system,"Segoe UI","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:40px;--radius:10px;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#171717;--surface:#1f1f1f;--surface-2:#262626;--text:#f5f5f4;--muted:#a8a29e;--border:#3a3a3a;
+  --accent:#60a5fa;--accent-soft:#1e3a5f;--ok:#4ade80;--ok-soft:#14321f;--warn:#fbbf24;--warn-soft:#3b2f0d;--bad:#f87171;--bad-soft:#3f1d1d;
+  --c1:#56b4e9;--c2:#e69f00;--c3:#009e73;
+}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--font)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+main{max-width:1080px;margin:0 auto;padding:var(--s5) var(--s4) var(--s6)}
+h1{font-size:clamp(24px,5vw,30px);line-height:1.25;margin:0}
+h2{font-size:16px;margin:0 0 var(--s3)}
+.meta{color:var(--muted);font-size:13px;margin:var(--s1) 0 var(--s5)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--s3);margin-bottom:var(--s4)}
+.tile,.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:var(--s4);min-width:0}
+.tile .label{color:var(--muted);font-size:13px}
+.tile .value{font-size:24px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums}
+.tile .unit{font-size:14px;font-weight:400;color:var(--muted);margin-left:4px}
+.tile .delta{font-size:13px;font-variant-numeric:tabular-nums}
+.good{color:var(--ok)}.bad{color:var(--bad)}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:var(--s3);margin-bottom:var(--s4)}
+svg{display:block;width:100%;height:auto}
+svg text{fill:var(--muted);font:12px var(--font)}
+svg .grid{stroke:var(--border)}
+svg .axis{stroke:var(--muted)}
+.legend{display:flex;gap:var(--s4);flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:var(--s2)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}
+.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:15px}
+th,td{padding:var(--s3) var(--s4);text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+th{background:var(--surface-2);color:var(--muted);font-size:13px;font-weight:600}
+tr:last-child td{border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.empty{color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">儀表板</h1>
+  <div class="meta" id="updated"></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="charts">
+    <section class="panel"><h2 id="trend-title"></h2><div id="trend"></div><div class="legend" id="trend-legend"></div></section>
+    <section class="panel"><h2 id="bar-title"></h2><div id="bars"></div></section>
+  </div>
+  <section class="panel"><h2 id="table-title"></h2><div class="table-wrap" tabindex="0" role="region" aria-label="資料表,可橫向捲動"><table id="table"></table></div></section>
+</main>
+<script src="data.js"></script>
+<script>
+(function(){
+  var D=window.DASHBOARD;
+  var $=function(id){return document.getElementById(id)};
+  var esc=function(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})};
+  var fmt=function(n){return Number(n).toLocaleString('zh-TW')};
+  if(!D){document.body.innerHTML='<main><p class="empty">找不到 data.js,請確認它與 index.html 一起發佈。</p></main>';return}
+
+  $('title').textContent=D.title; document.title=D.title;
+  $('updated').textContent='更新時間:'+D.updated;
+
+  $('tiles').innerHTML=D.kpis.map(function(k){
+    var up=k.delta>=0, good=up===!!k.goodWhenUp;
+    return '<div class="tile"><div class="label">'+esc(k.label)+'</div>'+
+      '<div class="value">'+esc(k.value)+'<span class="unit">'+esc(k.unit||'')+'</span></div>'+
+      '<div class="delta '+(good?'good':'bad')+'">'+(up?'▲ +':'▼ ')+k.delta+'% 較上期</div></div>';
+  }).join('');
+
+  var palette=['var(--c1)','var(--c2)','var(--c3)'];
+  function niceMax(v){var p=Math.pow(10,Math.floor(Math.log10(v||1))),n=v/p;return(n<=1?1:n<=2?2:n<=5?5:10)*p}
+
+  function lineChart(c){
+    $('trend-title').textContent=c.title;
+    var W=Math.max(280,$('trend').clientWidth||520),H=260,L=56,R=16,T=12,B=48,pw=W-L-R,ph=H-T-B;
+    var max=niceMax(Math.max.apply(null,[].concat.apply([],c.series.map(function(s){return s.values}))));
+    var n=c.labels.length, x=function(i){return L+pw*i/(n-1)}, y=function(v){return T+ph*(1-v/max)};
+    var o='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+esc(c.title)+'">';
+    for(var g=0;g<=4;g++){var gv=max*g/4,gy=y(gv);
+      o+='<line class="grid" x1="'+L+'" x2="'+(W-R)+'" y1="'+gy+'" y2="'+gy+'"/><text x="'+(L-6)+'" y="'+(gy+4)+'" text-anchor="end">'+fmt(gv)+'</text>'}
+    o+='<line class="axis" x1="'+L+'" x2="'+(W-R)+'" y1="'+(T+ph)+'" y2="'+(T+ph)+'"/>';
+    c.labels.forEach(function(l,i){o+='<text x="'+x(i)+'" y="'+(T+ph+16)+'" text-anchor="middle">'+esc(l)+'</text>'});
+    o+='<text x="'+(L+pw/2)+'" y="'+(H-6)+'" text-anchor="middle">'+esc(c.xLabel)+'</text>';
+    o+='<text transform="rotate(-90 12 '+(T+ph/2)+')" x="12" y="'+(T+ph/2)+'" text-anchor="middle">'+esc(c.yLabel)+'</text>';
+    c.series.forEach(function(s,k){
+      var pts=s.values.map(function(v,i){return x(i)+','+y(v)}).join(' ');
+      o+='<polyline points="'+pts+'" fill="none" stroke="'+palette[k%3]+'" stroke-width="2.5" stroke-linejoin="round"'+(k?' stroke-dasharray="6 4"':'')+'/>';
+      s.values.forEach(function(v,i){o+='<circle cx="'+x(i)+'" cy="'+y(v)+'" r="3.5" fill="'+palette[k%3]+'"><title>'+esc(s.name)+' '+esc(c.labels[i])+':'+fmt(v)+'</title></circle>'});
+    });
+    $('trend').innerHTML=o+'</svg>';
+    $('trend-legend').innerHTML=c.series.map(function(s,k){return '<span><i style="background:'+palette[k%3]+'"></i>'+esc(s.name)+'</span>'}).join('');
+  }
+
+  function barChart(c){
+    $('bar-title').textContent=c.title;
+    var rowH=40,L=84,R=48,T=8,B=40,W=Math.max(280,$('bars').clientWidth||520),H=T+B+rowH*c.items.length,pw=W-L-R;
+    var max=niceMax(Math.max.apply(null,c.items.map(function(i){return i.value})));
+    var o='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+esc(c.title)+'">';
+    for(var g=0;g<=4;g++){var gx=L+pw*g/4;
+      o+='<line class="grid" x1="'+gx+'" x2="'+gx+'" y1="'+T+'" y2="'+(H-B)+'"/><text x="'+gx+'" y="'+(H-B+16)+'" text-anchor="middle">'+fmt(max*g/4)+'</text>'}
+    c.items.forEach(function(it,i){var yy=T+i*rowH+8,w=pw*it.value/max;
+      o+='<text x="'+(L-8)+'" y="'+(yy+16)+'" text-anchor="end">'+esc(it.name)+'</text>'+
+         '<rect x="'+L+'" y="'+yy+'" width="'+w+'" height="24" rx="3" fill="var(--c1)"/>'+
+         '<text x="'+(L+w+6)+'" y="'+(yy+16)+'">'+fmt(it.value)+'</text>'});
+    o+='<text x="'+(L+pw/2)+'" y="'+(H-4)+'" text-anchor="middle">'+esc(c.xLabel)+'</text>';
+    $('bars').innerHTML=o+'</svg>';
+  }
+
+  function table(t){
+    $('table-title').textContent=t.title;
+    $('table').innerHTML='<thead><tr>'+t.columns.map(function(c){return '<th'+(c.num?' class="num"':'')+'>'+esc(c.label)+'</th>'}).join('')+'</tr></thead><tbody>'+
+      t.rows.map(function(r){return '<tr>'+t.columns.map(function(c){return '<td'+(c.num?' class="num"':'')+'>'+esc(c.num?fmt(r[c.key]):r[c.key])+'</td>'}).join('')+'</tr>'}).join('')+'</tbody>';
+  }
+  function draw(){lineChart(D.trend);barChart(D.breakdown)}
+  draw();table(D.table);
+  var last=window.innerWidth;
+  window.addEventListener('resize',function(){if(window.innerWidth!==last){last=window.innerWidth;draw()}});
+})();
+</script>
+</body>
+</html>
