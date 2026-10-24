@@ -418,3 +418,17 @@ test('a viewer on a version that gets pruned moves to the current one', { skip: 
   assert.deepEqual(await viewer.locator('#version option').allTextContents(), ['v2 · 最新'])
   await viewer.close()
 })
+
+test('gallery search finds page text and shows the hit as text, never markup', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = '# 搜尋\n\n倉庫驗貨 &lt;img src=x onerror="document.title=\'pwned\'"&gt; 流程\n'
+  store.publish({ title: 'Search', files: { 'index.md': { content: Buffer.from(md) } } })
+  const gallery = await browser.newPage()
+  await gallery.goto(`http://localhost:${APP_PORT}/`)
+  await gallery.locator('#search').fill('驗貨')
+  const snippet = gallery.locator('.card-snippet').filter({ hasText: '倉庫驗貨' })
+  await snippet.waitFor({ timeout: 5000 })
+  assert.equal(await snippet.locator('mark').textContent(), '驗貨')
+  assert.equal(await snippet.locator('img').count(), 0)
+  assert.notEqual(await gallery.title(), 'pwned')
+  await gallery.close()
+})

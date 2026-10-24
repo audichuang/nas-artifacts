@@ -31,7 +31,7 @@ export function galleryPage(config: Config): string {
   <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Artifacts</a>
   <label class="search">
     <span class="visually-hidden">搜尋</span>
-    <input id="search" type="search" placeholder="搜尋標題或說明" autocomplete="off">
+    <input id="search" type="search" placeholder="搜尋標題、內文或來源資料夾" autocomplete="off">
   </label>
 </header>
 <main class="gallery">

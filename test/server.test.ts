@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
@@ -511,5 +512,49 @@ describe('pruning old versions', () => {
     await call(`/api/artifacts/${id}/prune`, { method: 'POST', token: TOKEN, json: { keep: 1 } })
     const page = await (await call(`/a/${id}?v=1`)).text()
     assert.match(page, /"version":2/)
+  })
+})
+
+describe('search', () => {
+  type Found = { artifacts: { id: string; snippet?: string | null }[] }
+  const search = async (q: string) => (await (await call(`/api/artifacts?q=${encodeURIComponent(q)}`)).json()) as Found
+
+  test('finds words in the page text, including two-character CJK words, with a snippet around the hit', async () => {
+    const md = `# 週報\n\n${'前言很長。'.repeat(30)}這週完成了倉庫驗貨流程的自動化。\n`
+    const { id } = await publish({ 'index.md': md, 'b.html': '<html><head><style>.zebra{}</style><script>var giraffe = 1</script></head><body><p>Hello &amp; welcome</p></body></html>' })
+    const hit = (await search('驗貨')).artifacts.find((a) => a.id === id)
+    assert.ok(hit, 'found by body text')
+    assert.match(hit.snippet ?? '', /倉庫驗貨流程/)
+    assert.ok((hit.snippet ?? '').length < 120)
+    assert.ok((await search('welcome')).artifacts.some((a) => a.id === id))
+    assert.ok((await search('Hello & welcome')).artifacts.some((a) => a.id === id))
+    assert.ok(!(await search('giraffe')).artifacts.some((a) => a.id === id), 'script text is not page text')
+    assert.ok(!(await search('zebra')).artifacts.some((a) => a.id === id), 'style text is not page text')
+  })
+
+  test('searches the current version only, and the source machine and folder', async () => {
+    const { id } = await publish({ 'index.md': '舊的說法:麒麟' }, { source: { host: 'studio-mac', path: '~/Project/kirin' } })
+    await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { baseVersion: 1, files: { 'index.md': { content: '新的說法:鳳凰' } } } })
+    assert.ok(!(await search('麒麟')).artifacts.some((a) => a.id === id))
+    assert.ok((await search('鳳凰')).artifacts.some((a) => a.id === id))
+    assert.ok((await search('studio-mac')).artifacts.some((a) => a.id === id))
+    assert.ok((await search('Project/kirin')).artifacts.some((a) => a.id === id))
+  })
+
+  test('artifacts published before search existed are indexed when the server starts', async () => {
+    const own = mkdtempSync(join(tmpdir(), 'artifacts-backfill-'))
+    try {
+      const before = new ArtifactStore(own)
+      const { id } = before.publish({ title: 'Old', files: { 'index.md': { content: Buffer.from('早就發佈的玄武') } } })
+      before.close()
+      const raw = new DatabaseSync(join(own, 'artifacts.db'))
+      raw.exec('DELETE FROM search_text')
+      raw.close()
+      const after = new ArtifactStore(own)
+      assert.deepEqual(after.list({ query: '玄武' }).artifacts.map((a) => a.id), [id])
+      after.close()
+    } finally {
+      rmSync(own, { recursive: true, force: true })
+    }
   })
 })

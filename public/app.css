@@ -78,6 +78,8 @@ textarea { resize: vertical; }
 .card-head { display: flex; align-items: center; gap: 8px; }
 .card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .card-desc { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card-snippet { margin: 0; font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.card-snippet mark { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); border-radius: 3px; padding: 0 2px; }
 .card-source { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta { margin-top: auto; color: var(--muted); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
 .artifact-icon { font-size: 18px; line-height: 1; min-width: 18px; text-align: center; }

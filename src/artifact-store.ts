@@ -52,6 +52,8 @@ export type ArtifactSummary = {
   updatedAt: string
 }
 
+export type ArtifactListing = ArtifactSummary & { snippet?: string | null }
+
 export type ArtifactDetail = ArtifactSummary & { versions: Omit<VersionRow, 'files'>[] }
 
 export type AssetRow = {
@@ -193,6 +195,40 @@ function parseSource(value: unknown): Source | null {
   return { host, path }
 }
 
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
+const SEARCH_CHARS = 500_000
+
+/** The words a reader sees: markup, scripts, styles and link targets dropped, entities decoded. */
+function pageText(path: string, content: string): string {
+  const text = isMarkdownPath(path)
+    ? content.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/<[^>]+>/g, ' ').replace(/[#*_>`~|-]+/g, ' ')
+    : content
+        .replace(/<(script|style|template)\b[\s\S]*?<\/\1\s*>/gi, ' ')
+        .replace(/<!--[\s\S]*?-->/g, ' ')
+        .replace(/<[^>]+>/g, ' ')
+  return text
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, name: string) => {
+      if (name[0] === '#') {
+        const code = name[1] === 'x' || name[1] === 'X' ? parseInt(name.slice(2), 16) : Number(name.slice(1))
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : ' '
+      }
+      return ENTITIES[name.toLowerCase()] ?? match
+    })
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** About 40 characters either side of the first hit. */
+function snippetAround(text: string, query: string): string | null {
+  const at = text.toLowerCase().indexOf(query.toLowerCase())
+  if (at < 0) {
+    return null
+  }
+  const start = Math.max(0, at - 40)
+  const end = Math.min(text.length, at + query.length + 40)
+  return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`
+}
+
 const sourceFromRow = (row: Record<string, unknown>): Source | null =>
   row.source_host === null || row.source_host === undefined ? null : { host: String(row.source_host), path: String(row.source_path ?? '') }
 
@@ -303,6 +339,17 @@ export class ArtifactStore {
       this.addColumn(table, 'source_host', 'TEXT')
       this.addColumn(table, 'source_path', 'TEXT')
     }
+    this.db.exec(`CREATE TABLE IF NOT EXISTS search_text (
+      artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      text TEXT NOT NULL
+    )`)
+    // Artifacts published before search existed, or whose index fell behind, are indexed now.
+    for (const row of this.db
+      .prepare('SELECT a.id, a.current_version FROM artifacts a LEFT JOIN search_text t ON t.artifact_id = a.id WHERE t.version IS NOT a.current_version')
+      .all()) {
+      this.indexText(String(row.id), Number(row.current_version))
+    }
   }
 
   /** Columns added after the first release; CREATE TABLE IF NOT EXISTS leaves existing tables as they were. */
@@ -311,6 +358,22 @@ export class ArtifactStore {
     if (!columns.includes(column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
     }
+  }
+
+  /** Keeps the searchable text of the artifact's current version: its pages, entry first. */
+  private indexText(id: string, version: number): void {
+    const row = this.requireVersion(id, version)
+    const pages = Object.keys(row.files)
+      .filter((path) => isHtmlPath(path) || isMarkdownPath(path))
+      .sort((a, b) => Number(b === row.entry) - Number(a === row.entry) || a.localeCompare(b))
+    let text = ''
+    for (const path of pages) {
+      if (text.length >= SEARCH_CHARS) break
+      text += ` ${pageText(path, this.blobs.read(row.files[path].sha256).toString('utf8'))}`
+    }
+    this.db
+      .prepare('INSERT INTO search_text (artifact_id, version, text) VALUES (?, ?, ?) ON CONFLICT(artifact_id) DO UPDATE SET version = excluded.version, text = excluded.text')
+      .run(id, version, text.trim().slice(0, SEARCH_CHARS))
   }
 
   close(): void {
@@ -431,6 +494,7 @@ export class ArtifactStore {
         .prepare(`INSERT INTO versions (artifact_id, version, label, title, description, entry, files, source_host, source_path, created_at)
           VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, label, title, description, entry, JSON.stringify(files), source?.host ?? null, source?.path ?? null, at)
+      this.indexText(id, 1)
     }))
     return this.requireSummary(id)
   }
@@ -470,6 +534,7 @@ export class ArtifactStore {
         .prepare(`UPDATE artifacts SET title = ?, description = ?, icon = ?, entry = ?, current_version = ?, capabilities = ?, updated_at = ?,
           source_host = COALESCE(?, source_host), source_path = COALESCE(?, source_path) WHERE id = ?`)
         .run(title, description, icon, entry, version, JSON.stringify(capabilities), at, source?.host ?? null, source?.path ?? null, id)
+      this.indexText(id, version)
     }))
     this.emit(id, { kind: 'version', version })
     return this.requireSummary(id)
@@ -646,16 +711,34 @@ export class ArtifactStore {
     }
   }
 
-  list(options: { query?: string; limit?: number; offset?: number } = {}): { artifacts: ArtifactSummary[]; total: number } {
+  /** A query matches the title, description, id, source machine or folder, or the current version's page text. */
+  list(options: { query?: string; limit?: number; offset?: number } = {}): { artifacts: ArtifactListing[]; total: number } {
     const limit = clampInt(options.limit, 50, 1, 200)
     const offset = clampInt(options.offset, 0, 0, Number.MAX_SAFE_INTEGER)
-    const pattern = `%${(options.query ?? '').trim().replace(/[\\%_]/g, (char) => `\\${char}`)}%`
-    const where = "WHERE title LIKE ? ESCAPE '\\' OR IFNULL(description, '') LIKE ? ESCAPE '\\' OR id = ?"
+    const query = (options.query ?? '').trim()
+    const pattern = `%${query.replace(/[\\%_]/g, (char) => `\\${char}`)}%`
+    const like = (column: string) => `${column} LIKE ? ESCAPE '\\'`
+    const where = query
+      ? `WHERE ${[like('a.title'), like("IFNULL(a.description, '')"), 'a.id = ?', like("IFNULL(a.source_host, '')"), like("IFNULL(a.source_path, '')"), like("IFNULL(t.text, '')")].join(' OR ')}`
+      : ''
+    const params = query ? [pattern, pattern, query, pattern, pattern, pattern] : []
+    const from = 'FROM artifacts a LEFT JOIN search_text t ON t.artifact_id = a.id'
     const rows = this.db
-      .prepare(`SELECT * FROM artifacts ${where} ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?`)
-      .all(pattern, pattern, (options.query ?? '').trim(), limit, offset)
-    const total = this.db.prepare(`SELECT COUNT(*) AS n FROM artifacts ${where}`).get(pattern, pattern, (options.query ?? '').trim())
-    return { artifacts: rows.map((row) => this.summaryFromRow(row)), total: Number(total?.n ?? 0) }
+      .prepare(`SELECT a.*, t.text AS search_text ${from} ${where} ORDER BY a.pinned DESC, a.updated_at DESC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset)
+    const total = this.db.prepare(`SELECT COUNT(*) AS n ${from} ${where}`).get(...params)
+    return {
+      artifacts: rows.map((row) => {
+        const summary: ArtifactListing = this.summaryFromRow(row)
+        // A snippet only when the words are not already in what the card shows.
+        const shown = `${summary.title} ${summary.description ?? ''}`.toLowerCase()
+        if (query && !shown.includes(query.toLowerCase())) {
+          summary.snippet = snippetAround(String(row.search_text ?? ''), query)
+        }
+        return summary
+      }),
+      total: Number(total?.n ?? 0)
+    }
   }
 
   // Assets: files that outlive versions, uploaded by the publisher or by a page with the uploads capability.

@@ -54,6 +54,20 @@ function card(artifact) {
     meta.append(span)
   }
   link.append(meta)
+  if (artifact.snippet) {
+    const snippet = document.createElement('p')
+    snippet.className = 'card-snippet'
+    // The hit is marked with text nodes only: the snippet is page text, never markup.
+    const at = artifact.snippet.toLowerCase().indexOf(query.toLowerCase())
+    if (at >= 0) {
+      const mark = document.createElement('mark')
+      mark.textContent = artifact.snippet.slice(at, at + query.length)
+      snippet.append(artifact.snippet.slice(0, at), mark, artifact.snippet.slice(at + query.length))
+    } else {
+      snippet.textContent = artifact.snippet
+    }
+    link.append(snippet)
+  }
   if (artifact.source) {
     const source = document.createElement('div')
     source.className = 'card-source'
