@@ -1,9 +1,20 @@
 import { constants, inflateRawSync } from 'node:zlib'
 
-/** An Office file is a zip of untrusted parts: bounded in count and inflated size, read only by name. */
-export const ZIP_LIMITS = { entries: 5000, entryBytes: 64 * 1024 * 1024, totalBytes: 256 * 1024 * 1024 }
+/**
+ * An Office file is a zip of untrusted parts: bounded in count and inflated size, read only by name. 20,000 entries
+ * (a few MB of directory) fits a deck of about 5000 slides with notes; a 64 MB upload could otherwise list close to
+ * a million.
+ */
+export const ZIP_LIMITS = { entries: 20_000, entryBytes: 64 * 1024 * 1024, totalBytes: 256 * 1024 * 1024 }
 
-export class ZipError extends Error {}
+/** `limit`: the file is readable but past one of ZIP_LIMITS (too big for this page), not broken. */
+export class ZipError extends Error {
+  readonly limit: boolean
+  constructor(message: string, limit = false) {
+    super(message)
+    this.limit = limit
+  }
+}
 
 const fold = (name: string) => name.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase()
 
@@ -29,7 +40,7 @@ export class ZipReader {
     if (end < 0) throw new ZipError('不是 zip 檔')
     const count = data.readUInt16LE(end + 10)
     let at = data.readUInt32LE(end + 16)
-    if (count > ZIP_LIMITS.entries) throw new ZipError('zip 檔內的項目太多')
+    if (count > ZIP_LIMITS.entries) throw new ZipError(`檔案太大:裡面有 ${count.toLocaleString('en-US')} 個項目,超過網頁版能讀取的 ${ZIP_LIMITS.entries.toLocaleString('en-US')} 個`, true)
     for (let i = 0; i < count; i++) {
       if (at + 46 > data.length || data.readUInt32LE(at) !== 0x02014b50) throw new ZipError('zip 檔的目錄已損壞')
       const method = data.readUInt16LE(at + 10)
@@ -71,13 +82,13 @@ export class ZipReader {
 
   private count(bytes: number): void {
     this.inflated += bytes
-    if (this.inflated > ZIP_LIMITS.totalBytes) throw new ZipError('檔案解壓縮後超過大小上限')
+    if (this.inflated > ZIP_LIMITS.totalBytes) throw new ZipError('檔案太大:解壓縮後超過網頁版能讀取的大小上限', true)
   }
 
   read(name: string): Buffer | null {
     const entry = this.entry(name)
     if (!entry) return null
-    if (entry.size > ZIP_LIMITS.entryBytes) throw new ZipError(`${name} 太大,超過單一項目的大小上限`)
+    if (entry.size > ZIP_LIMITS.entryBytes) throw new ZipError(`檔案太大:${name} 超過網頁版能讀取的單一項目大小上限`, true)
     const raw = this.raw(name, entry)
     let out: Buffer
     if (entry.method === 0) out = Buffer.from(raw)

@@ -6,6 +6,7 @@ import { after, before, describe, test } from 'node:test'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
 import { docxText, readDocx, renderDocxPage } from '../src/docx.ts'
+import { ZIP_LIMITS } from '../src/zip.ts'
 import { zip } from './helpers/zip.ts'
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
@@ -782,6 +783,18 @@ describe('Word shapes and layout (matrix round)', () => {
   const shapeIn = (xfrm: string, prst: string, bodyPr = '') =>
     p(`<w:r><w:drawing><wp:inline><wp:extent cx="1828800" cy="914400"/><wp:docPr id="3" name="d"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr><a:xfrm${xfrm}><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:txbx><w:txbxContent>${p(r('箭頭字'))}</w:txbxContent></wps:txbx><wps:bodyPr${bodyPr}/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`)
   const boxes = (html: string) => [...html.matchAll(/<span class="dx-txbx" style="([^"]*)">([\s\S]*?)<\/span>/g)].map((m) => ({ style: m[1], body: m[2] }))
+
+  test('P-1 (Word): a document past the zip limits is called too big, not broken', () => {
+    const saved = { ...ZIP_LIMITS }
+    ZIP_LIMITS.entries = 1
+    try {
+      const html = renderDocxPage(docOf(p(r('x'))), 'big.docx', 'big')
+      assert.match(html, /檔案太大/)
+      assert.doesNotMatch(html, /損毀|不是有效/)
+    } finally {
+      Object.assign(ZIP_LIMITS, saved)
+    }
+  })
 
   test('W-1: a flipped shape mirrors its geometry, not its text; a rotation and vert270 share one transform', () => {
     const html = readDocx(docOf(shapeIn(' flipH="1"', 'rightArrow') + shapeIn(' flipV="1"', 'triangle') + shapeIn(' rot="5400000"', 'rect', ' vert="vert270"') + shapeIn(' rot="2700000" flipH="1"', 'rightArrow', ' vert="vert270"')), '').html

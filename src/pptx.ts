@@ -1915,6 +1915,7 @@ export function pptxText(data: Buffer): string {
 
 /** Why a deck cannot be read, in words for the reader. */
 function failureReason(error: unknown): string {
+  if (error instanceof ZipError && error.limit) return `${error.message}。檔案本身沒有壞,請下載原始檔查看。`
   if (error instanceof ZipError) return '檔案不是有效的 .pptx(zip 格式),可能已損毀,或副檔名不符。'
   if (error instanceof XmlError) return '簡報內容的 XML 無法解析,檔案可能已損毀。'
   if (error instanceof Error && /[一-鿿]/.test(error.message)) return error.message

@@ -144,3 +144,30 @@ function storedZip(name: string, data: Buffer): Buffer {
   end.writeUInt32LE(30 + nameBytes.length + data.length, 16)
   return Buffer.concat([local, nameBytes, data, entry, nameBytes, end])
 }
+
+describe('a file past a size limit is too big, not broken (matrix round)', () => {
+  const many = (count: number) => deflatedZip(Object.fromEntries(Array.from({ length: count }, (_, at) => [`ppt/slides/s${at}.xml`, '<x/>'])))
+
+  test('P-1: a deck of ~1700 slides with notes (about 6800 entries) opens', () => {
+    const reader = new ZipReader(many(6800))
+    assert.equal(reader.names().length, 6800)
+  })
+
+  test('P-1: past the entry, item-size and inflated-size limits the error says the file is too big, and is marked as a limit', () => {
+    const saved = { ...ZIP_LIMITS }
+    try {
+      ZIP_LIMITS.entries = 10
+      assert.throws(() => new ZipReader(many(11)), (error: Error) => error instanceof ZipError && error.limit && /太大/.test(error.message) && !/損/.test(error.message))
+      Object.assign(ZIP_LIMITS, saved)
+      ZIP_LIMITS.entryBytes = 100
+      assert.throws(() => new ZipReader(deflatedZip({ 'a.xml': 'x'.repeat(1000) })).read('a.xml'), (error: Error) => error instanceof ZipError && error.limit)
+      Object.assign(ZIP_LIMITS, saved)
+      ZIP_LIMITS.totalBytes = 100
+      assert.throws(() => new ZipReader(deflatedZip({ 'a.xml': 'x'.repeat(1000) })).read('a.xml'), (error: Error) => error instanceof ZipError && error.limit)
+      // A broken archive is not a limit.
+      assert.throws(() => new ZipReader(Buffer.from('not a zip')), (error: Error) => error instanceof ZipError && !error.limit)
+    } finally {
+      Object.assign(ZIP_LIMITS, saved)
+    }
+  })
+})

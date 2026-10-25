@@ -3193,6 +3193,7 @@ export function readDocx(data: Buffer, mediaBase: string): { html: string; css: 
 
 function failureReason(error: unknown, data: Buffer): string {
   if (data.length >= 8 && data.readUInt32BE(0) === 0xd0cf11e0) return '這是舊版 Word (.doc) 或受密碼保護的檔案,網頁版無法開啟。'
+  if (error instanceof ZipError && error.limit) return `${error.message}。檔案本身沒有壞,請下載原始檔查看。`
   if (error instanceof ZipError) return '檔案不是有效的 .docx(zip 格式),可能已損毀,或副檔名不符。'
   if (error instanceof XmlError) return '文件內容的 XML 無法解析,檔案可能已損毀。'
   if (error instanceof Error && /[一-鿿]/.test(error.message)) return error.message

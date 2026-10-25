@@ -10,7 +10,7 @@ import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
 import { readPptx, renderPptxDeck } from '../src/pptx.ts'
 import { parseXml, XmlError } from '../src/xml.ts'
-import { ZipError, ZipReader } from '../src/zip.ts'
+import { ZIP_LIMITS, ZipError, ZipReader } from '../src/zip.ts'
 import { zip } from './helpers/zip.ts'
 
 const PptxGenJS = ((pptxgen as unknown as { default?: typeof pptxgen.default }).default ?? pptxgen) as typeof pptxgen.default
@@ -198,6 +198,18 @@ describe('crafted and unusual PowerPoint files', () => {
     const [slide] = readPptx(deckOf([shape(xfrm(), body)]), '').slides
     assert.ok(slide.html.length < 20_000, String(slide.html.length))
     assert.match(slide.html, /class="pp-bu"[^>]*>[^<]{1,16}<\/span>[^]*第一點/)
+  })
+
+  test('P-1: a deck past the zip limits is called too big, not broken', () => {
+    const saved = { ...ZIP_LIMITS }
+    ZIP_LIMITS.entries = 3
+    try {
+      const html = renderPptxDeck(deckOf([shape(xfrm(), '<a:p><a:r><a:t>x</a:t></a:r></a:p>')]), 'big.pptx', 'big', { css: '', js: '' } as never)
+      assert.match(html, /檔案太大/)
+      assert.doesNotMatch(html, /損毀|不是有效/)
+    } finally {
+      Object.assign(ZIP_LIMITS, saved)
+    }
   })
 
   test('W-4 (PowerPoint): Chinese and circled auto-numbers keep counting past twenty, as Word lists do', () => {
