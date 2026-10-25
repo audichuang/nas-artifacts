@@ -579,7 +579,21 @@ function fontStack(latin: string | undefined, ea: string | undefined, theme: The
 }
 
 /** The text styles a shape's paragraphs inherit, nearest first. */
-type TextStyles = { lists: XmlNode[]; fontRefColor?: Rgba; extraRun?: XmlNode[]; bodyPrs: XmlNode[] }
+type TextStyles = { lists: XmlNode[]; bodyPrs: XmlNode[] }
+
+const node = (name: string, attrs: Record<string, string> = {}, children: XmlNode[] = []): XmlNode => ({ name, attrs, children, text: '' })
+
+/**
+ * A list style that only sets the text colour (and boldness) at every level: how a shape's `p:style`
+ * fontRef and a table style's tcTxStyle take part in the inheritance chain, above the master's text styles.
+ */
+function colorListStyle(color: XmlNode | null, bold = false): XmlNode | null {
+  if (!color && !bold) return null
+  const defRPr = node('a:defRPr', bold ? { b: '1' } : {}, color ? [node('a:solidFill', {}, [color])] : [])
+  return node('a:lstStyle', {}, Array.from({ length: 9 }, (_, i) => node(`a:lvl${i + 1}pPr`, {}, [defRPr])))
+}
+
+const colorElement = (holder: XmlNode | null): XmlNode | null => holder?.children.find((candidate) => COLOR_TAGS.has(local(candidate.name))) ?? null
 
 const truthy = (value: string | undefined) => value === '1' || value === 'true' || value === 'on'
 
@@ -651,7 +665,6 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
       let color: Rgba | null = null
       if (fillNode && local(fillNode.name) === 'solidFill') color = colorIn(fillNode, ctx)
       else if (fillNode && local(fillNode.name) === 'gradFill') color = colorIn(child(child(fillNode, 'gsLst'), 'gs'), ctx)
-      else if (!fillNode) color = styles.fontRefColor ?? colorIn(firstChild(styles.extraRun ?? [], ['solidFill']), ctx) ?? null
       if (fillNode && local(fillNode.name) === 'noFill') style.push('color:transparent')
       const link = child(rPr, 'hlinkClick')
       let href: string | null = null
@@ -981,9 +994,9 @@ function renderShape(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
   }
   let text = ''
   if (txBody && hasText) {
-    const fontRef = child(style, 'fontRef')
-    const lists = [...inherit.lists, masterTextStyle(ph, ctx), ctx.presentationStyle].filter((n): n is XmlNode => n !== null)
-    const rendered = renderTextBody(txBody, { lists, fontRefColor: colorIn(fontRef, ctx) ?? undefined, bodyPrs: inherit.bodyPrs }, ctx, { bodyPr: inherit.bodyPrs })
+    const fontRef = colorListStyle(colorElement(child(style, 'fontRef')))
+    const lists = [...inherit.lists, fontRef, masterTextStyle(ph, ctx), ctx.presentationStyle].filter((n): n is XmlNode => n !== null)
+    const rendered = renderTextBody(txBody, { lists, bodyPrs: inherit.bodyPrs }, ctx, { bodyPr: inherit.bodyPrs })
     text = rendered.html
     out.text.push(rendered.text)
     // Text in a shape PowerPoint flips stays readable: only a vertical flip turns it over.
@@ -1121,7 +1134,7 @@ function renderGraphicFrame(node: XmlNode, frame: Frame, ctx: Ctx, out: Rendered
 const missing = (box: string[], what: string) =>
   `<div class="pp-sp" style="${box.join(';')}"><div class="pp-missing">${escapeHtml(what)}(網頁版未支援,請下載 PPTX 查看)</div></div>`
 
-type CellStyle = { fill?: string; color?: Rgba; bold?: boolean; borders: Partial<Record<'left' | 'right' | 'top' | 'bottom' | 'insideH' | 'insideV', string>> }
+type CellStyle = { fill?: string; color?: XmlNode; bold?: boolean; borders: Partial<Record<'left' | 'right' | 'top' | 'bottom' | 'insideH' | 'insideV', string>> }
 
 function tablePart(styleNode: XmlNode | null, ctx: Ctx): CellStyle | null {
   if (!styleNode) return null
@@ -1138,7 +1151,7 @@ function tablePart(styleNode: XmlNode | null, ctx: Ctx): CellStyle | null {
     const line = ln ? lineOf(ln, null, ctx) : lnRef ? lineOf(null, { name: 'p:style', attrs: {}, text: '', children: [lnRef] }, ctx) : undefined
     if (line !== undefined) out.borders[side] = line ? `${pt(line.width)} solid ${line.color}` : 'none'
   }
-  const color = colorIn(tcTx, ctx) ?? colorIn(child(tcTx, 'fontRef'), ctx)
+  const color = colorElement(tcTx) ?? colorElement(child(tcTx, 'fontRef'))
   if (color) out.color = color
   if (attr(tcTx, 'b') === 'on') out.bold = true
   return out
@@ -1183,7 +1196,7 @@ function renderTable(table: XmlNode, ctx: Ctx): { html: string; text: string } {
       const tcPr = child(cell, 'tcPr')
       const style: string[] = []
       let fill = ''
-      let color: Rgba | undefined
+      let color: XmlNode | undefined
       let bold = false
       const borders: Record<string, string> = {}
       for (const layer of layers) {
@@ -1214,13 +1227,10 @@ function renderTable(table: XmlNode, ctx: Ctx): { html: string; text: string } {
       const txBody = child(cell, 'txBody')
       let content = ''
       if (txBody) {
-        const extra: XmlNode[] = []
-        const runStyle: XmlNode = { name: 'a:lvl1pPr', attrs: {}, text: '', children: [{ name: 'a:defRPr', attrs: bold ? { b: '1' } : {}, text: '', children: [] }] }
-        const listStyle: XmlNode = { name: 'a:lstStyle', attrs: {}, text: '', children: Array.from({ length: 9 }, (_, i) => ({ ...runStyle, name: `a:lvl${i + 1}pPr` })) }
-        const lists = [listStyle, child(path(ctx.master.xml, 'txStyles'), 'otherStyle'), ctx.presentationStyle].filter((n): n is XmlNode => n !== null)
+        const lists = [colorListStyle(color ?? null, bold), child(path(ctx.master.xml, 'txStyles'), 'otherStyle'), ctx.presentationStyle].filter((n): n is XmlNode => n !== null)
         const rendered = renderTextBody(
           { ...txBody, children: [{ name: 'a:bodyPr', attrs: { lIns: '0', tIns: '0', rIns: '0', bIns: '0' }, text: '', children: [] }, ...txBody.children.filter((n) => local(n.name) !== 'bodyPr')] },
-          { lists, fontRefColor: color, extraRun: extra, bodyPrs: [] }, ctx, { bodyPr: [] }
+          { lists, bodyPrs: [] }, ctx, { bodyPr: [] }
         )
         content = rendered.html
         texts.push(rendered.text)
@@ -1242,11 +1252,13 @@ type Series = { name: string; values: (number | null)[]; color: string }
 const SERIES_DEFAULTS = ['accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6']
 
 function cachedValues(node: XmlNode | null): (string | null)[] {
-  const cache = node ? findDeep(node, 'numCache') ?? findDeep(node, 'strCache') : null
+  const cache = node ? findDeep(node, 'numCache') ?? findDeep(node, 'strCache') ?? findDeep(node, 'multiLvlStrCache') : null
   if (!cache) return []
   const count = num(child(cache, 'ptCount'), 'val') ?? 0
   const out: (string | null)[] = Array.from({ length: Math.min(count, 2000) }, () => null)
-  for (const point of children(cache, 'pt')) {
+  // Multi-level categories: the first level holds the labels next to the axis.
+  const points = local(cache.name) === 'multiLvlStrCache' ? children(child(cache, 'lvl'), 'pt') : children(cache, 'pt')
+  for (const point of points) {
     const at = num(point, 'idx') ?? -1
     if (at >= 0 && at < out.length) out[at] = child(point, 'v')?.text ?? null
   }
@@ -1284,6 +1296,8 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
     return { name, values, color: cssColor(fill ?? fallback) }
   })
   if (!series.length) return null
+  const length = Math.max(categories.length, ...series.map((s) => s.values.length))
+  categories = Array.from({ length }, (_, at) => categories[at] ?? String(at + 1))
   const title = chartTitle(chart)
   const W = x.cx / EMU_PER_PT
   const H = x.cy / EMU_PER_PT
@@ -1329,20 +1343,32 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
     const step = niceStep((max - min) / 5)
     const top2 = Math.ceil(max / step) * step
     const bottom = Math.floor(min / step) * step
-    const left = 36
+    // Bar charts may run sideways (barDir="bar"): the same drawing with the axes swapped, first category at the bottom.
+    const horizontal = kind === 'barChart' && attr(child(group, 'barDir'), 'val') === 'bar'
+    const left = horizontal ? Math.min(W * 0.3, 70) : 36
     const plotTop = top + 4
     const plotBottom = H - legendH - 20
     const plotH = Math.max(1, plotBottom - plotTop)
     const plotW = Math.max(1, W - left - 8)
-    const y = (value: number) => plotBottom - ((value - bottom) / (top2 - bottom || 1)) * plotH
-    for (let v = bottom; v <= top2 + step / 2; v += step) {
-      svg += `<line x1="${left}" x2="${round(left + plotW)}" y1="${round(y(v))}" y2="${round(y(v))}" stroke="#d9d9d9" stroke-width="0.5"/>`
-      svg += `<text x="${left - 4}" y="${round(y(v) + 3)}" text-anchor="end" font-size="${fs}" fill="${textColor}">${escapeHtml(formatNumber(v))}</text>`
-    }
+    const catLength = horizontal ? plotH : plotW
+    const valLength = horizontal ? plotW : plotH
+    const dist = (value: number) => ((value - bottom) / (top2 - bottom || 1)) * valLength
+    const point = (c: number, d: number): [number, number] => (horizontal ? [left + d, plotBottom - c] : [left + c, plotBottom - d])
     const n = Math.max(1, categories.length || series[0].values.length)
-    const slot = plotW / n
+    const slot = catLength / n
+    for (let v = bottom; v <= top2 + step / 2; v += step) {
+      const [x1, y1] = point(0, dist(v))
+      const [x2, y2] = point(catLength, dist(v))
+      svg += `<line x1="${round(x1)}" x2="${round(x2)}" y1="${round(y1)}" y2="${round(y2)}" stroke="#d9d9d9" stroke-width="0.5"/>`
+      svg += horizontal
+        ? `<text x="${round(x1)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}" fill="${textColor}">${escapeHtml(formatNumber(v))}</text>`
+        : `<text x="${left - 4}" y="${round(y1 + 3)}" text-anchor="end" font-size="${fs}" fill="${textColor}">${escapeHtml(formatNumber(v))}</text>`
+    }
     categories.forEach((name, at) => {
-      svg += `<text x="${round(left + slot * (at + 0.5))}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}" fill="${textColor}">${escapeHtml(name)}</text>`
+      const [x, y] = point(slot * (at + 0.5), 0)
+      svg += horizontal
+        ? `<text x="${round(left - 4)}" y="${round(y + 3)}" text-anchor="end" font-size="${fs}" fill="${textColor}">${escapeHtml(name)}</text>`
+        : `<text x="${round(x)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}" fill="${textColor}">${escapeHtml(name)}</text>`
     })
     if (kind === 'barChart') {
       const width = stacked ? slot * 0.6 : (slot * 0.7) / series.length
@@ -1350,17 +1376,21 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
       series.forEach((s, si) => {
         s.values.forEach((value, at) => {
           if (value === null) return
-          const x0 = left + slot * at + slot * (stacked ? 0.2 : 0.15) + (stacked ? 0 : width * si)
+          const c0 = slot * at + slot * (stacked ? 0.2 : 0.15) + (stacked ? 0 : width * si)
           const from = stacked ? base[at] : 0
           const to = from + value
           if (stacked) base[at] = to
-          svg += `<rect x="${round(x0)}" y="${round(Math.min(y(from), y(to)))}" width="${round(width)}" height="${round(Math.abs(y(to) - y(from)))}" fill="${s.color}"/>`
+          const [ax, ay] = point(c0, dist(from))
+          const [bx, by] = point(c0 + width, dist(to))
+          svg += `<rect x="${round(Math.min(ax, bx))}" y="${round(Math.min(ay, by))}" width="${round(Math.abs(bx - ax))}" height="${round(Math.abs(by - ay))}" fill="${s.color}"/>`
         })
       })
     } else {
       series.forEach((s) => {
-        const pts = s.values.map((value, at) => (value === null ? null : `${round(left + slot * (at + 0.5))},${round(y(value))}`)).filter(Boolean)
-        if (kind === 'areaChart') svg += `<path d="M${round(left + slot * 0.5)},${round(y(0))} L${pts.join(' L')} L${round(left + slot * (s.values.length - 0.5))},${round(y(0))} Z" fill="${s.color}" opacity="0.7"/>`
+        const pts = s.values.map((value, at) => (value === null ? null : point(slot * (at + 0.5), dist(value)).map((v) => round(v)).join(','))).filter(Boolean)
+        const [sx, sy] = point(slot * 0.5, dist(0))
+        const [ex] = point(slot * (s.values.length - 0.5), dist(0))
+        if (kind === 'areaChart') svg += `<path d="M${round(sx)},${round(sy)} L${pts.join(' L')} L${round(ex)},${round(sy)} Z" fill="${s.color}" opacity="0.7"/>`
         else svg += `<polyline points="${pts.join(' ')}" fill="none" stroke="${s.color}" stroke-width="2"/>`
       })
     }
