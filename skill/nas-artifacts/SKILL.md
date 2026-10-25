@@ -58,14 +58,16 @@ For a presentation, write a Markdown file named `*.slides.md` (`index.slides.md`
 - The user can edit a deck in the viewer (「編輯」, saved as a new version labelled 瀏覽器編輯) when it declares no capabilities. Before revising a deck, `checkout` it so you work from their edits, not your local copy.
 - `node "$A" export <id> [--out file.pptx]` saves the deck as PowerPoint (text stays editable; layout close to the web deck, not identical; diagrams are SVG, which PowerPoint 2019 and Microsoft 365 show; Keynote, macOS preview and Google Slides show a broken-picture placeholder instead). Readers get the same from the 「PPTX」 button and print to PDF from the deck's 「PDF」 button.
 
-### PowerPoint files
+### PowerPoint, Word and Excel files
 
-When the user already has a deck as a `.pptx` (a company template, slides someone sent), publish the file itself: `node "$A" publish deck.pptx`. The server draws every slide from the file's own masters, layouts, theme, placeholders, text, pictures, tables and charts, so any template keeps its look, at the file's own slide size, and the text stays selectable and searchable. Paging, overview, speaker notes, full screen and PDF work as for Markdown decks; 「PPTX」 downloads the published file unchanged. Do not convert it to Markdown, images or PDF first.
+When the user already has the file (a company template, a deck someone sent, a report, a spreadsheet), publish it as it is: `node "$A" publish deck.pptx` (or `.docx`, `.xlsx`). The server draws it from the file's own masters, layouts, styles, theme, fonts and backgrounds, so any template keeps its look; text stays selectable and searchable. Do not convert it to Markdown, images or PDF first.
 
-- Something the browser cannot draw (EMF/WMF pictures, video, OLE objects, chart types other than bar, line, area, pie and doughnut) shows as a labelled box on the slide; a file that is not a deck at all shows the reason and lands in `artifact errors`.
-- Fonts come from the reader's device: a font it lacks (Calibri, 微軟正黑體 on a Mac) is replaced by a similar one, so line breaks can differ slightly from PowerPoint.
-- To change it, edit in PowerPoint and publish the file again (same URL, new version). The viewer has no 「編輯」 for `.pptx`.
-- A `.pptx` may be up to 64 MB (other files 16 MB).
+- `.pptx` shows as a deck at the file's own slide size: paging, overview, speaker notes, full screen and PDF as for Markdown decks; 「PPTX」 downloads the published file unchanged.
+- `.docx` shows as one continuous document page (no pagination; header once at the top, footer and footnotes at the end). `.xlsx` shows every visible sheet as a tab with an Excel-like grid; `#sheet-N` on the viewer URL opens sheet N; formulas show the value saved in the file. Both have a 「DOCX」/「XLSX」 button that downloads the file unchanged.
+- Something the browser cannot draw (EMF/WMF pictures, video, OLE objects, SmartArt in Word and Excel, chart types beyond bar, line, area, pie and doughnut) shows as a labelled box; a file that cannot be read at all (not a zip, password-protected) shows the reason and lands in `artifact errors`. Very large sheets show their first 2000 rows × 200 columns and say so.
+- Fonts come from the reader's device: a font it lacks (Calibri, 微軟正黑體 on a Mac) is replaced by a similar one, so line breaks can differ slightly from Office.
+- To change one, edit it in Office and publish the file again (same URL, new version). The viewer has no 「編輯」 for these.
+- An Office file may be up to 64 MB (other files 16 MB).
 
 ## Page capabilities
 

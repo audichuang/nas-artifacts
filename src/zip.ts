@@ -5,10 +5,14 @@ export const ZIP_LIMITS = { entries: 5000, entryBytes: 64 * 1024 * 1024, totalBy
 
 export class ZipError extends Error {}
 
+const fold = (name: string) => name.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase()
+
 type Entry = { method: number; compressedSize: number; size: number; offset: number }
 
 export class ZipReader {
   private readonly entries = new Map<string, Entry>()
+  // Some writers store part names with backslashes or another case; Office still opens them.
+  private readonly folded = new Map<string, string>()
   private inflated = 0
   private readonly data: Buffer
 
@@ -38,12 +42,18 @@ export class ZipReader {
       const name = data.subarray(at + 46, at + 46 + nameLength).toString('utf8')
       at += 46 + nameLength + extraLength + commentLength
       if (name.endsWith('/')) continue
-      this.entries.set(name.replace(/^\/+/, ''), { method, compressedSize, size, offset })
+      const key = name.replace(/^\/+/, '')
+      this.entries.set(key, { method, compressedSize, size, offset })
+      if (!this.folded.has(fold(key))) this.folded.set(fold(key), key)
     }
   }
 
+  private entry(name: string): Entry | undefined {
+    return this.entries.get(name) ?? this.entries.get(this.folded.get(fold(name)) ?? '')
+  }
+
   has(name: string): boolean {
-    return this.entries.has(name)
+    return this.entry(name) !== undefined
   }
 
   names(): string[] {
@@ -51,7 +61,7 @@ export class ZipReader {
   }
 
   read(name: string): Buffer | null {
-    const entry = this.entries.get(name)
+    const entry = this.entry(name)
     if (!entry) return null
     if (entry.size > ZIP_LIMITS.entryBytes) throw new ZipError(`${name} is too large`)
     const at = entry.offset
