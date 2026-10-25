@@ -264,6 +264,8 @@ describe('crafted and unusual PowerPoint files', () => {
     const page = renderPptxDeck(cfb, 'x.pptx', 'x', { css: '', js: '' })
     assert.match(page, /這份 PowerPoint 檔無法顯示/)
     assert.match(page, /舊版 PowerPoint \(\.ppt\) 或受密碼保護/)
+    // The reason is said once: no second copy of the same sentence under it.
+    assert.equal(page.split('網頁版無法開啟').length - 1 - (page.match(/<script>throw[^<]*網頁版無法開啟/g)?.length ?? 0), 1)
     assert.match(page, /可以下載原始檔,用 PowerPoint 開啟查看/)
     const truncated = renderPptxDeck(Buffer.from('PK\x03\x04 truncated'), 'x.pptx', 'x', { css: '', js: '' })
     assert.match(truncated, /檔案不是有效的 \.pptx/)
@@ -521,7 +523,10 @@ describe('fonts for Chinese, Japanese and Latin text', () => {
     run('lang="zh-TW">', '主題的中文'),
     run('lang="en-US" altLang="ja-JP">', '日本語'),
     run('lang="zh-TW"><a:latin typeface="Calibri"/><a:ea typeface="標楷體"/>', '楷書'),
-    run('lang="zh-TW"><a:latin typeface="Courier New"/><a:ea typeface="微軟正黑體"/>', '等寬')
+    run('lang="zh-TW"><a:latin typeface="Courier New"/><a:ea typeface="微軟正黑體"/>', '等寬'),
+    run('lang="zh-CN"><a:latin typeface="Impact"/><a:ea typeface="SimSun"/>', '宋体英文'),
+    run('lang="zh-CN"><a:latin typeface="Impact"/><a:ea typeface="NSimSun"/>', '新宋体英文'),
+    run('lang="ko-KR"><a:latin typeface="Impact"/><a:ea typeface="Gungsuh"/>', '궁서체')
   ].join(''))], { 'ppt/theme/theme1.xml': scripted }), '').slides
 
   test('Latin and East Asian letters each fall back within their own family', () => {
@@ -532,6 +537,12 @@ describe('fonts for Chinese, Japanese and Latin text', () => {
     assert.match(fontOf(slide.html, '楷書'), /^'Calibri',[^]*'標楷體','DFKai-SB'[^]*,serif$/)
     const mono = fontOf(slide.html, '等寬')
     assert.match(mono, /^'Courier New',[^]*Menlo[^]*'微軟正黑體','PingFang TC'/)
+  })
+
+  test('Song faces named in Latin letters (SimSun, NSimSun) and Gungsuh fall back to serif faces', () => {
+    assert.match(fontOf(slide.html, '宋体英文'), /^'Impact',[^]*'SimSun','Songti SC'[^]*,serif$/)
+    assert.match(fontOf(slide.html, '新宋体英文'), /'NSimSun','SimSun','Songti SC'[^]*,serif$/)
+    assert.match(fontOf(slide.html, '궁서체'), /'Gungsuh','AppleMyungjo'[^]*,serif$/)
   })
 
   test("text with no East Asian font of its own takes the theme's font for its language", () => {

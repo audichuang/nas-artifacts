@@ -651,7 +651,7 @@ type FontClass = 'sans' | 'serif' | 'kai' | 'mono'
 const latinClass = (name: string): FontClass =>
   /Consolas|Courier|Mono|Menlo/i.test(name) ? 'mono' : /Times|Georgia|Cambria|Garamond|Palatino|Antiqua|Baskerville|Bodoni|Didot|Century|Serif|Minion/i.test(name) ? 'serif' : 'sans'
 const eastAsianClass = (name: string): FontClass =>
-  /楷|Kai/i.test(name) ? 'kai' : /細明|明體|明体|明朝|Ming|Song|宋|Mincho|Batang|바탕|궁서|Myungjo|Serif/i.test(name) ? 'serif' : 'sans'
+  /楷|Kai/i.test(name) ? 'kai' : /細明|明體|明体|明朝|Ming|Song|宋|Sun\b|SimSun|Mincho|Batang|Gungsuh|바탕|궁서|Myungjo|Serif/i.test(name) ? 'serif' : 'sans'
 
 /** Fonts with the same metrics as Office's, where a reader's device has them (Linux, LibreOffice installs). */
 const METRIC_TWINS: Record<string, string> = {
@@ -1956,7 +1956,9 @@ export function renderPptxDeck(data: Buffer, fileName: string, title: string, as
     deck = readPptx(data, mediaBase)
   } catch (error) {
     const message = `PowerPoint: ${error instanceof Error ? error.message : String(error)}`
-    const box = `<div class="pp-missing" role="alert" style="flex-direction:column;gap:calc(6*var(--pt))"><strong style="font-size:calc(20*var(--pt))">這份 PowerPoint 檔無法顯示</strong><span>${escapeHtml(failureReason(error))}</span><code>${escapeHtml(readerMessage(error))}</code><span>可以下載原始檔,用 PowerPoint 開啟查看。</span></div>`
+    const reason = failureReason(error)
+    const detail = readerMessage(error)
+    const box = `<div class="pp-missing" role="alert" style="flex-direction:column;gap:calc(6*var(--pt))"><strong style="font-size:calc(20*var(--pt))">這份 PowerPoint 檔無法顯示</strong><span>${escapeHtml(reason)}</span>${detail === reason ? '' : `<code>${escapeHtml(detail)}</code>`}<span>可以下載原始檔,用 PowerPoint 開啟查看。</span></div>`
     const slide = `<section class="slide layout-pptx" id="slide-1" data-number="1" aria-label="第 1 頁"><div class="pp-canvas">${box}</div></section>`
     return deckPage(slide, title, assets, failureScript(message))
   }

@@ -639,6 +639,29 @@ describe('any Word file draws faithfully (stress round 2)', () => {
     const visible = page.replace(/<script>[\s\S]*?<\/script>/g, '').replace(/<style>[\s\S]*?<\/style>/g, '').replace(/<[^>]+>/g, ' ')
     assert.doesNotMatch(visible.replace(/Word|\.docx|x\.docx/g, ''), /[A-Za-z]{4,}/, visible)
   })
+  test('N4: a square- or tight-wrapped anchor sits at its paragraph\'s top wherever its run is; a paragraph offset moves it down', () => {
+    const square = '<wp:wrapSquare wrapText="bothSides"/>'
+    const tight = '<wp:wrapTight wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="0" y="21600"/></wp:wrapPolygon></wp:wrapTight>'
+    const at = (o: Partial<AnchorOptions>) => anchor({ relH: 'column', relV: 'paragraph', w: 144, h: 100, content: pic('rBg'), ...o })
+    const body =
+      p(r('左圖的字。') + at({ alignH: 'left', wrap: square })) +
+      p(r('右圖的字。') + at({ alignH: 'right', wrap: tight })) +
+      p(r('上下的字。') + at({ alignH: 'center', wrap: '<wp:wrapTopAndBottom/>' })) +
+      p(r('下移的字。') + at({ alignH: 'left', offV: 18, wrap: square }))
+    const html = readDocx(docWith(body, mediaParts, media), '').html
+    assert.match(html, /<div class="dx-p [^"]*"><span class="dx-float" style="float:left;margin:0pt 0pt 0pt 0pt"><img[^>]*><\/span><span[^>]*>左圖的字。</)
+    assert.match(html, /<div class="dx-p [^"]*"><span class="dx-float" style="float:right;[^"]*"><img[^>]*><\/span><span[^>]*>右圖的字。</)
+    assert.match(html, /<div class="dx-p [^"]*"><span class="dx-figure" style="text-align:center"><img[^>]*><\/span><span[^>]*>上下的字。</)
+    assert.match(html, /<div class="dx-p [^"]*"><span class="dx-float" style="float:left;margin:18pt 0pt 0pt 0pt"><img[^>]*><\/span><span[^>]*>下移的字。</)
+  })
+
+  test('N4: a square-wrapped VML picture of an older file floats to its side at its paragraph\'s top too', () => {
+    const vml = (style: string) => `<w:r><w:pict><v:shape style="position:absolute;${style};width:100pt;height:50pt"><v:imagedata r:id="rBg"/><w10:wrap xmlns:w10="urn:schemas-microsoft-com:office:word" type="square"/></v:shape></w:pict></w:r>`
+    const body = p(r('舊檔右圖。') + vml('margin-left:340pt;margin-top:12pt')) + p(r('舊檔左圖。') + vml('margin-left:0;margin-top:0;mso-position-horizontal:left'))
+    const html = readDocx(docWith(body, mediaParts, media), '').html
+    assert.match(html, /<div class="dx-p [^"]*"><span class="dx-float" style="float:right;margin:12pt 9pt 0pt 9pt"><img[^>]*><\/span><span[^>]*>舊檔右圖。</)
+    assert.match(html, /<div class="dx-p [^"]*"><span class="dx-float" style="float:left;margin:0pt 9pt 0pt 9pt"><img[^>]*><\/span><span[^>]*>舊檔左圖。</)
+  })
 })
 
 describe('Word drawings: charts and shape geometry', () => {
@@ -689,5 +712,37 @@ describe('Word drawings: charts and shape geometry', () => {
     assert.match(ellipse.style, /padding:10\.5\d*pt 10\.5\d*pt 10\.5\d*pt 10\.5\d*pt/)
     assert.match(unknown.style, /background:rgb\(255,0,0\)/)
     assert.match(html, /未支援的圖形:notAShape/)
+  })
+
+  test('N3: a pattern fill draws its hatch and a picture fill its picture, in any geometry; a patterned outline takes its foreground', () => {
+    const uri = 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape'
+    const patt = '<a:pattFill prst="smCheck"><a:fgClr><a:srgbClr val="1F4E79"/></a:fgClr><a:bgClr><a:srgbClr val="FFE699"/></a:bgClr></a:pattFill>'
+    const blip = '<a:blipFill><a:blip r:embed="rFill"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>'
+    const shape = (prst: string, fill: string, ln = '<a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>') =>
+      `<wps:wsp><wps:spPr><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom>${fill}${ln}</wps:spPr><wps:txbx><w:txbxContent>${p(r('白字', '<w:color w:val="FFFFFF"/>'))}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>`
+    const body = [shape('ellipse', patt), shape('rect', patt), shape('hexagon', blip), shape('rect', blip), shape('chevron', '<a:noFill/>', `<a:ln w="25400">${patt}</a:ln>`)].map((s) => inline(914400, 914400, s, uri)).join('')
+    const html = readDocx(docWith(body, { 'word/media/fill.png': 'png' }, [['rFill', 'image', 'media/fill.png']]), 'm/').html
+    const boxes = [...html.matchAll(/<span class="dx-txbx" style="([^"]*)">([\s\S]*?)<\/span>/g)].map((m) => ({ style: m[1], body: m[2] }))
+    assert.equal(boxes.length, 5)
+    // The ellipse: an 8 × 8 hatch tile of 6 pt, background then foreground pixels, filling the geometry.
+    const [, id] = /<pattern id="([^"]+)" patternUnits="userSpaceOnUse" width="6" height="6">/.exec(boxes[0].body) ?? []
+    assert.ok(id, boxes[0].body)
+    assert.match(boxes[0].body, /<rect width="8" height="8" fill="rgb\(255,230,153\)"\/><path d="M[^"]*" fill="rgb\(31,78,121\)"\/>/)
+    assert.match(boxes[0].body, new RegExp(`<path d="M[^"]*" fill="url\\(#${id}\\)"/>`))
+    // The rectangle: the same tile as a repeating CSS background.
+    assert.match(boxes[1].style, /background:url\('data:image\/svg\+xml,[^']*rgb\(255%2C230%2C153\)[^']*rgb\(31%2C78%2C121\)[^']*'\) 0 0\/6pt 6pt repeat/)
+    // The hexagon: the picture stretched over the shape's box, clipped to its geometry.
+    assert.match(boxes[2].body, /<pattern id="([^"]+)" patternUnits="userSpaceOnUse" width="72" height="72"><image href="m\/word\/media\/fill\.png" width="72" height="72" preserveAspectRatio="none"\/><\/pattern>/)
+    assert.match(boxes[2].body, /<path d="M[^"]*" fill="url\(#[^"]+\)"\/>/)
+    assert.match(boxes[3].style, /background:url\('m\/word\/media\/fill\.png'\) 0 0\/100% 100% no-repeat/)
+    // A patterned outline is drawn in its foreground colour.
+    assert.match(boxes[4].body, /stroke="rgb\(31,78,121\)" stroke-width="2"/)
+    // A shape in a group that takes the group's fill draws the group's hatch.
+    const group = `<wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="914400"/></a:xfrm>${patt}</wpg:grpSpPr>${shape('ellipse', '<a:grpFill/>').replace('<wps:spPr>', '<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>')}</wpg:wgp>`
+    const grouped = readDocx(docWith(inline(914400, 914400, group, 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup')), '').html
+    assert.match(grouped, /<pattern id="[^"]+" patternUnits="userSpaceOnUse" width="6" height="6"><g[^>]*><rect width="8" height="8" fill="rgb\(255,230,153\)"/)
+    // Two shapes never share a pattern id.
+    const ids = [...html.matchAll(/<pattern id="([^"]+)"/g)].map((m) => m[1])
+    assert.equal(new Set(ids).size, ids.length)
   })
 })

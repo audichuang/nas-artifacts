@@ -3225,6 +3225,8 @@ a.xl-link{color:inherit;cursor:pointer}
 .xl-chartsheet{max-width:1100px;margin:0 auto;border:1px solid #d9d9d9;background:#fff}
 .xl-chartsheet svg{display:block}
 .xl-empty{padding:24px;color:#555}
+.xl-fail{box-sizing:border-box;max-width:560px;margin:10vh auto;background:#fff;border:1px solid #dadce0;border-radius:10px;padding:20px 22px;font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#202124}
+.xl-fail h1{font-size:18px;margin:0 0 8px}.xl-fail p{margin:0 0 6px}
 .xl-grid thead th.fc{z-index:5}
 @media (max-width:700px){[data-wide-x] .xl-grid .fc{inset-inline-start:auto!important;box-shadow:none}[data-tall-y] .xl-grid .fr{top:auto!important;box-shadow:none}}
 `
@@ -3234,9 +3236,11 @@ a.xl-link{color:inherit;cursor:pointer}
  * accepts only letters, digits, '-' and '_' there. Panels use other ids, so no hash scrolls the page.
  */
 const PAGE_SCRIPT = `(()=>{const tabs=[...document.querySelectorAll('.xl-tab')];const sheets=[...document.querySelectorAll('.xl-sheet')];if(!sheets.length)return;const first=Number(document.body.dataset.active)||1;
-function fit(root){if(root.dataset.fitted)return;root.dataset.fitted='1';for(const td of root.querySelectorAll('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4;if(room>0&&s.offsetWidth>room){s.style.fontSize=(parseFloat(getComputedStyle(s).fontSize)*room/s.offsetWidth).toFixed(2)+'px'}}
-const wide=[];for(const td of root.querySelectorAll('td.n')){if(td.scrollWidth>td.clientWidth+1)wide.push([td,td.clientWidth/td.scrollWidth])}
-for(const [td,k] of wide){if(k>=0.7){td.style.fontSize=(parseFloat(getComputedStyle(td).fontSize)*k*0.97).toFixed(2)+'px'}else if(!td.querySelector('*')){td.title=td.textContent;td.textContent='#'.repeat(Math.max(1,Math.floor((td.clientWidth-4)/7)))}}}
+function fit(root){if(root.dataset.fitted)return;root.dataset.fitted='1';const writes=[];
+for(const td of root.querySelectorAll('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4,w=s.offsetWidth;if(room>0&&w>room)writes.push([s,(parseFloat(getComputedStyle(s).fontSize)*room/w).toFixed(2)+'px'])}
+const ctx=document.createElement('canvas').getContext('2d'),hash={};
+for(const td of root.querySelectorAll('td.n:not(.sh)')){const sw=td.scrollWidth,cw=td.clientWidth;if(sw<=cw+1)continue;const k=cw/sw,cs=getComputedStyle(td);if(k>=0.7){writes.push([td,(parseFloat(cs.fontSize)*k*0.97).toFixed(2)+'px'])}else if(!td.querySelector('*')){const font=cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;if(!(font in hash)){ctx.font=font;hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
+for(const [el,size,text] of writes){if(size)el.style.fontSize=size;else{el.title=el.textContent;el.textContent=text}}}
 function show(n){if(!(n>=1&&n<=sheets.length))n=first;sheets.forEach((s,i)=>{s.hidden=i!==n-1});tabs.forEach((t,i)=>{t.setAttribute('aria-selected',String(i===n-1));t.tabIndex=i===n-1?0:-1});const tab=tabs[n-1];if(tab){const bar=tab.parentElement;const l=tab.offsetLeft-bar.offsetLeft;if(l<bar.scrollLeft||l+tab.offsetWidth>bar.scrollLeft+bar.clientWidth)bar.scrollLeft=l-16}fit(sheets[n-1])}
 function fromHash(){const m=/^#sheet-(\\d+)$/.exec(location.hash);show(m?Number(m[1]):first)}
 addEventListener('hashchange',fromHash);fromHash()})()`
@@ -3281,7 +3285,7 @@ export function renderXlsxPage(data: Buffer, fileName: string, title: string): s
     book = readXlsx(data, officeMediaBase(fileName))
   } catch (error) {
     const message = `Excel: ${reason(error)}`
-    return injectBridge(`<!doctype html><html lang="zh-Hant"><head>${head}</head><body><div class="xl-empty"><p class="xl-note xl-failed">${escapeHtml(message)}</p><p>原始檔仍可下載。</p></div>${failureScript(message)}</body></html>`)
+    return injectBridge(`<!doctype html><html lang="zh-Hant"><head>${head}</head><body><div class="xl-fail" role="alert"><h1>這份 Excel 檔無法顯示</h1><p>${escapeHtml(reason(error))}</p><p>可以下載原始檔,用 Excel 開啟查看。</p></div>${failureScript(message)}</body></html>`)
   }
   const warnings = book.warnings.map((warning) => `<p class="xl-note">${escapeHtml(warning)}</p>`).join('')
   if (!book.sheets.length) {

@@ -463,7 +463,7 @@ describe('reading Excel workbooks', () => {
 
   test('a file that is not a workbook gets a page that says why, and a throw for the error log', () => {
     const notZip = renderXlsxPage(Buffer.from('PK definitely not'), 'x.xlsx', 'x')
-    assert.match(notZip, /class="xl-note xl-failed">Excel: 這不是 \.xlsx 檔,或檔案已損壞/)
+    assert.match(notZip, /<div class="xl-fail" role="alert"><h1>這份 Excel 檔無法顯示<\/h1><p>這不是 \.xlsx 檔,或檔案已損壞[^<]*<\/p><p>可以下載原始檔,用 Excel 開啟查看。<\/p><\/div>/)
     assert.match(notZip, /<script>throw new Error\("Excel: 這不是 \.xlsx 檔/)
     const legacy = Buffer.alloc(64)
     legacy.writeUInt32BE(0xd0cf11e0, 0)
@@ -754,6 +754,39 @@ describe('worksheet XML the way other tools write it', () => {
 })
 
 describe('big workbooks', () => {
+  test('in a browser, a sheet full of numbers wider than their columns loads quickly, shrunk or shown as ####', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+    // 500 rows × 20 columns: every number spills past its column, the way a sales sheet with narrow columns does.
+    const rows = Array.from({ length: 500 }, (_, r) => `<row r="${r + 1}">${Array.from({ length: 20 }, (_, c) => `<c r="${colName(c + 1)}${r + 1}"><v>${c % 2 ? 1234567.891 * (c + 1) + r : 12345678 + r}</v></c>`).join('')}</row>`).join('')
+    const styles = `<styleSheet ${NS}><cellXfs count="2"><xf/><xf><alignment shrinkToFit="1"/></xf></cellXfs></styleSheet>`
+    const shrinkRow = `<row r="501"><c r="A501" s="1" t="inlineStr"><is><t>shrink this text to fit its cell</t></is></c></row>`
+    const html = renderXlsxPage(book([{ name: 's', body: sheet(rows + shrinkRow, '<cols><col min="1" max="20" width="9" customWidth="1"/></cols>') }], { styles }), 'b.xlsx', 'b')
+    const browser = await chromium.launch({ executablePath: chromiumPath })
+    try {
+      const page = await browser.newPage()
+      const started = Date.now()
+      await page.setContent(html)
+      const took = Date.now() - started
+      const result = await page.evaluate(() => {
+        const cells = [...document.querySelectorAll<HTMLElement>('td.n')]
+        const sh = document.querySelector<HTMLElement>('td.sh')!
+        return {
+          total: cells.length,
+          hashes: cells.filter((td) => /^#+$/.test(td.textContent!) && /^\d/.test(td.title)).length,
+          shrunk: cells.filter((td) => td.style.fontSize && !/#/.test(td.textContent!)).length,
+          spill: cells.filter((td) => td.scrollWidth > td.clientWidth + 1).length,
+          shFits: sh.firstElementChild!.getBoundingClientRect().width <= sh.clientWidth - 3
+        }
+      })
+      assert.equal(result.total, 10_000)
+      assert.ok(result.hashes > 0 && result.shrunk > 0, `some cells shrink, some show ####: ${JSON.stringify(result)}`)
+      assert.equal(result.spill, 0, 'no number spills past its column')
+      assert.ok(result.shFits, 'shrink-to-fit text fits its cell')
+      assert.ok(took < 3000, `the page loads in ${took} ms`)
+    } finally {
+      await browser.close()
+    }
+  })
+
   test('a sheet whose XML is past the per-part limit shows its first rows and says what was cut', () => {
     const saved = ZIP_LIMITS.entryBytes
     ZIP_LIMITS.entryBytes = 60_000

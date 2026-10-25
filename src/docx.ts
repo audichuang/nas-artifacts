@@ -406,10 +406,16 @@ type NoteKind = 'footnote' | 'endnote'
 type Story = { part: string; kind: 'body' | 'header' | 'footer' | 'note'; fields: Field[]; note?: { kind: NoteKind; n: number }; overflow?: number }
 type Layer = { pPr: (XmlNode | null)[]; rPr: (XmlNode | null)[] }
 type Geometry = { w: number; h: number; top: number; right: number; bottom: number; left: number; header: number; footer: number; cols: number; colSpace: number; grid: number; vertical: boolean; type: string }
-type Scope = { story: Story; layer: Layer; depth: number; width: number; dark: boolean; grid: number; sheet: Geometry | null }
+/** `groupFill`: the shape properties of the group a drawing sits in, for shapes that take the group's fill (`grpFill`). */
+type Scope = { story: Story; layer: Layer; depth: number; width: number; dark: boolean; grid: number; sheet: Geometry | null; groupFill?: XmlNode | null }
+/** A shape's fill: a colour, one of Office's 8 × 8 hatches, or a picture from the file (stretched over the shape, or tiled). */
+type Paint = { color: Rgba } | { pattern: { fg: Rgba; bg: Rgba; bits: string } } | { picture: string; tile: boolean }
 type Link = { href?: string; title?: string } | null
-/** A paragraph's inline content; `pins` are drawings placed relative to the paragraph itself, drawn at its start. */
-type Inline = { parts: string[]; text: string[]; visual: boolean; pins: string[] }
+/**
+ * A paragraph's inline content; `pins` are drawings placed relative to the paragraph itself, drawn at its start;
+ * `floats` are drawings the text wraps around, which sit at the paragraph's top wherever their anchor run is.
+ */
+type Inline = { parts: string[]; text: string[]; visual: boolean; pins: string[]; floats: string[] }
 /** Where a floating drawing sits, in points: `relH`/`relV` are Word's relativeFrom values. */
 type Placement = { relH: string; relV: string; alignH?: string; alignV?: string; offH: number; offV: number; w: number; h: number; behind: boolean; rotate?: number }
 
@@ -427,6 +433,49 @@ const vmlLength = (value: string | undefined): number => {
   const factor = { pt: 1, in: 72, cm: 72 / 2.54, mm: 72 / 25.4, px: 0.75, pc: 12 }[match[2] ?? 'px'] ?? 0.75
   return clamp(Number(match[1]) * factor, -4000, 4000) || 0
 }
+// Pattern fills: Office's 8 × 8 hatches, each row a byte from the top, high bit leftmost (the same table pptx.ts draws from).
+const PATTERNS: Record<string, string> = {
+  pct5: '8000000008000000', pct10: '8000080080000800', pct20: '8800220088002200', pct25: '8822882288228822', pct30: 'aa44aa11aa44aa11', pct40: 'aa55aa51aa55aa15',
+  pct50: 'aa55aa55aa55aa55', pct60: 'ee55bb55ee55bb55', pct70: '77dd77dd77dd77dd', pct75: '77ffddff77ffddff', pct80: 'effffeffeffffeff', pct90: 'fffffff7ffffff7f',
+  horz: 'ff00000000000000', vert: '8080808080808080', ltHorz: 'ff000000ff000000', ltVert: '8888888888888888', dkHorz: 'ffff0000ffff0000', dkVert: 'cccccccccccccccc',
+  narHorz: 'ff00ff00ff00ff00', narVert: '5555555555555555', dashHorz: 'f00000000f000000', dashVert: '8080808008080808', cross: 'ff80808080808080',
+  dnDiag: '8040201008040201', upDiag: '0102040810204080', ltDnDiag: '8844221188442211', ltUpDiag: '1122448811224488', dkDnDiag: 'cc663399cc663399',
+  dkUpDiag: '3366cc993366cc99', wdDnDiag: 'c1e070381c0e0783', wdUpDiag: '83070e1c3870e0c1', dashDnDiag: '0000884422110000', dashUpDiag: '0000112244880000',
+  diagCross: '8142241818244281', smCheck: '9966669999666699', lgCheck: 'f0f0f0f00f0f0f0f', smGrid: 'ff888888ff888888', lgGrid: 'ff80808080808080',
+  dotGrid: 'aa00800080008000', smConfetti: '8008400210012004', lgConfetti: 'b130031bd8c00c8d', horzBrick: 'ff808080ff080808', diagBrick: '0102040818244281',
+  solidDmnd: '10387cfe7c381000', openDmnd: '8244281028448201', dotDmnd: '8000220008002200', plaid: 'aa55aa55f0f0f0f0', sphere: '77898f8f7798f8f8',
+  weave: '8854224588142251', divot: '0010081000800180', shingle: '038448300c020101', wave: '001825c0001825c0', trellis: 'ff66ff99ff66ff99', zigZag: '8142241881422418'
+}
+
+/** One hatch tile is 8 screen pixels at 100 % zoom: 6 points. */
+const PATTERN_PT = 6
+
+/** A hatch tile's SVG content: the background, then the foreground pixels, in an 8 × 8 box. */
+function patternTile({ fg, bg, bits }: { fg: Rgba; bg: Rgba; bits: string }): string {
+  let d = ''
+  for (let y = 0; y < 8; y++) {
+    const row = parseInt(bits.slice(y * 2, y * 2 + 2), 16)
+    for (let x = 0; x < 8; x++) if (row & (0x80 >> x)) d += `M${x},${y}h1v1h-1z`
+  }
+  return `<rect width="8" height="8" fill="${cssColor(bg)}"/>${d ? `<path d="${d}" fill="${cssColor(fg)}"/>` : ''}`
+}
+
+/** The colour a fill reads as from a distance, for choosing the text colour on it; null for a picture. */
+function paintTone(paint: Paint): Rgba | null {
+  if ('color' in paint) return paint.color
+  if ('picture' in paint) return null
+  const set = [...paint.pattern.bits].reduce((sum, hex) => sum + [...parseInt(hex, 16).toString(2)].filter((bit) => bit === '1').length, 0)
+  return mix(paint.pattern.fg, paint.pattern.bg, set / 64)
+}
+
+/** A fill as a CSS background, for shapes drawn as plain boxes. */
+function paintCss(paint: Paint): string {
+  if ('color' in paint) return `background:${cssColor(paint.color)}`
+  if ('picture' in paint) return `background:url('${esc(paint.picture)}') 0 0${paint.tile ? ' repeat' : '/100% 100% no-repeat'}`
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" shape-rendering="crispEdges">${patternTile(paint.pattern)}</svg>`
+  return `background:url('data:image/svg+xml,${encodeURIComponent(svg)}') 0 0/${PATTERN_PT}pt ${PATTERN_PT}pt repeat`
+}
+
 const PAGE_BREAK = '<span class="dx-pgbr" role="separator" aria-label="分頁"></span>'
 type ParaInfo = { node: XmlNode; styleId: string; props: ParaProps; base: RunProps; mark: RunProps; num?: { numId: string; ilvl: number }; sig: string }
 
@@ -1888,7 +1937,7 @@ class DocxRenderer {
   private renderParagraph(info: ParaInfo, scope: Scope, top: number, bottom: number, groupTop: boolean, groupBottom: boolean, first: boolean): string {
     const dark = info.props.shd ? isDark(info.props.shd) : scope.dark
     const local_scope = dark === scope.dark ? scope : { ...scope, dark }
-    const out: Inline = { parts: [], text: [], visual: false, pins: [] }
+    const out: Inline = { parts: [], text: [], visual: false, pins: [], floats: [] }
     this.inline(info.node.children.filter((node) => local(node.name) !== 'pPr'), local_scope, info.base, null, out)
     const text = out.text.join('')
     if (info.mark.vanish && !text && !out.visual) return ''
@@ -1915,7 +1964,8 @@ class DocxRenderer {
       }
     }
     if (text) this.text.push(text)
-    let content = out.parts.join('')
+    // Floats go first, so the text wraps them from the paragraph's first line, as Word lays them out.
+    let content = out.floats.join('') + out.parts.join('')
     const css = this.paraCss(info, scope, top, bottom, groupTop, groupBottom)
     const segments = content.split(TAB)
     let flex = false
@@ -2197,8 +2247,8 @@ class DocxRenderer {
         }
         case 'ruby': {
           flush()
-          const baseOut: Inline = { parts: [], text: [], visual: false, pins: [] }
-          const rtOut: Inline = { parts: [], text: [], visual: false, pins: [] }
+          const baseOut: Inline = { parts: [], text: [], visual: false, pins: [], floats: [] }
+          const rtOut: Inline = { parts: [], text: [], visual: false, pins: [], floats: [] }
           this.inline(child(c, 'rubyBase')?.children ?? [], scope, props, null, baseOut, 1)
           this.inline(child(c, 'rt')?.children ?? [], scope, props, null, rtOut, 1)
           out.parts.push(`<ruby>${baseOut.parts.join('').split(TAB).join('')}<rt>${rtOut.parts.join('').split(TAB).join('')}</rt></ruby>`)
@@ -2293,8 +2343,45 @@ class DocxRenderer {
       if (name === 'noFill') return null
       if (name === 'solidFill') return this.drawingColor(c.children[0])
       if (name === 'gradFill') return this.drawingColor(path(c, 'gsLst', 'gs')?.children[0])
+      // An outline drawn with a hatch reads as its foreground.
+      if (name === 'pattFill') return this.drawingColor(child(c, 'fgClr')?.children[0]) ?? BLACK
     }
     return undefined
+  }
+
+  /** A shape's fill (see `Paint`): null for no fill or a picture that cannot be shown, undefined when the shape names none. */
+  private fillPaint(holder: XmlNode | null, scope: Scope): Paint | null | undefined {
+    if (!holder) return undefined
+    for (const c of holder.children) {
+      const name = local(c.name)
+      if (name === 'pattFill') {
+        const fg = this.drawingColor(child(c, 'fgClr')?.children[0]) ?? BLACK
+        const bg = this.drawingColor(child(c, 'bgClr')?.children[0]) ?? WHITE
+        return { pattern: { fg, bg, bits: PATTERNS[attr(c, 'prst') ?? ''] ?? PATTERNS.pct5 } }
+      }
+      if (name === 'blipFill') {
+        const rel = this.pkg.rel(scope.story.part, relAttr(child(c, 'blip'), 'embed'))
+        if (!rel || rel.external || !this.pkg.zip.has(rel.target) || !isDrawablePart(rel.target)) return null
+        return { picture: this.media(rel.target), tile: child(c, 'tile') !== null }
+      }
+      if (name === 'grpFill') return scope.groupFill ? (this.fillPaint(scope.groupFill, { ...scope, groupFill: null }) ?? null) : null
+    }
+    const color = this.fillColor(holder)
+    return color === undefined ? undefined : color ? { color } : null
+  }
+
+  private paints = 0
+
+  /** A fill as an SVG paint over a w × h (pt) viewBox, with the pattern it needs. */
+  private svgPaint(paint: Paint, w: number, h: number): { fill: string; defs: string } {
+    if ('color' in paint) return { fill: cssColor(paint.color), defs: '' }
+    const id = `dx-f${++this.paints}`
+    if ('pattern' in paint) {
+      const tile = `<g transform="scale(${PATTERN_PT / 8})" shape-rendering="crispEdges">${patternTile(paint.pattern)}</g>`
+      return { fill: `url(#${id})`, defs: `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${PATTERN_PT}" height="${PATTERN_PT}">${tile}</pattern>` }
+    }
+    const [pw, ph] = [round(Math.max(w, 0.01)), round(Math.max(h, 0.01))]
+    return { fill: `url(#${id})`, defs: `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${pw}" height="${ph}"><image href="${esc(paint.picture)}" width="${pw}" height="${ph}" preserveAspectRatio="none"/></pattern>` }
   }
 
   private drawing(d: XmlNode, scope: Scope, out: Inline): string {
@@ -2315,7 +2402,10 @@ class DocxRenderer {
       return ''
     }
     const inner = this.graphic(content, w, h, scope, alt, false)
-    return placed && inner ? `${placed.open}${inner}</span>` : inner
+    if (!placed || !inner) return inner
+    out.floats.push(`${placed.open}${inner}</span>`)
+    out.visual = true
+    return ''
   }
 
   /** Per sheet: which page segment (between page breaks) the body is on, and whether a drawing was placed on it. */
@@ -2422,7 +2512,10 @@ class DocxRenderer {
       const placed = this.place(placement, scope)
       if (placed) return { open: placed.open, mode: placed.pin ? 'pin' : 'abs' }
     }
-    const dist = (name: string) => pt(clamp((num(anchor, name) ?? 0) / EMU_PER_PT, 0, 72))
+    // A paragraph offset moves the drawing down from the paragraph's top; other references are approximated by that top.
+    const down = relV === 'paragraph' && !alignV ? clamp(offV, 0, 1000) : 0
+    const dist = (name: string) => pt(clamp((num(anchor, name) ?? 0) / EMU_PER_PT, 0, 72) + (name === 'distT' ? down : 0))
+    const lower = down > 0 ? `;margin-top:${pt(down)}` : ''
     if (wrapName === 'wrapSquare' || wrapName === 'wrapTight' || wrapName === 'wrapThrough') {
       let side = alignH === 'right' || alignH === 'outside' ? 'right' : alignH === 'center' ? '' : 'left'
       if (!alignH && g) {
@@ -2430,11 +2523,11 @@ class DocxRenderer {
         if (x !== null && x + w / 2 > g.w / 2) side = 'right'
       }
       if (side) return { open: `<span class="dx-float" style="float:${side};margin:${dist('distT')} ${dist('distR')} ${dist('distB')} ${dist('distL')}">`, mode: 'flow' }
-      return { open: '<span class="dx-figure" style="text-align:center">', mode: 'flow' }
+      return { open: `<span class="dx-figure" style="text-align:center${lower}">`, mode: 'flow' }
     }
     if (wrapName === 'wrapTopAndBottom') {
       const align = alignH === 'center' ? 'center' : alignH === 'right' || alignH === 'outside' ? 'right' : 'left'
-      return { open: `<span class="dx-figure" style="text-align:${align}">`, mode: 'flow' }
+      return { open: `<span class="dx-figure" style="text-align:${align}${lower}">`, mode: 'flow' }
     }
     return null
   }
@@ -2515,11 +2608,13 @@ class DocxRenderer {
   private shape(wsp: XmlNode, scope: Scope, size: string, w: number, h: number, fill: boolean): string {
     const spPr = child(wsp, 'spPr')
     const style = child(wsp, 'style')
-    let background = this.fillColor(spPr)
-    if (background === undefined) {
+    let paint = this.fillPaint(spPr, scope)
+    if (paint === undefined) {
       const ref = child(style, 'fillRef')
-      background = ref && (num(ref, 'idx') ?? 0) > 0 ? this.drawingColor(ref.children[0]) : null
+      const color = ref && (num(ref, 'idx') ?? 0) > 0 ? this.drawingColor(ref.children[0]) : null
+      paint = color ? { color } : null
     }
+    const background = paint ? paintTone(paint) : null
     const ln = child(spPr, 'ln')
     let border: string | null = null
     let lineColor: Rgba | null = null
@@ -2537,7 +2632,7 @@ class DocxRenderer {
     if ((geometry === 'line' || geometry === 'straightConnector1') && !content) {
       return border ? `<span class="dx-line" style="${fill ? 'width:100%' : `width:${pt(w)};max-width:100%`};border-top:${border}"></span>` : ''
     }
-    if (!content && !background && !border) return ''
+    if (!content && !paint && !border) return ''
     // A plain rectangle stays a CSS box; every other shape is its ECMA-376 geometry drawn behind the text, and the
     // text sits in the geometry's text rectangle. A preset the standard does not define keeps a box and says so.
     const shape = geometry === 'rect' ? null : shapeGeometry(spPr, w * EMU_PER_PT, h * EMU_PER_PT)
@@ -2551,18 +2646,21 @@ class DocxRenderer {
     if (shape) {
       css.push('position:relative;z-index:0')
       let paths = ''
-      if (background) {
+      let defs = ''
+      if (paint) {
+        const svgFill = this.svgPaint(paint, w, h)
+        defs = svgFill.defs
         for (const p of shape.paths) {
           if (p.fill === 'none' || (!p.closed && geometry === 'custom')) continue
-          paths += `<path d="${p.d}" fill="${cssColor(background)}"/>`
+          paths += `<path d="${p.d}" fill="${svgFill.fill}"/>`
           const shade = fillShade(p.fill)
           if (shade) paths += `<path d="${p.d}" fill="${shade.color}" fill-opacity="${shade.opacity}"/>`
         }
       }
       if (lineColor) for (const p of shape.paths) if (p.stroke) paths += `<path d="${p.d}" fill="none" stroke="${cssColor(lineColor)}" stroke-width="${round(lineWidth)}" stroke-linejoin="round"/>`
-      if (paths) svg = `<svg class="dx-geom" viewBox="0 0 ${round(Math.max(w, 0.01))} ${round(Math.max(h, 0.01))}" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>`
+      if (paths) svg = `<svg class="dx-geom" viewBox="0 0 ${round(Math.max(w, 0.01))} ${round(Math.max(h, 0.01))}" preserveAspectRatio="none" aria-hidden="true">${defs ? `<defs>${defs}</defs>` : ''}${paths}</svg>`
     } else {
-      if (background) css.push(`background:${cssColor(background)}`)
+      if (paint) css.push(paintCss(paint))
       if (border) css.push(`border:${border}`)
     }
     const unknown = geometry !== 'rect' && geometry !== 'custom' && !shape ? unsupported(`未支援的圖形:${geometry}`) : ''
@@ -2578,7 +2676,7 @@ class DocxRenderer {
     if (content) {
       if (scope.depth >= LIMITS.depth) inner = unsupported('多層巢狀文字方塊')
       else {
-        const innerScope: Scope = { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, rect.r - rect.l - 14), dark: background ? isDark(background) : scope.dark, sheet: null }
+        const innerScope: Scope = { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, rect.r - rect.l - 14), dark: background ? isDark(background) : scope.dark, sheet: null, groupFill: null }
         inner = this.renderBlocks(content.children, innerScope)
       }
     }
@@ -2598,7 +2696,10 @@ class DocxRenderer {
     if (!ew || !eh) return ''
     let items = ''
     let count = 0
-    const inner: Scope = { ...scope, depth: scope.depth + 1, sheet: null }
+    // A member that takes the group's fill takes this group's, or the enclosing group's when this one does too.
+    const own = child(node, 'grpSpPr')
+    const groupFill = own && !child(own, 'grpFill') ? own : scope.groupFill
+    const inner: Scope = { ...scope, depth: scope.depth + 1, sheet: null, groupFill }
     for (const c of node.children) {
       const name = local(c.name)
       if (!['wsp', 'pic', 'grpSp', 'wgp', 'graphicFrame'].includes(name)) continue
@@ -2667,6 +2768,18 @@ class DocxRenderer {
       )
     }
     const html = this.vmlContent(node, name, scope, w, h, placed !== null)
+    if (!placed && html && style.position === 'absolute' && depth === 0 && ['square', 'tight', 'through', 'topAndBottom'].includes(wrapType ?? '')) {
+      // Wrapped like a DrawingML anchor: floated to its side at the paragraph's top, or on a line of its own.
+      const alignH = style['mso-position-horizontal']
+      const left = vmlLength(style['margin-left']) + vmlLength(style.left)
+      const side =
+        wrapType === 'topAndBottom' || alignH === 'center' ? '' : alignH === 'right' || alignH === 'outside' || (alignH !== 'left' && alignH !== 'inside' && left + w / 2 > scope.width / 2) ? 'right' : 'left'
+      const down = ['text', 'paragraph'].includes(style['mso-position-vertical-relative'] ?? 'text') && !['top', 'center', 'bottom'].includes(style['mso-position-vertical'] ?? '') ? clamp(vmlLength(style['margin-top']) + vmlLength(style.top), 0, 1000) : 0
+      const open = side ? `<span class="dx-float" style="float:${side};margin:${pt(down)} 9pt 0pt 9pt">` : `<span class="dx-figure" style="text-align:center${down > 0 ? `;margin-top:${pt(down)}` : ''}">`
+      out.floats.push(`${open}${html}</span>`)
+      out.visual = true
+      return ''
+    }
     if (!placed || !html) return html
     ;(placed.pin ? out.pins : out.parts).push(`${placed.open}${html}</span>`)
     return ''

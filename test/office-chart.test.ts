@@ -67,7 +67,13 @@ describe('number formats', () => {
     ['#,##0,"K"', 25000, '25K'],
     ['yyyy/m/d', 45000, '2023/3/15'],
     ['@', 7, '7'],
-    ['[>100]0;0.0', 7, '7']
+    ['[>100]0;0.0', 7, '7'],
+    // Only a bare % scales by 100; a quoted or backslash-escaped one is plain text.
+    ['0.0"%"', 12.5, '12.5%'],
+    ['0.0\\%', 12.5, '12.5%'],
+    ['0.0"%";[Red]-0.0"%"', -3, '-3.0%'],
+    ['0%"%"', 0.5, '50%%'],
+    ['0"%" "成長"', 8, '8% 成長']
   ]
   for (const [code, value, want] of cases) test(`${code} ${value}`, () => assert.equal(formatChartNumber(code, value), want))
   test('non-finite values format as nothing', () => {
@@ -190,6 +196,13 @@ describe('data labels', () => {
     const dLbls = '<c:dLbls><c:showVal val="0"/><c:showCatName val="1"/><c:showPercent val="1"/></c:dLbls>'
     const labels = texts(draw(chart(`<c:pieChart><c:varyColors val="1"/>${ser('S', [1, 1, 2], ['X', 'Y', 'Z'])}${dLbls}</c:pieChart>`)).svg)
     assert.ok(labels.some((l) => l.includes('Z') && l.includes('50%')), labels.join('|'))
+  })
+
+  test('a label format whose % is quoted text does not stand in for the percent format', () => {
+    // The values are already percents (12.5 shows 12.5%); the share still shows as a percent of the whole.
+    const dLbls = '<c:dLbls><c:numFmt formatCode="0.0&quot;%&quot;" sourceLinked="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showPercent val="1"/></c:dLbls>'
+    const labels = texts(draw(chart(`<c:pieChart><c:varyColors val="1"/>${ser('S', [12.5, 12.5, 25], ['X', 'Y', 'Z'])}${dLbls}</c:pieChart>`)).svg)
+    assert.ok(labels.some((l) => l.includes('25.0%') && l.includes('50%')), labels.join('|'))
   })
 })
 

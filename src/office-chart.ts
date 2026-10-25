@@ -198,7 +198,8 @@ function splitSections(code: string): string[] {
   return out.slice(0, 4)
 }
 
-type Tok = { kind: 'lit'; text: string } | { kind: 'num'; text: string } | { kind: 'date'; text: string }
+// `percent` marks a bare %: the only one that scales by 100 (a quoted or escaped % is text).
+type Tok = { kind: 'lit'; text: string; percent?: boolean } | { kind: 'num'; text: string } | { kind: 'date'; text: string }
 
 function tokenize(section: string): Tok[] | null {
   const toks: Tok[] = []
@@ -239,6 +240,7 @@ function tokenize(section: string): Tok[] | null {
       toks.push({ kind: 'date', text: 'ampm' })
       i += 4
     } else if (ch === '@') toks.push({ kind: 'num', text: '@' })
+    else if (ch === '%') toks.push({ kind: 'lit', text: ch, percent: true })
     else lit(ch)
   }
   return toks
@@ -323,6 +325,11 @@ function formatDate(toks: Tok[], serial: number): string {
   return out
 }
 
+/** Whether a format shows its number as a percent: a bare % in its first section, not a quoted or escaped one. */
+function percentFormat(code: string): boolean {
+  return tokenize(splitSections(code.trim())[0])?.some((t) => t.kind === 'lit' && t.percent) ?? false
+}
+
 /** A number as an Excel number format shows it; codes this does not know show as General. */
 export function formatChartNumber(code: string | null | undefined, value: number): string {
   if (!Number.isFinite(value)) return ''
@@ -344,7 +351,7 @@ export function formatChartNumber(code: string | null | undefined, value: number
     if (numbers.some((t) => t.text === '@') || !toks.length) return general(value)
     return `${negate ? '-' : ''}${toks.map((t) => t.text).join('')}`
   }
-  const percents = toks.filter((t) => t.kind === 'lit' && t.text.includes('%')).reduce((sum, t) => sum + (t.text.match(/%/g) ?? []).length, 0)
+  const percents = toks.filter((t) => t.kind === 'lit' && t.percent).length
   const pattern = numbers.map((t) => t.text).join('')
   const shown = formatPlain(pattern, abs * 100 ** Math.min(percents, 2))
   let out = ''
@@ -1079,7 +1086,7 @@ function labelText(labels: Labels, s: Series, value: number, percent: number | n
   if (labels.ser) parts.push(s.name)
   if (labels.cat) parts.push(category)
   if (labels.val) parts.push(formatChartNumber(labels.code ?? s.code, value))
-  if (labels.pct && percent !== null) parts.push(formatChartNumber(labels.code && /%/.test(labels.code) ? labels.code : '0%', percent))
+  if (labels.pct && percent !== null) parts.push(formatChartNumber(labels.code && percentFormat(labels.code) ? labels.code : '0%', percent))
   return parts.filter((p) => p !== '').join(labels.sep)
 }
 
