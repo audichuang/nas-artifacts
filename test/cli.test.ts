@@ -173,8 +173,22 @@ describe('page checks', () => {
     assert.equal(out.match(/fetch/g)?.length, 1)
   })
 
+  test('asset URLs pass the check; another artifact’s assets do not', async () => {
+    const { id } = page()
+    const own = `https://artifacts-content.example/a/${id}/assets/as1/photo%20one.png`
+    const other = 'https://artifacts-content.example/a/someoneElse1/assets/as2/b.png'
+    const html = `<!doctype html><title>x</title><img src="${own}"><style>body { background: url(${own}) }</style>`
+    const alone = await cli(['check', site({ 'index.html': html })])
+    assert.equal(alone.code, 0, alone.stdout)
+
+    const root = site({ 'index.html': `${html}<img src="${other}">` })
+    const first = await cli(['publish', root, '--id', id])
+    assert.doesNotMatch(first.stderr, /photo/)
+    assert.match(first.stderr, /someoneElse1/)
+  })
+
   test('the bundled templates pass the check', async () => {
-    for (const name of ['report', 'dashboard', 'checklist']) {
+    for (const name of ['report', 'dashboard', 'checklist', 'deck']) {
       const run = await cli(['check', new URL(`../skill/nas-artifacts/templates/${name}`, import.meta.url).pathname])
       assert.equal(run.code, 0, `${name}: ${run.stdout}`)
     }

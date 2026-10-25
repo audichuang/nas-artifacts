@@ -169,8 +169,11 @@ const CODE_RULES = [
   [/\bwindow\.open\s*\(/, () => 'window.open does nothing: the sandbox has no popups; show the URL as text']
 ]
 
+// An uploaded asset: <content>/a/<id>/assets/<assetId>/<name>. The CLI does not know the content host, so the path decides.
+const ASSET_PATH = /^\/a\/([^/]+)\/assets\//
+
 /** Heuristic, not a parser: names what the sandbox will block or what is missing, before anyone opens the page. */
-function checkFiles(paths) {
+function checkFiles(paths, id) {
   const warnings = []
   const warn = (file, message) => {
     const line = `${file}: ${message}`
@@ -189,8 +192,11 @@ function checkFiles(paths) {
         let url
         try { url = new URL(ref, 'https://base.invalid') } catch { return }
         const host = url.host
+        const assetOf = ASSET_PATH.exec(url.pathname)?.[1]
         if (tag === 'a' || tag === 'area') externalLinks++
-        else if (tag === 'script') {
+        else if (assetOf && (MEDIA_TAGS.has(tag) || tag === 'css')) {
+          if (id && assetOf !== id) warn(file, `${ref} is an asset of artifact ${assetOf}; a page loads only its own assets, so upload it to this one`)
+        } else if (tag === 'script') {
           if (!SCRIPT_HOSTS.includes(host)) warn(file, `<script> from ${host} is blocked; use ${SCRIPT_HOSTS.join(', ')}, or publish the file`)
           else checkPinned(ref, url)
         } else if (tag === 'link' && /\bstylesheet\b/.test(rel)) {
@@ -268,10 +274,10 @@ async function publish(target, values) {
   if (!existsSync(source)) fail(`${target} does not exist`)
   const paths = collectFiles(source)
   if (Object.keys(paths).length === 0) fail(`${target} has no files to publish`)
-  const warnings = checkFiles(paths)
-  reportWarnings(warnings)
   const state = readJson(STATE_FILE, {})
   const knownId = values.new ? undefined : values.id ?? state[source]?.id
+  const warnings = checkFiles(paths, knownId)
+  reportWarnings(warnings)
   const hashes = hashFiles(paths)
   const capabilities = values.cap === undefined ? undefined : values.cap.split(',').map((cap) => cap.trim()).filter(Boolean)
   const common = {
