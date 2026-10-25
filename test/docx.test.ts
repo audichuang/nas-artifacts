@@ -397,6 +397,28 @@ describe('crafted or very large Word files (stress round 1)', () => {
     assert.match(cell('首欄'), /border-right:(?!none)[^;]*1\.5pt/)
   })
 
+  test('a row band two rows tall keeps its inside line between its own rows, not at its edges', () => {
+    const style = `<w:styles ${W}><w:style w:type="table" w:styleId="B2"><w:tblPr><w:tblStyleRowBandSize w:val="2"/><w:tblStyleColBandSize w:val="2"/></w:tblPr>
+<w:tblStylePr w:type="band1Horz"><w:tcPr><w:tcBorders><w:insideH w:val="single" w:sz="8" w:color="FF0000"/></w:tcBorders></w:tcPr></w:tblStylePr>
+<w:tblStylePr w:type="band1Vert"><w:tcPr><w:tcBorders><w:insideV w:val="single" w:sz="8" w:color="00FF00"/></w:tcBorders></w:tcPr></w:tblStylePr></w:style></w:styles>`
+    const row = (n: number) => `<w:tr>${['a', 'b', 'c', 'd'].map((c) => tc(`r${n}${c}`)).join('')}</w:tr>`
+    const table = `<w:tbl><w:tblPr><w:tblStyle w:val="B2"/><w:tblLook w:firstRow="0" w:firstColumn="0" w:noHBand="0" w:noVBand="0"/></w:tblPr><w:tblGrid>${'<w:gridCol w:w="1500"/>'.repeat(4)}</w:tblGrid>${[1, 2, 3, 4].map(row).join('')}</w:tbl>`
+    const doc = readDocx(docWith(table, { 'word/styles.xml': style }, [['rSt', 'styles', 'styles.xml']]), '')
+    const css = doc.html + `<style>${doc.css}</style>`
+    const cell = (text: string) => {
+      const at = css.lastIndexOf('<td', css.indexOf(`>${text}<`))
+      const tag = css.slice(at, css.indexOf('>', at))
+      const name = /class="([^"]*)"/.exec(tag)?.[1]
+      return `${/style="([^"]*)"/.exec(tag)?.[1] ?? ''};${name ? new RegExp(`\\.${name.split(' ').join('|\\.')}\\{([^}]*)\\}`).exec(css)?.[1] ?? '' : ''}`
+    }
+    // Rows 1–2 are one band: the red line runs between them, not under row 2 (the band's edge).
+    assert.match(cell('r1a'), /border-bottom:[^;]*rgb\(255,0,0\)|border-bottom:[^;]*#FF0000/i)
+    assert.doesNotMatch(cell('r2a'), /border-bottom:[^;]*(rgb\(255,0,0\)|#FF0000)/i)
+    // Columns a–b are one band: the green line runs between them.
+    assert.match(cell('r1a'), /border-right:[^;]*(rgb\(0,255,0\)|#00FF00)/i)
+    assert.doesNotMatch(cell('r1b'), /border-right:[^;]*(rgb\(0,255,0\)|#00FF00)/i)
+  })
+
   test('F20: a table past the paragraph limit draws whole rows, says how many rows it left out, and the text after it still shows', () => {
     const row = (n: number) => `<w:tr>${Array.from({ length: 10 }, (_, c) => tc(`r${n}c${c}`)).join('')}</w:tr>`
     const grid = `<w:tblGrid>${'<w:gridCol w:w="900"/>'.repeat(10)}</w:tblGrid>`
@@ -495,6 +517,15 @@ describe('any Word file draws faithfully (stress round 2)', () => {
 
     const plain = p(r('甲')) + p(r('乙'), '<w:pageBreakBefore/>')
     assert.doesNotMatch(readDocx(docWith(plain), '').html, /padding-top:11\.765cqw/, 'a page without page anchors keeps the plain layout')
+  })
+
+  test('a page break inside a paragraph moves what follows it, page anchors included, to the next page', () => {
+    const inline = p(r('第一頁的字') + '<w:r><w:br w:type="page"/></w:r>' + r('第二頁的字') + fullPage())
+    const html = readDocx(docWith(inline, mediaParts, media), '').html
+    // The drawing after the break lands in the second page's segment, not over the first page's text.
+    assert.match(html, /第一頁的字[\s\S]*class="dx-pgbr"[\s\S]*<div class="dx-pg"[^>]*>[\s\S]*第二頁的字/)
+    assert.match(html, /<div class="dx-pg"[^>]*>[\s\S]*class="dx-abs"/)
+    assert.equal((html.match(/第二頁的字/g) ?? []).length, 1)
   })
 
   test('F30: a paragraph-anchored picture is pinned to its paragraph; a paragraph holding only an anchor keeps its line', () => {

@@ -34,6 +34,8 @@ export type ChartOptions = {
   fontFamily: string
   textColor: string
   readCells?(formula: string): (string | number | null)[]
+  /** The workbook counts dates from 1904 (a chart part may also say so itself with c:date1904). */
+  date1904?: boolean
 }
 
 export type ChartResult = { svg: string; text: string }
@@ -288,10 +290,13 @@ function formatPlain(pattern: string, value: number): string {
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
+// The date system of the chart being drawn: rendering is synchronous, so renderChart sets it for the call.
+let date1904 = false
+
 function formatDate(toks: Tok[], serial: number): string {
-  // The 1900 date system with its fictitious 29 February 1900.
-  const days = serial < 61 ? serial + 1 : serial
-  const date = new Date(Date.UTC(1899, 11, 30) + Math.round(days * DAY_MS / 1000) * 1000)
+  // The 1904 system counts from 1 January 1904; the 1900 one has its fictitious 29 February 1900.
+  const days = date1904 ? serial : serial < 61 ? serial + 1 : serial
+  const date = new Date((date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30)) + Math.round(days * DAY_MS / 1000) * 1000)
   if (Number.isNaN(date.getTime())) return general(serial)
   const ampm = toks.some((t) => t.kind === 'date' && t.text === 'ampm')
   let out = ''
@@ -693,10 +698,15 @@ function crossing(perpendicular: XmlNode | null, scale: Scale): number {
 // The renderer
 
 export function renderChart(chartXml: XmlNode, options: ChartOptions): ChartResult | null {
+  const space = local(chartXml.name) === 'chartSpace' ? chartXml : child(chartXml, 'chartSpace') ?? chartXml
+  const own = attr(child(space, 'date1904'), 'val')
+  date1904 = own !== undefined ? own === '1' || own === 'true' : Boolean(options.date1904)
   try {
     return draw(chartXml, options)
   } catch {
     return null
+  } finally {
+    date1904 = false
   }
 }
 

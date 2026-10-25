@@ -108,3 +108,17 @@ describe('pictures inside Office files', () => {
     for (const part of ['ppt/slides/slide1.xml', 'word/document.xml', 'xl/media/x.svgz', 'docProps/thumbnail.jpeg', 'ppt/media/a.txt', 'customXml/a.png']) assert.equal(isDrawablePart(part), false, part)
   })
 })
+
+describe('export.pptx', () => {
+  test('hands back only a real .pptx; a template, macro or old deck is not relabelled as one', async () => {
+    const app = createAppServer(store, { dataDir: dir, appPort: 0, contentPort: 0, appOrigin: 'http://app.test', contentOrigin: 'http://content.test', tokens: [TOKEN] })
+    const real = store.publish({ title: 'Real', files: { 'a.pptx': { content: officeFile('a') } } })
+    assert.equal((await app.request(`http://app.test/api/artifacts/${real.id}/export.pptx`)).status, 200)
+    for (const name of ['Template.potx', 'Macro.pptm', 'Show.ppsx', 'Old.ppt']) {
+      const { id } = store.publish({ title: name, files: { [name]: { content: officeFile(name) } } })
+      const response = await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)
+      assert.equal(response.status, 409, name)
+      assert.match(((await response.json()) as { error: { message: string } }).error.message, /read \S+ --out/)
+    }
+  })
+})

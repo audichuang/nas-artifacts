@@ -511,7 +511,7 @@ async function main() {
       const query = values.v ? `?v=${enc(values.v)}` : ''
       const bytes = await api(`/api/artifacts/${enc(id)}/export.pptx${query}`, {
         raw: true,
-        hints: { not_found: 'this server cannot export decks yet; it needs a newer nas-artifacts image', not_a_deck: 'only slide decks (*.slides.md, *.pptx) export to .pptx' }
+        hints: { not_found: 'this server cannot export decks yet; it needs a newer nas-artifacts image', not_a_deck: 'only slide decks (*.slides.md, *.pptx) export to .pptx; save any other published file with: artifact read <id> --out FILE' }
       })
       const out = resolve(values.out ?? `${id}.pptx`)
       writeFileSync(out, bytes)

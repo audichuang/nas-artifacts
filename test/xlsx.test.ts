@@ -650,11 +650,13 @@ describe('cells show what Excel shows', () => {
     })
   })
 
-  test('a workbook that asks to be recalculated on open shows its formulas, not the 0 placeholders saved for them', () => {
+  test('a workbook that asks to be recalculated on open keeps a saved 0 but marks it as possibly not computed', () => {
+    // XlsxWriter saves 0 for formulas it did not compute, and also for one that really is 0 (=A1-5 with A1=5):
+    // the file cannot tell them apart, so the 0 stays, marked, and charts and rules still see it.
     const body = sheet('<row r="2"><c r="B2"><v>3</v></c><c r="C2"><v>20</v></c><c r="D2"><f>B2*C2</f><v>0</v></c><c r="E2"><f>B2+1</f><v>4</v></c></row>')
     const recalc = renderXlsxPage(book([{ name: 's', body }], { workbookPr: '<calcPr calcId="124519" fullCalcOnLoad="1"/>' }), 'b.xlsx', 'b')
-    assert.match(cellOf(recalc, '=B2*C2'), /class="f"/)
-    assert.doesNotMatch(panel(recalc, 1), /<td class="n">0<\/td>/)
+    assert.match(panel(recalc, 1), /<td class="n stale" title="[^"]*重新計算[^"]*">0<\/td>/)
+    assert.doesNotMatch(panel(recalc, 1), /=B2\*C2/)
     assert.match(panel(recalc, 1), /<td class="n">4<\/td>/)
     const saved = renderXlsxPage(book([{ name: 's', body }]), 'b.xlsx', 'b')
     assert.match(panel(saved, 1), /<td class="n">0<\/td>/)

@@ -423,3 +423,20 @@ describe('what cannot be drawn', () => {
     assert.ok(texts(svg).includes('q'))
   })
 })
+
+describe('date systems', () => {
+  // XlsxWriter's date_1904 workbook: the chart part says <c:date1904 val="1"/> and caches 1904 serials.
+  const dated = (outer: string) =>
+    chart(`<c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:order val="0"/><c:cat>${nums([43830, 43831], 'yyyy-mm-dd')}</c:cat><c:val>${nums([1, 2])}</c:val></c:ser>${ids()}</c:lineChart><c:dateAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:numFmt formatCode="yyyy-mm-dd" sourceLinked="1"/><c:crossAx val="2"/></c:dateAx>${valAx(2, 1)}`, '', outer)
+
+  test('a chart from a 1904 workbook labels its dates by that system', () => {
+    const labels = texts(draw(dated('<c:date1904 val="1"/>')).svg)
+    assert.ok(labels.includes('2024-01-01') && labels.includes('2024-01-02'), labels.join(' | '))
+  })
+
+  test('the renderer can say the workbook uses 1904 when the chart part does not', () => {
+    const labels = texts(draw(dated(''), { date1904: true }).svg)
+    assert.ok(labels.includes('2024-01-01'), labels.join(' | '))
+    assert.ok(texts(draw(dated('')).svg).includes('2019-12-31'), 'the 1900 system stays the default')
+  })
+})

@@ -1363,7 +1363,11 @@ function scannedSheet(wb: Workbook, part: string): ScannedSheet {
   return sheet
 }
 
-/** XlsxWriter saves 0 for every formula and asks Excel to recalculate on open; that 0 was never computed. */
+/**
+ * XlsxWriter saves 0 for every formula it did not compute and asks Excel to recalculate on open. A formula
+ * that really is 0 looks the same, so the 0 is shown, marked as possibly not computed.
+ */
+const STALE_NOTE = '存檔時可能沒有計算這個公式,Excel 開啟時會重新計算'
 const uncomputed = (wb: Workbook, cell: Cell) => wb.recalc && Boolean(cell.f) && cell.v === '0' && (cell.t === 'n' || !cell.t)
 
 /** The values of `'Sheet'!$A$1:$A$9` as a chart would plot them: numbers raw, text as shown. */
@@ -1380,7 +1384,7 @@ function lookupRange(wb: Workbook, formula: string): (string | null)[] {
     for (let r = range.r1; r <= range.r2 && out.length < XLSX_LIMITS.chartPoints; r++) {
       for (let c = range.c1; c <= range.c2 && out.length < XLSX_LIMITS.chartPoints; c++) {
         const cell = sheet.rows.get(r)?.cells.get(c)
-        if (!cell || uncomputed(wb, cell)) out.push(null)
+        if (!cell) out.push(null)
         else if ((cell.t === 'n' || cell.t === 'str' || cell.t === 'b') && cell.v !== null) out.push(cell.v)
         else out.push(showCell(cell, cell.s ?? 0, wb, false).text || null)
       }
@@ -1441,7 +1445,7 @@ const reason = (error: unknown) => {
 // ---------------------------------------------------------------------------------------------
 // Cell values
 
-type Shown = { text: string; html: string; color: string | null; kind: 'num' | 'text' | 'bool' | 'err' | 'formula' | 'empty' | 'picture' }
+type Shown = { text: string; html: string; color: string | null; kind: 'num' | 'text' | 'bool' | 'err' | 'formula' | 'empty' | 'picture'; stale?: boolean }
 
 function formatCode(wb: Workbook, xf: Xf | undefined): string {
   const id = xf?.fmt ?? 0
@@ -1514,11 +1518,10 @@ function showCell(cell: Cell, xfIndex: number, wb: Workbook, wantHtml: boolean):
     }
     default: {
       if (value === null || value === '') break
-      if (uncomputed(wb, cell)) break
       const number = Number(value)
       if (!Number.isFinite(number)) return plain(value, 'text')
       const formatted = formatNumber(code, number, wb.date1904, palette)
-      return plain(formatted.text, 'num', formatted.color)
+      return { ...plain(formatted.text, 'num', formatted.color), stale: uncomputed(wb, cell) }
     }
   }
   if (cell.f !== null && cell.f !== '') return plain(`=${cell.f}`, 'formula')
@@ -2005,7 +2008,7 @@ function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo
       case 'd':
         return v === null ? null : isoToSerial(v, wb.date1904)
       default: {
-        if (v === null || v === '' || uncomputed(wb, cell)) return null
+        if (v === null || v === '') return null
         const n = Number(v)
         return Number.isFinite(n) ? n : v
       }
@@ -2601,7 +2604,8 @@ function drawChart(chart: XmlNode, W: number, H: number, wb: Workbook): ChartRes
     fontFamily: fontStack(theme.minor, theme.minorEa),
     textColor: `#${theme.scheme.dk1 === '000000' ? '595959' : theme.scheme.dk1}`,
     // A tool that writes no cache (openpyxl) still names the cells: read them from this workbook.
-    readCells: (formula) => lookupRange(wb, formula)
+    readCells: (formula) => lookupRange(wb, formula),
+    date1904: wb.date1904
   })
 }
 
@@ -2933,6 +2937,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
         else if (shown.kind === 'bool' || shown.kind === 'err') classes.push('c')
       }
       if (shown?.kind === 'formula') classes.push('f')
+      if (shown?.stale) classes.push('stale')
       const look = looks.get(key)
       if (look) {
         if (look.fill && !(styles.fills[xf?.fill ?? 0])) style.push(`background:${look.fill}`)
@@ -3054,7 +3059,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
         span && span.rows > 1 ? ` rowspan="${span.rows}"` : '',
         classes.length ? ` class="${classes.join(' ')}"` : '',
         style.length ? ` style="${style.join(';')}"` : '',
-        note ? ` title="${escapeHtml(note)}"` : ''
+        note ? ` title="${escapeHtml(note)}"` : shown?.stale ? ` title="${STALE_NOTE}"` : ''
       ].join('')
       parts.push(`<td${attrs}>${inner}</td>`)
     }
@@ -3175,7 +3180,7 @@ body{display:flex;flex-direction:column;font:14px/1.4 -apple-system,BlinkMacSyst
 .xl-grid.nogrid td{border-color:transparent}
 .xl-grid td.n{text-align:end}
 .xl-grid td.c{text-align:center}
-.xl-grid td.f{color:#888;font-style:italic}
+.xl-grid td.f{color:#888;font-style:italic}.xl-grid td.stale{color:#888;font-style:italic}
 .xl-grid th{position:sticky;background:#f3f3f3;color:#5f5f5f;font:12px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-weight:400;border:0;border-inline-end:1px solid #c8c8c8;border-bottom:1px solid #c8c8c8;padding:0 3px;text-align:center;box-sizing:border-box;overflow:hidden;white-space:nowrap}
 .xl-grid thead th{top:0;z-index:4}
 .xl-grid tbody th{inset-inline-start:0;z-index:3}

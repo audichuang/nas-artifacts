@@ -1744,9 +1744,26 @@ class DocxRenderer {
           const bottom = hasNext ? 0 : (info.props.after ?? 0)
           const groupTop = Boolean(info.sig && prev && prev.sig === info.sig)
           const groupBottom = Boolean(info.sig && next && next.sig === info.sig)
-          const pageBreak = sheet ? this.pageBreak(info, at === 0) : null
+          let pageBreak = sheet ? this.pageBreak(info, at === 0) : null
           if (pageBreak === 'start' && (segment || html)) nextPage()
-          let block = this.renderParagraph(info, scope, top, bottom, groupTop, groupBottom, at === 0)
+          // A page break inside the paragraph: what follows it starts the next page, so a drawing placed
+          // after it lands there. Each piece after a break is drawn as the paragraph's continuation.
+          let rest: ParaInfo | null = null
+          let current = info
+          let pieces = 0
+          while (pageBreak === 'end' && pieces < 50) {
+            const split = splitAtPageBreak(current.node)
+            if (!split) break
+            emit(this.renderParagraph({ ...current, node: split[0] }, scope, pieces ? 0 : top, 0, groupTop, false, at === 0 && !pieces))
+            nextPage()
+            pieces++
+            rest = this.paraInfo(split[1], scope)
+            current = rest
+            pageBreak = this.pageBreak(current, true) === 'end' ? 'end' : null
+          }
+          let block = rest
+            ? this.renderParagraph(current, scope, 0, bottom, false, groupBottom, false)
+            : this.renderParagraph(info, scope, top, bottom, groupTop, groupBottom, at === 0)
           if (pageBreak === 'start') {
             // The divider belongs between the pages, not inside the new one.
             const lead = /^(<div class="dx-p[^"]*"[^>]*>)?<span class="dx-pgbr" role="separator" aria-label="分頁"><\/span>/.exec(block)
@@ -2896,21 +2913,28 @@ class DocxRenderer {
           right: lastCol ? tableBorders.right : tableBorders.insideV
         }
         // A conditional format's inside lines run only between the rows (insideH) or columns (insideV)
-        // of its own region: a row region (header, footer, a row band) has no inside horizontal edge,
-        // so its insideH must not replace its own top or bottom rule; a column region likewise for insideV.
+        // of its own region: a header or footer row has none, a band two rows tall has one between its
+        // rows, and the band's own edges keep their rules. Corner cells have no inside edge at all.
+        const rowGroup = (row: number) => (look.firstRow && row === 0 ? 'head' : look.lastRow && row === lastRow && row > 0 ? 'foot' : `b${Math.floor((row - (look.firstRow ? 1 : 0)) / rowBand)}`)
+        const colGroup = (col: number) => (look.firstColumn && col === 0 ? 'first' : look.lastColumn && col === columnCount - 1 && col > 0 ? 'last' : `b${Math.floor((col - (look.firstColumn ? 1 : 0)) / colBand)}`)
         const applyBorders = (holder: XmlNode | null, region: string | null) => {
-          const rowRegion = region !== null && (ROW_REGIONS.has(region) || CORNER_REGIONS.has(region))
-          const colRegion = region !== null && (COL_REGIONS.has(region) || CORNER_REGIONS.has(region))
+          const rowRegion = region !== null && ROW_REGIONS.has(region)
+          const colRegion = region !== null && COL_REGIONS.has(region)
+          const corner = region !== null && CORNER_REGIONS.has(region)
           for (const side of holder?.children ?? []) {
             const key = { start: 'left', end: 'right' }[local(side.name)] ?? local(side.name)
             if (key === 'insideH' && region !== null) {
-              if (rowRegion) continue
-              if (r > 0) sides.top = side
-              if (!bottomRow) sides.bottom = side
+              if (corner) continue
+              const insideTop = r > 0 && (!rowRegion || rowGroup(r - 1) === rowGroup(r))
+              const insideBottom = !bottomRow && (!rowRegion || rowGroup(r + cell.rowspan) === rowGroup(r))
+              if (insideTop) sides.top = side
+              if (insideBottom) sides.bottom = side
             } else if (key === 'insideV' && region !== null) {
-              if (colRegion) continue
-              if (c > 0) sides.left = side
-              if (!lastCol) sides.right = side
+              if (corner) continue
+              const insideLeft = c > 0 && (!colRegion || colGroup(c - 1) === colGroup(c))
+              const insideRight = !lastCol && (!colRegion || colGroup(c + cell.span) === colGroup(c))
+              if (insideLeft) sides.left = side
+              if (insideRight) sides.right = side
             } else if (key in sides) sides[key] = side
           }
         }
@@ -3086,6 +3110,40 @@ export function renderDocxPage(data: Buffer, fileName: string, title: string): s
     )
   }
   return injectBridge(`${head(`:root{--tab:${round(doc.tab)}pt}${doc.css}`)}<body class="docx"><main class="dx-doc">${doc.html}</main></body></html>`)
+}
+
+/**
+ * Cuts a paragraph after its first page break that has content before it: [up to and including the break,
+ * the rest]. Run and wrapper properties are kept on both sides; the rest carries no list numbering, since
+ * it continues the same item.
+ */
+function splitAtPageBreak(p: XmlNode): [XmlNode, XmlNode] | null {
+  const PROPS = new Set(['pPr', 'rPr'])
+  const split = (node: XmlNode, depth: number): [XmlNode, XmlNode] | null => {
+    if (depth > 12) return null
+    for (let i = 0; i < node.children.length; i++) {
+      const item = node.children[i]
+      const props = node.children.filter((c) => PROPS.has(local(c.name)))
+      if (local(item.name) === 'br' && attr(item, 'type') === 'page') {
+        return [{ ...node, children: node.children.slice(0, i + 1) }, { ...node, children: [...props, ...node.children.slice(i + 1)] }]
+      }
+      if (!PROPS.has(local(item.name)) && item.children.length) {
+        const inner = split(item, depth + 1)
+        if (inner) return [{ ...node, children: [...node.children.slice(0, i), inner[0]] }, { ...node, children: [...props, inner[1], ...node.children.slice(i + 1)] }]
+      }
+    }
+    return null
+  }
+  const pieces = split(p, 0)
+  if (!pieces) return null
+  const [first, rest] = pieces
+  // Nothing after the break: the paragraph simply ends the page.
+  const content = (node: XmlNode): boolean =>
+    node.children.some((c) => !PROPS.has(local(c.name)) && (['drawing', 'pict', 'object', 'sym', 'tab', 'br'].includes(local(c.name)) || (local(c.name) === 't' && c.text !== '') || content(c)))
+  if (!content(rest)) return null
+  const pPr = child(rest, 'pPr')
+  const restPPr = pPr ? { ...pPr, children: pPr.children.filter((c) => !['numPr', 'pageBreakBefore'].includes(local(c.name))) } : null
+  return [first, { ...rest, children: rest.children.map((c) => (c === pPr && restPPr ? restPPr : c)) }]
 }
 
 /** The searchable text of a Word file: body, header, footer, notes and text boxes. */
