@@ -169,10 +169,15 @@ const CODE_RULES = [
   [/\bwindow\.open\s*\(/, () => 'window.open does nothing: the sandbox has no popups; show the URL as text']
 ]
 
-// An uploaded asset: <content>/a/<id>/assets/<assetId>/<name>. The CLI does not know the content host, so the path decides.
+// An uploaded asset: <content>/a/<id>/assets/<assetId>/<name>. The CLI does not know the content host, so the path and id decide.
 const ASSET_PATH = /^\/a\/([^/]+)\/assets\//
+// Own-path sources cover scripts, styles, fonts, images and media; frames and plugins fall to default-src 'none'.
+const FRAME_TAGS = new Set(['iframe', 'embed', 'object'])
 
-/** Heuristic, not a parser: names what the sandbox will block or what is missing, before anyone opens the page. */
+/**
+ * Heuristic, not a parser: names what the sandbox will block or what is missing, before anyone opens the page.
+ * `id` is the artifact being published (null: a new one, which has no assets yet; undefined: unknown, as in `check`).
+ */
 function checkFiles(paths, id) {
   const warnings = []
   const warn = (file, message) => {
@@ -194,8 +199,11 @@ function checkFiles(paths, id) {
         const host = url.host
         const assetOf = ASSET_PATH.exec(url.pathname)?.[1]
         if (tag === 'a' || tag === 'area') externalLinks++
-        else if (assetOf && (MEDIA_TAGS.has(tag) || tag === 'css')) {
-          if (id && assetOf !== id) warn(file, `${ref} is an asset of artifact ${assetOf}; a page loads only its own assets, so upload it to this one`)
+        else if (assetOf && FRAME_TAGS.has(tag)) warn(file, `<${tag}> of an asset is blocked: pages cannot frame or embed; link the file with <a download> or show it with <img>/<video>`)
+        else if (assetOf && id !== undefined && assetOf !== id) {
+          warn(file, `${ref} is an asset of artifact ${assetOf}; a page loads only its own assets, so upload it to this one after publishing`)
+        } else if (assetOf) {
+          // This artifact's own asset: the CSP allows it for every remaining tag.
         } else if (tag === 'script') {
           if (!SCRIPT_HOSTS.includes(host)) warn(file, `<script> from ${host} is blocked; use ${SCRIPT_HOSTS.join(', ')}, or publish the file`)
           else checkPinned(ref, url)
@@ -276,7 +284,7 @@ async function publish(target, values) {
   if (Object.keys(paths).length === 0) fail(`${target} has no files to publish`)
   const state = readJson(STATE_FILE, {})
   const knownId = values.new ? undefined : values.id ?? state[source]?.id
-  const warnings = checkFiles(paths, knownId)
+  const warnings = checkFiles(paths, knownId ?? null)
   reportWarnings(warnings)
   const hashes = hashFiles(paths)
   const capabilities = values.cap === undefined ? undefined : values.cap.split(',').map((cap) => cap.trim()).filter(Boolean)

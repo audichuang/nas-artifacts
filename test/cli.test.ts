@@ -185,6 +185,13 @@ describe('page checks', () => {
     const first = await cli(['publish', root, '--id', id])
     assert.doesNotMatch(first.stderr, /photo/)
     assert.match(first.stderr, /someoneElse1/)
+
+    // A new artifact has no assets yet, so any asset URL in it belongs to another one; frames are blocked for every page.
+    const fresh = await cli(['publish', site({ 'index.html': html }), '--new'])
+    assert.match(fresh.stderr, new RegExp(`asset of artifact ${id}`))
+    const framed = await cli(['check', site({ 'index.html': `<iframe src="${own}"></iframe>` })])
+    assert.equal(framed.code, 1)
+    assert.match(framed.stdout, /<iframe> of an asset is blocked/)
   })
 
   test('the bundled templates pass the check', async () => {

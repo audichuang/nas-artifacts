@@ -10,7 +10,7 @@
 - **版本差異**:檢視頁的 ± 與新版提示裡的「看變更」列出這版改了哪些檔、逐行增刪;`artifact diff <id>` 給 agent 看。`artifact prune <id> --keep N` 清掉舊版本並釋放只有它們用到的檔案。
 - **Markdown**:程式碼上色、標題錨點、三節以上自動目錄;` ```mermaid ` 在伺服器端畫成 SVG(不在頁面跑腳本,跟著深色模式變色)。
 - **簡報**:`*.slides.md`(每頁用一行 `---` 分開,`???` 之後是講稿)在伺服器端畫成 16:9 投影片:方向鍵或滑動翻頁、總覽、講稿、全螢幕、版面依內容自動挑(封面、章節、`|||` 分欄),字太多先自動縮小、再塞不下就記進頁面錯誤。檢視頁的「編輯」在旁邊改原始碼、即時預覽,⌘S 存成新版本;「PPTX」下載成 PowerPoint(文字可編輯),投影片列的「PDF」列印成一頁一張。`artifact export <id>` 給 agent 下載 .pptx。
-- **PowerPoint/Word/Excel**:直接發佈 `.pptx`/`.docx`/`.xlsx`(含巨集、放映、範本格式),伺服器端依檔案自己的母片、樣式與主題畫成頁面:`.pptx` 是投影片(同樣有總覽、講稿、PDF),`.docx` 是一整頁文件,`.xlsx` 每個工作表一個分頁;文字可選取、可搜尋,巨集不會執行,下載鈕給回原檔。舊版 `.ppt`/`.doc`/`.xls` 與加密檔只提供下載。Office 檔上限 64 MB。
+- **PowerPoint/Word/Excel**:直接發佈 `.pptx`/`.docx`/`.xlsx`(含巨集、放映、範本格式),伺服器端依檔案自己的母片、樣式與主題畫成頁面:`.pptx` 是投影片(同樣有總覽、講稿、PDF),`.docx` 是一整頁文件,`.xlsx` 每個可見的工作表一個分頁;文字可選取、可搜尋,巨集不會執行,下載鈕給回原檔。舊版 `.ppt`/`.doc`/`.xls` 與加密檔只提供下載。Office 檔上限 64 MB。
 - **圖庫**:首頁列出全部 artifact,可釘選;搜尋比對標題、說明、目前版本的內文(中文兩個字也找得到,附命中的那段文字)與發佈來源的機器和資料夾。
 - **留言**:每個 artifact 都有留言串(回覆、解決)。Agent 用 `artifact comments <id> --open` 讀未解決的回饋,`--wait` 等新留言,`artifact comment reply … --resolve` 回覆並結案。
 - **頁面錯誤**:頁面執行時的腳本錯誤、載入失敗的檔案與被沙箱擋下的請求會記在該版本底下,檢視頁顯示 ⚠ 數量,agent 用 `artifact errors <id>` 讀。發佈前 CLI 也會先靜態檢查一次(`artifact check`)。
@@ -64,5 +64,5 @@ pnpm tc && pnpm test
 
 ```bash
 aghub-cli -g source sync audichuang/nas-artifacts --update --yes
-op read "op://Agent/nas-artifacts publish token/credential" | node skill/nas-artifacts/scripts/artifact.mjs config --token-stdin
+op read "op://Agent/nas-artifacts publish token/credential" | node <skill 資料夾>/scripts/artifact.mjs config --token-stdin
 ```
