@@ -135,7 +135,7 @@ textarea { resize: vertical; }
   .editor textarea { font-size: 16px; }
   .comments { position: fixed; inset: var(--bar-h) 0 0 auto; width: min(100%, 360px); z-index: 3; }
   .search { max-width: none; }
-  #fullscreen, #copy, #export-pptx { display: none; }
+  #fullscreen, #copy { display: none; }
   :root { --bar-h: 92px; }
   .viewer-bar { flex-wrap: wrap; align-content: center; gap: 6px 8px; padding: 6px 12px; }
   .viewer-bar .viewer-title { flex: 1 0 calc(100% - 40px); }

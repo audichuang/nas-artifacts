@@ -5,7 +5,11 @@ import type { ArtifactStore, FileEntry } from './artifact-store.ts'
 import { ArtifactError } from './artifact-store.ts'
 import type { Config } from './config.ts'
 import { BRIDGE_PATH, MARKDOWN_CSS_PATH, RENDER_VERSION, injectBridge, renderMarkdown } from './content-render.ts'
-import { decodeRequestPath, isHtmlPath, isMarkdownPath, isServableType } from './file-paths.ts'
+import { renderDocxPage } from './docx.ts'
+import { decodeRequestPath, isDocxPath, isHtmlPath, isMarkdownPath, isOfficePath, isPagePath, isPptxPath, isServableType, isXlsxPath } from './file-paths.ts'
+import { OFFICE_MEDIA_SEGMENT, officeMedia } from './office.ts'
+import { renderPptxDeck } from './pptx.ts'
+import { renderXlsxPage } from './xlsx.ts'
 import { isSlidesPath, renderDeck, type DeckAssets } from './slides.ts'
 
 // Same CDN allowlist as Claude's artifacts; everything else must be inline or published with the page.
@@ -74,8 +78,19 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     return c.body(markdownCss, 200, { 'Content-Type': 'text/css; charset=utf-8' })
   })
 
+  // Every picture of an Office file is read from the file: keep the last few in memory, not one read per picture.
+  const officeFiles = new Map<string, Buffer>()
+  const officeBytes = (sha256: string): Buffer => {
+    let bytes = officeFiles.get(sha256)
+    if (bytes) officeFiles.delete(sha256)
+    else bytes = store.blobs.read(sha256)
+    officeFiles.set(sha256, bytes)
+    while (officeFiles.size > 4) officeFiles.delete(officeFiles.keys().next().value!)
+    return bytes
+  }
+
   const etagFor = (entry: FileEntry, path: string, title: string): string => {
-    if (isMarkdownPath(path)) {
+    if (isMarkdownPath(path) || isOfficePath(path)) {
       return `"${entry.sha256}-${renderTag}-${createHash('sha256').update(title).digest('hex').slice(0, 16)}"`
     }
     return isHtmlPath(path) ? `"${entry.sha256}-${renderTag}"` : `"${entry.sha256}"`
@@ -87,7 +102,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
   const serveFile = (read: () => Buffer, entry: FileEntry, path: string, title: string, immutable: boolean, ifNoneMatch: string | undefined) => {
     const etag = etagFor(entry, path, title)
     // Rendered pages embed the bridge, which changes across releases, so they revalidate (a cheap 304).
-    const rendered = isMarkdownPath(path) || isHtmlPath(path)
+    const rendered = isPagePath(path)
     const headers: Record<string, string> = {
       'Cache-Control': immutable && !rendered ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag: etag
@@ -95,7 +110,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     if (rendered) {
       headers.Vary = 'Sec-Fetch-Dest'
     }
-    if (!isMarkdownPath(path) && !isHtmlPath(path) && !isServableType(entry.type)) {
+    if (!rendered && !isServableType(entry.type)) {
       throw new ArtifactError(404, 'not_servable', `${path} is not a web media type.`)
     }
     if (matchesEtag(ifNoneMatch, etag)) {
@@ -107,6 +122,11 @@ export function createContentServer(store: ArtifactStore, config: Config, option
       return new Response(isSlidesPath(path) ? renderDeck(source, title, deck) : renderMarkdown(source, title), {
         headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' }
       })
+    }
+    if (isOfficePath(path)) {
+      const fileName = path.slice(path.lastIndexOf('/') + 1)
+      const page = isPptxPath(path) ? renderPptxDeck(body, fileName, title, deck) : isDocxPath(path) ? renderDocxPage(body, fileName, title) : renderXlsxPage(body, fileName, title)
+      return new Response(page, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } })
     }
     if (isHtmlPath(path)) {
       return new Response(injectBridge(body.toString('utf8')), {
@@ -151,11 +171,15 @@ export function createContentServer(store: ArtifactStore, config: Config, option
 
     function serveEntry(path: string | null) {
       const entry = path ? row.files[path] : undefined
+      if (path && !entry) {
+        const media = officePart(path)
+        if (media) return media
+      }
       if (!path || !entry) {
         return c.text('Not found', 404)
       }
       // A rendered page opened as its own document has no frame-src to confine it, so it goes back into the viewer.
-      if ((isHtmlPath(path) || isMarkdownPath(path)) && c.req.header('sec-fetch-dest') === 'document') {
+      if (isPagePath(path) && c.req.header('sec-fetch-dest') === 'document') {
         const query = new URLSearchParams({ v: String(version) })
         if (path !== row.entry) {
           query.set('path', path)
@@ -164,6 +188,24 @@ export function createContentServer(store: ArtifactStore, config: Config, option
         return c.redirect(`${config.appOrigin}/a/${id}?${query}`, 302)
       }
       return serveFile(() => store.blobs.read(entry.sha256), entry, path, row.title, true, c.req.header('if-none-match'))
+    }
+
+    // A picture inside one of this version's Office files: <dir>/~office/<file name>/<part>.
+    function officePart(path: string): Response | null {
+      const marker = `${OFFICE_MEDIA_SEGMENT}/`
+      const at = path.startsWith(marker) ? 0 : path.indexOf(`/${marker}`) + 1
+      if (at < 0 || (at === 0 && !path.startsWith(marker))) return null
+      const rest = path.slice(at + marker.length)
+      const slash = rest.indexOf('/')
+      if (slash <= 0) return null
+      const filePath = path.slice(0, at) + rest.slice(0, slash)
+      const fileEntry = row.files[filePath]
+      if (!fileEntry || !isOfficePath(filePath)) return null
+      const picture = officeMedia(officeBytes(fileEntry.sha256), rest.slice(slash + 1))
+      if (!picture) return null
+      return new Response(new Uint8Array(picture.bytes), {
+        headers: { 'Content-Type': picture.type, 'Cache-Control': 'public, max-age=31536000, immutable' }
+      })
     }
   })
 

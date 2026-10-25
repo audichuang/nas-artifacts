@@ -21,8 +21,8 @@ body.deck {
 body.show-notes .deck-stage { bottom: calc(var(--bar-h) + var(--notes-h)); }
 .slide {
   grid-area: 1 / 1; position: relative; overflow: hidden; container-type: size;
-  width: min(calc(100cqw - 24px), calc((100cqh - 24px) * 16 / 9));
-  height: min(calc((100cqw - 24px) * 9 / 16), calc(100cqh - 24px));
+  width: min(calc(100cqw - 24px), calc((100cqh - 24px) * var(--aspect, 16 / 9)));
+  height: min(calc((100cqw - 24px) / (var(--aspect, 16 / 9))), calc(100cqh - 24px));
   background: var(--slide-bg); border-radius: 6px; box-shadow: 0 2px 14px rgb(0 0 0 / 0.12);
   visibility: hidden;
 }
@@ -91,6 +91,31 @@ body.show-notes .deck-stage { bottom: calc(var(--bar-h) + var(--notes-h)); }
 .column > :first-child { margin-top: 0; }
 .column img { max-height: 46cqh; }
 
+/* A PowerPoint file (*.pptx): every shape placed in % of its box, sizes in --pt, one point of the slide's own width. */
+.slide.layout-pptx::after { content: none; }
+.pp-canvas {
+  position: absolute; inset: 0; overflow: hidden; --pt: calc(100cqw / var(--slide-pt, 960));
+  color: #000; font-family: "PingFang TC", "Heiti TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif; line-height: 1.2; text-align: left;
+  -webkit-font-smoothing: antialiased; overflow-wrap: break-word;
+}
+.pp-sp, .pp-grp { position: absolute; box-sizing: border-box; }
+div.pp-geom { position: absolute; inset: 0; box-sizing: border-box; }
+svg.pp-geom { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }
+.pp-chart > svg { position: absolute; left: 0; top: 0; display: block; }
+.pp-tx { position: absolute; inset: 0; display: flex; flex-direction: column; box-sizing: border-box; white-space: pre-wrap; tab-size: 4; }
+.pp-p { margin: 0; }
+.pp-bu { display: inline-block; text-indent: 0; white-space: pre; }
+.pp-tx a { color: inherit; }
+.pp-pic { position: absolute; inset: 0; overflow: hidden; }
+.pp-pic img { position: absolute; display: block; max-width: none; }
+.pp-tbl { border-collapse: collapse; table-layout: fixed; width: 100%; }
+.pp-tbl td { box-sizing: border-box; overflow-wrap: break-word; }
+.pp-tbl .pp-tx { position: static; display: block; }
+.pp-missing {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; box-sizing: border-box; padding: calc(6 * var(--pt));
+  border: 1px dashed #9aa4b2; background: rgb(246 248 250 / 0.85); color: #59636e; font-size: calc(12 * var(--pt)); text-align: center;
+}
+
 .slide-notes { display: none; }
 
 /* Controls */
@@ -121,7 +146,7 @@ body.idle { cursor: none; }
 
 /* Overview: every slide as a thumbnail; the same cqw sizing shrinks them whole. */
 body.overview .deck-stage { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 16px; padding: 16px; overflow: auto; align-content: start; place-items: stretch; container-type: normal; touch-action: auto; }
-body.overview .slide { grid-area: auto; visibility: visible; width: auto; height: auto; aspect-ratio: 16 / 9; cursor: pointer; }
+body.overview .slide { grid-area: auto; visibility: visible; width: auto; height: auto; aspect-ratio: var(--aspect, 16 / 9); cursor: pointer; }
 body.overview .slide.active { outline: 3px solid var(--accent); outline-offset: 2px; }
 body.overview .deck-notes { display: none; }
 

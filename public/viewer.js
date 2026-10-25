@@ -182,7 +182,9 @@ function onPlaceReport(report) {
 
 // Slide decks: arrow keys pressed outside the frame still turn the page.
 // The editor and the export work on the entry, so they count only while the entry is on show.
-const isDeck = () => place.path === null && /\.slides\.md$/i.test(currentEntry())
+const isDeck = () => place.path === null && /\.(slides\.md|pptx|pptm|ppsx|ppsm|potx|potm|ppt)$/i.test(currentEntry())
+// Only a Markdown deck has a source to edit here; a PowerPoint file is changed in PowerPoint and published again.
+const isMarkdownDeck = () => isDeck() && /\.slides\.md$/i.test(currentEntry())
 const DECK_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 document.addEventListener('keydown', (event) => {
   if (!isDeck() || !DECK_KEYS.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return
@@ -590,12 +592,19 @@ let cursorSlide = -1
 let previewSeq = 0
 let previewTimer
 
-const canEdit = () => isDeck() && artifact.capabilities.length === 0
+const canEdit = () => isMarkdownDeck() && artifact.capabilities.length === 0
 const exportLink = document.getElementById('export-pptx')
 function syncEditButton() {
   editButton.hidden = !canEdit()
-  exportLink.hidden = !isDeck()
-  exportLink.href = `/api/artifacts/${id}/export.pptx?v=${version}`
+  // A Markdown deck exports to PowerPoint; an Office file downloads as it was published.
+  const entry = currentEntry()
+  const office = place.path === null && /\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|docx|docm|dotx|dotm|doc|xlsx|xlsm|xltx|xltm|xls)$/i.test(entry)
+  exportLink.hidden = !isDeck() && !office
+  exportLink.textContent = office ? entry.split('.').pop().toUpperCase() : 'PPTX'
+  exportLink.title = office ? '下載原始檔' : '下載成 PowerPoint(.pptx)'
+  exportLink.href = office
+    ? `/api/artifacts/${id}/files/${entry.split('/').map(encodeURIComponent).join('/')}?v=${version}`
+    : `/api/artifacts/${id}/export.pptx?v=${version}`
 }
 
 function setEditorStatus(text, isDirty = dirty) {

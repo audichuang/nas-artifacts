@@ -25,11 +25,11 @@ const USAGE = `artifact <command> [options]
                          so the next publish from dir sends only your changes; --force reuses a non-empty dir
   list [--q TEXT]        list artifacts
   get <id>               metadata and version history
-  read <id> [path] [--v N]          print a published file (default: the entry)
+  read <id> [path] [--v N] [--out FILE]  print a published file (default: the entry); a binary one (an Office file, a picture) needs --out
   check <file|dir>       report what the page sandbox will block or cannot find (publish runs it too)
   errors <id> [--v N]    errors viewers' browsers hit on a version (default: the current one)
   diff <id> [--from N] [--to M]  what a version changed (default: current against the one before)
-  export <id> [--v N] [--out FILE]  save a slide deck as .pptx (default ./<id>.pptx)
+  export <id> [--v N] [--out FILE]  save a slide deck as .pptx (default ./<id>.pptx); a published .pptx comes back as it was
   comments <id>          print the viewer comments
       --open             only threads not yet resolved
       --wait [--timeout S]  block until new comments arrive (default 540s; exit 2 on timeout)
@@ -151,7 +151,7 @@ function encodeFile(path) {
 
 function guessTitle(files, entry) {
   const page = entry ? files[entry] : Object.values(files).find((path) => /\.(html?|md)$/i.test(path))
-  if (!page) return null
+  if (!page || /\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|docx|docm|dotx|dotm|doc|xlsx|xlsm|xltx|xltm|xls)$/i.test(page)) return null
   const text = readFileSync(page, 'utf8')
   const fromHtml = /<title[^>]*>([^<]{1,200})<\/title>/i.exec(text)?.[1]
   const fromMd = /^#\s+(.{1,200})$/m.exec(text)?.[1]
@@ -310,7 +310,7 @@ async function publish(target, values) {
     }
   }
   if (!result) {
-    const title = values.title ?? guessTitle(paths, values.entry) ?? basename(source)
+    const title = values.title ?? guessTitle(paths, values.entry) ?? basename(source).replace(/\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|docx|docm|dotx|dotm|doc|xlsx|xlsm|xltx|xltm|xls)$/i, '')
     result = await api('/api/artifacts', { method: 'POST', auth: true, json: { ...common, title, files: encode(Object.keys(paths)) } })
   }
   const recordedNow = { id: result.id, url: result.url, version: result.currentVersion, files: hashes }
@@ -511,7 +511,7 @@ async function main() {
       const query = values.v ? `?v=${enc(values.v)}` : ''
       const bytes = await api(`/api/artifacts/${enc(id)}/export.pptx${query}`, {
         raw: true,
-        hints: { not_found: 'this server cannot export decks yet; it needs a newer nas-artifacts image', not_a_deck: 'only slide decks (*.slides.md) export to .pptx' }
+        hints: { not_found: 'this server cannot export decks yet; it needs a newer nas-artifacts image', not_a_deck: 'only slide decks (*.slides.md, *.pptx) export to .pptx; save any other published file with: artifact read <id> --out FILE' }
       })
       const out = resolve(values.out ?? `${id}.pptx`)
       writeFileSync(out, bytes)
@@ -540,6 +540,12 @@ async function main() {
       const path = args[1] ?? detail.entry
       const query = values.v ? `?v=${enc(values.v)}` : ''
       const bytes = await api(`/api/artifacts/${enc(id)}/files/${path.split('/').map(enc).join('/')}${query}`, { raw: true })
+      if (values.out) {
+        writeFileSync(resolve(values.out), bytes)
+        return print({ path, out: resolve(values.out), bytes: bytes.length }, values.json, (r) => `saved ${r.path} to ${r.out} (${kb(r.bytes)})`)
+      }
+      // A zip or an image in a terminal or a model's context is noise: save it instead.
+      if (bytes.subarray(0, 8192).includes(0)) fail(`${path} is a binary file; pass --out FILE to save it`)
       process.stdout.write(bytes)
       return
     }

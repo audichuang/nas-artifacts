@@ -3,7 +3,10 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { BlobStore } from './blob-store.ts'
-import { contentTypeFor, isHtmlPath, isMarkdownPath, normalizeFilePath } from './file-paths.ts'
+import { docxText } from './docx.ts'
+import { contentTypeFor, isDocxPath, isMarkdownPath, isOfficePath, isPagePath, isPptxPath, normalizeFilePath } from './file-paths.ts'
+import { pptxText } from './pptx.ts'
+import { xlsxText } from './xlsx.ts'
 import { diffLines, hunks, type ShownLine } from './text-diff.ts'
 
 export const CAPABILITIES = ['db', 'uploads'] as const
@@ -71,7 +74,8 @@ export type VersionDiff = {
 }
 
 const DIFF_LIMITS = { bytes: 1024 * 1024, lines: 20_000, edits: 2000, shown: 1000, lineChars: 2000 }
-const isTextType = (type: string) => /^text\/|json|javascript|xml|svg/.test(type)
+// Office files are zips even though their types name XML ("openxmlformats"): only real XML counts as text.
+const isTextType = (type: string) => /^text\/|json|javascript|svg|^application\/xml/.test(type)
 
 export type ArtifactListing = ArtifactSummary & { snippet?: string | null }
 
@@ -220,6 +224,15 @@ const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"'
 const SEARCH_CHARS = 500_000
 
 /** The words a reader sees: markup, scripts, styles and link targets dropped, entities decoded. */
+/** An Office file that cannot be read is still published; it is just not searchable by its text. */
+function officeText(path: string, content: Buffer): string {
+  try {
+    return (isPptxPath(path) ? pptxText(content) : isDocxPath(path) ? docxText(content) : xlsxText(content)).replace(/\s+/g, ' ')
+  } catch {
+    return ''
+  }
+}
+
 function pageText(path: string, content: string): string {
   // Markdown: line-leading markers and emphasis go, but - and _ inside words stay (nas-artifacts, search_text).
   const text = isMarkdownPath(path)
@@ -265,8 +278,8 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
     if (!entry || !files[entry]) {
       throw new ArtifactError(400, 'invalid_entry', `Entry "${requested}" is not one of the published files.`)
     }
-    if (!isHtmlPath(entry) && !isMarkdownPath(entry)) {
-      throw new ArtifactError(400, 'invalid_entry', 'The entry must be an .html or .md file.')
+    if (!isPagePath(entry)) {
+      throw new ArtifactError(400, 'invalid_entry', 'The entry must be a page: .html, .htm, .md, or a PowerPoint, Word or Excel file (.pptx, .docx, .xlsx and their macro, show, template and old binary forms).')
     }
     return entry
   }
@@ -275,9 +288,14 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
       return candidate
     }
   }
-  const pages = Object.keys(files).filter((path) => isHtmlPath(path) || isMarkdownPath(path))
+  // A single HTML or Markdown page wins, as it did before Office files became pages: the Office files beside it are attachments.
+  const pages = Object.keys(files).filter((path) => isPagePath(path) && !isOfficePath(path))
   if (pages.length === 1) {
     return pages[0]
+  }
+  const office = Object.keys(files).filter(isOfficePath)
+  if (pages.length === 0 && office.length === 1) {
+    return office[0]
   }
   throw new ArtifactError(400, 'invalid_entry', 'Pass entry: no index.html/index.md and not exactly one page among the files.')
 }
@@ -396,12 +414,13 @@ export class ArtifactStore {
   private indexText(id: string, version: number): void {
     const row = this.requireVersion(id, version)
     const pages = Object.keys(row.files)
-      .filter((path) => isHtmlPath(path) || isMarkdownPath(path))
+      .filter(isPagePath)
       .sort((a, b) => Number(b === row.entry) - Number(a === row.entry) || a.localeCompare(b))
     let text = ''
     for (const path of pages) {
       if (text.length >= SEARCH_CHARS) break
-      text += ` ${pageText(path, this.blobs.read(row.files[path].sha256).toString('utf8'))}`
+      const content = this.blobs.read(row.files[path].sha256)
+      text += ` ${isOfficePath(path) ? officeText(path, content) : pageText(path, content.toString('utf8'))}`
     }
     this.db
       .prepare('INSERT INTO search_text (artifact_id, version, text) VALUES (?, ?, ?) ON CONFLICT(artifact_id) DO UPDATE SET version = excluded.version, text = excluded.text')
@@ -469,8 +488,10 @@ export class ArtifactStore {
         delete files[path]
         continue
       }
-      if (file.content.byteLength > LIMITS.fileBytes) {
-        throw new ArtifactError(413, 'file_too_large', `${path} is larger than ${LIMITS.fileBytes} bytes.`)
+      // An Office file carries all its pictures, so it may fill a whole publish.
+      const limit = isOfficePath(path) ? LIMITS.publishBytes : LIMITS.fileBytes
+      if (file.content.byteLength > limit) {
+        throw new ArtifactError(413, 'file_too_large', `${path} is larger than ${limit} bytes.`)
       }
       total += file.content.byteLength
       if (total > LIMITS.publishBytes) {

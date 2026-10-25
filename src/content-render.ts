@@ -11,9 +11,10 @@ const packageVersion = (name: string) =>
 
 /**
  * Part of every rendered page's ETag, so pages browsers already hold revalidate when the output changes.
- * Library upgrades count themselves; bump the leading tag when you change what renderMarkdown emits.
+ * Library upgrades count themselves; bump the leading tags when you change what renderMarkdown (md) or
+ * the Office renderers in pptx.ts, docx.ts and xlsx.ts emit.
  */
-export const RENDER_VERSION = ['md-2', ...['marked', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
+export const RENDER_VERSION = ['md-2', 'pptx-4', 'docx-6', 'xlsx-5', ...['marked', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)
