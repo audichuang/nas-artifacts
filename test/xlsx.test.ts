@@ -231,6 +231,11 @@ describe('number formats', () => {
       ['[DBNum3][$-404]0.0', 12.34, '１２.３']
     ]
     for (const [code, value, text] of cases) assert.equal(formatNumber(code, value).text, text, `${code} ${value}`)
+    // Quoted and escaped text keeps its digits: only the number is written in Chinese.
+    assert.equal(formatNumber('[DBNum1]0" (ISO 9001)"', 25).text, '二十五 (ISO 9001)')
+    assert.equal(formatNumber('[DBNum1]0\\2"號"', 7).text, '七2號')
+    assert.equal(formatNumber('[DBNum2][$-404]"第"0"5"', 3).text, '第參5')
+    assert.equal(formatNumber('[DBNum3]0"-9"', 12).text, '１２-9')
     // In a date the year is read digit by digit, the month and day as numbers.
     assert.equal(formatNumber('[DBNum1][$-404]yyyy"年"m"月"d"日"', 46027).text, '二〇二六年一月五日')
   })
@@ -1221,6 +1226,23 @@ describe('sparklines (matrix round)', () => {
     assert.equal(new Set(bars.map((b) => b.h)).size, 1)
     assert.deepEqual(bars.map((b) => b.fill), ['#376092', '#D00000', '#376092'])
     assert.ok(bars[1].y > bars[0].y)
+  })
+
+  test('X-1 round 2: a group axis over many long sparklines still draws (no spread past the argument limit)', () => {
+    // 70 sparklines of 2000 points each: 140,000 values for the group's shared min and max.
+    const data = Array.from({ length: 2000 }, (_, at) => `<row r="${at + 1}"><c r="A${at + 1}"><v>${at % 97}</v></c></row>`).join('')
+    const many = Array.from({ length: 70 }, (_, at) => `<x14:sparkline><xm:f>資料!A1:A2000</xm:f><xm:sqref>B${at + 1}</xm:sqref></x14:sparkline>`).join('')
+    const ext = `<extLst><ext ${X14} uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}"><x14:sparklineGroups ${X14}><x14:sparklineGroup minAxisType="group" maxAxisType="group"><x14:colorSeries rgb="FF376092"/><x14:sparklines>${many}</x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>`
+    const html = renderXlsxPage(book([{ name: '圖', body: sheet('', '', ext) }, { name: '資料', body: sheet(data) }]), 'b.xlsx', 'b')
+    assert.equal((html.match(/<svg class="xl-spark"/g) ?? []).length, 70)
+  })
+
+  test('X-1 round 2: a sparkline in a cell past the used range of an otherwise empty sheet draws', () => {
+    const ext = `<extLst><ext ${X14} uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}"><x14:sparklineGroups ${X14}>${group('', '資料!A1:D1', 'K40')}</x14:sparklineGroups></ext></extLst>`
+    const html = renderXlsxPage(book([{ name: '圖', body: sheet('', '', ext) }, { name: '資料', body: sheet(row(1, [1, 3, 2, 4]).replace(/r="([B-E])1"/g, (_, c) => `r="${String.fromCharCode(c.charCodeAt(0) - 1)}1"`)) }]), 'b.xlsx', 'b')
+    const first = panel(html, 1)
+    assert.equal((first.match(/<svg class="xl-spark"/g) ?? []).length, 1, 'the K40 sparkline')
+    assert.match(first, /<th[^>]*>K<\/th>/)
   })
 
   test('X-1: a sparkline whose data cannot be found says so in its cell', () => {

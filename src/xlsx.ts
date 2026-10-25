@@ -363,7 +363,8 @@ const BUILTIN_FORMATS: Record<number, string> = {
 }
 
 type Tok =
-  | { k: 'lit'; v: string }
+  /** `q`: text the code writes as it is (quoted, escaped, or a currency symbol), never a number to convert. */
+  | { k: 'lit'; v: string; q?: boolean }
   | { k: 'ph'; v: string }
   | { k: 'dot' | 'comma' | 'pct' | 'slash' | 'at' | 'gen' }
   | { k: 'exp'; v: string; e: string }
@@ -412,17 +413,17 @@ function compileSection(source: string, palette: string[]): Section {
   let cond: [string, number] | null = null
   let locale = ''
   let dbnum = 0
-  const lit = (v: string) => toks.push({ k: 'lit', v })
+  const lit = (v: string, q = false) => toks.push(q ? { k: 'lit', v, q } : { k: 'lit', v })
   for (let i = 0; i < source.length; ) {
     const ch = source[i]
     const rest = source.slice(i)
     if (ch === '"') {
       const end = source.indexOf('"', i + 1)
       const stop = end < 0 ? source.length : end
-      lit(source.slice(i + 1, stop))
+      lit(source.slice(i + 1, stop), true)
       i = stop + 1
     } else if (ch === '\\') {
-      lit(source[i + 1] ?? '')
+      lit(source[i + 1] ?? '', true)
       i += 2
     } else if (ch === '_') {
       lit(' ')
@@ -448,7 +449,7 @@ function compileSection(source: string, palette: string[]): Section {
         const inner = body.slice(1)
         const dash = inner.indexOf('-')
         const symbol = dash < 0 ? inner : inner.slice(0, dash)
-        if (symbol) lit(symbol)
+        if (symbol) lit(symbol, true)
         if (dash >= 0) locale = inner.slice(dash + 1).toLowerCase()
       }
     } else if (/^general/i.test(rest)) {
@@ -867,6 +868,17 @@ function formatDateSection(section: Section, serial: number, date1904: boolean):
 
 type Formatted = { text: string; color: string | null }
 
+/** The smallest and largest of any number of values, without spreading them into arguments (V8 caps those). */
+function extent(values: Iterable<number>): { lo: number; hi: number } {
+  let lo = Infinity
+  let hi = -Infinity
+  for (const v of values) {
+    if (v < lo) lo = v
+    if (v > hi) hi = v
+  }
+  return { lo, hi }
+}
+
 const FULL_WIDTH_DIGITS = '０１２３４５６７８９'
 
 /**
@@ -886,6 +898,17 @@ function chineseDigits(text: string, dbnum: number, date: boolean): string {
     const counted = (date && plain.length === 4) || plain.length > 8 ? each(plain) : chineseCount(Number(plain), digits, units, '萬', date)
     return counted + (fraction ? `.${each(fraction.slice(1))}` : '')
   })
+}
+
+/**
+ * A section for writing digits in Chinese: its literal text stands aside as private-use placeholders, so only the
+ * number's own digits are converted; `restore` puts the text back afterwards.
+ */
+function guardLiterals(section: Section): { section: Section; restore: (text: string) => string } {
+  if (!section.dbnum) return { section, restore: (text) => text }
+  const saved: string[] = []
+  const toks = section.toks.map((tok): Tok => (tok.k === 'lit' && tok.q && saved.length < 6000 ? (saved.push(tok.v), { k: 'lit', v: String.fromCharCode(0xe000 + saved.length - 1) }) : tok))
+  return { section: { ...section, toks }, restore: (text) => text.replace(/[\ue000-\uf76f]/g, (ch) => saved[ch.charCodeAt(0) - 0xe000] ?? ch) }
 }
 
 /** A number, shown the way a number format code says. */
@@ -923,13 +946,15 @@ export function formatNumber(code: string, value: number, date1904 = false, pale
     // A negative duration keeps its sign; a negative date cannot be shown.
     if (value < 0 && section.toks.some((tok) => tok.k === 'el')) return { text: `-${formatDateSection(section, -value, date1904)}`, color: section.color }
     if (value < 0) return { text: '#'.repeat(8), color: section.color }
-    return { text: chineseDigits(formatDateSection(section, value, date1904), section.dbnum, true), color: section.color }
+    const guarded = guardLiterals(section)
+    return { text: guarded.restore(chineseDigits(formatDateSection(guarded.section, value, date1904), section.dbnum, true)), color: section.color }
   }
   if (section.toks.length === 0) return { text: '', color: section.color }
-  const body = formatNumberSection(section.toks, shown)
+  const guarded = guardLiterals(section)
+  const body = formatNumberSection(guarded.section.toks, shown)
   // A negative number that rounds to zero in a single-section format shows no sign, as in Excel.
   const allZero = !/[1-9]/.test(body)
-  return { text: (sign && !allZero ? sign : '') + chineseDigits(body, section.dbnum, false), color: section.color }
+  return { text: (sign && !allZero ? sign : '') + guarded.restore(chineseDigits(body, section.dbnum, false)), color: section.color }
 }
 
 /** Text through a number format: the text section if there is one, else the text as is. */
@@ -1934,8 +1959,8 @@ function evaluateFormula(node: FNode, ctx: FContext): FValue {
         case 'AVERAGE': {
           if (!args.length) throw new Unsupported()
           const values = args.map((a) => fNumber(ev(a)))
-          if (node.name === 'MIN') return Math.min(...values)
-          if (node.name === 'MAX') return Math.max(...values)
+          if (node.name === 'MIN') return extent(values).lo
+          if (node.name === 'MAX') return extent(values).hi
           const total = values.reduce((s, v) => s + v, 0)
           return node.name === 'SUM' ? total : total / values.length
         }
@@ -2056,7 +2081,9 @@ function sparklines(wb: Workbook, head: XmlNode, lastRow: number, lastCol: numbe
       if (kind === 'custom') return num(group, which === 'min' ? 'manualMin' : 'manualMax') ?? null
       if (kind !== 'group') return null
       const all = series.flat().filter((v): v is number => v !== null)
-      return all.length ? (which === 'min' ? Math.min(...all) : Math.max(...all)) : null
+      if (!all.length) return null
+      const { lo, hi } = extent(all)
+      return which === 'min' ? lo : hi
     }
     look.min = bound('min')
     look.max = bound('max')
@@ -2075,6 +2102,21 @@ function sparklines(wb: Workbook, head: XmlNode, lastRow: number, lastCol: numbe
       const [w, h] = size(line.ref.r, line.ref.c)
       out.set(key, sparklineSvg(look.rtl ? [...values].reverse() : values, look, w, h))
     })
+  }
+  return out
+}
+
+/** The cells a sheet's sparklines are drawn in, as many as one sheet draws. */
+function sparklineTargets(head: XmlNode): { r: number; c: number }[] {
+  const out: { r: number; c: number }[] = []
+  for (const ext of children(child(head, 'extLst'), 'ext')) {
+    for (const group of children(child(ext, 'sparklineGroups'), 'sparklineGroup')) {
+      for (const line of children(child(group, 'sparklines'), 'sparkline')) {
+        const ref = parseRef(child(line, 'sqref')?.text.trim())
+        if (ref) out.push(ref)
+        if (out.length >= SPARKLINES_PER_SHEET) return out
+      }
+    }
   }
   return out
 }
@@ -2104,8 +2146,7 @@ function sparklineSvg(raw: (number | null)[], look: SparkLook, w: number, h: num
   const W = Math.max(4, w - 2 * pad)
   const H = Math.max(4, h - 2 * pad)
   const r2 = (v: number) => round(v, 2)
-  const hi = Math.max(...known)
-  const lo = Math.min(...known)
+  const { lo, hi } = extent(known)
   const firstAt = values.findIndex((x) => x !== null)
   const lastAt = n - 1 - [...values].reverse().findIndex((x) => x !== null)
   // Which point takes which colour: first, last, high, low and negative points over the series colour, as Excel layers them.
@@ -2908,6 +2949,12 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
     usedRow = Math.max(usedRow, Math.min(range.r2, XLSX_LIMITS.rows))
     usedCol = Math.max(usedCol, Math.min(range.c2, XLSX_LIMITS.cols))
   }
+  // A sparkline's cell may hold nothing (its data can sit on another sheet): the grid reaches it too.
+  const sparkTargets = sparklineTargets(head)
+  for (const { r, c } of sparkTargets) {
+    usedRow = Math.max(usedRow, Math.min(r, XLSX_LIMITS.rows))
+    usedCol = Math.max(usedCol, Math.min(c, XLSX_LIMITS.cols))
+  }
   for (const anchor of drawingXml?.children ?? []) {
     const end = anchorEnd(anchor, colPx, rowPx)
     if (end) {
@@ -2915,7 +2962,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       usedCol = Math.max(usedCol, Math.min(end.col + 2, XLSX_LIMITS.cols))
     }
   }
-  const empty = usedRow === 0 && usedCol === 0 && !drawingXml
+  const empty = usedRow === 0 && usedCol === 0 && !drawingXml && !sparkTargets.length
   // A little empty grid past the last cell, as Excel shows it; never past the limits.
   const lastCol = Math.min(XLSX_LIMITS.cols, Math.max(usedCol + 1, 10))
   let lastRow = Math.min(XLSX_LIMITS.rows, Math.max(usedRow + 1, 30))
