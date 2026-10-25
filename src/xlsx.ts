@@ -9,9 +9,11 @@ import { posix } from 'node:path'
 import { escapeHtml, injectBridge } from './content-render.ts'
 import { chartTitle, renderChart, type ChartResult } from './office-chart.ts'
 import { fillShade, presetGeometry, shapeGeometry } from './office-geometry.ts'
+import { chineseCount, CN_DIGITS, CN_LEGAL } from './office-numbers.ts'
+import { CELL_PATTERNS, patternCover, patternSvg } from './office-patterns.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, tagAttrs, type XmlNode } from './xml.ts'
-import { ZipReader } from './zip.ts'
+import { ZipError, ZipReader } from './zip.ts'
 
 /** How much of a workbook one page draws. Past these the page says what was cut. */
 export const XLSX_LIMITS = {
@@ -361,7 +363,8 @@ const BUILTIN_FORMATS: Record<number, string> = {
 }
 
 type Tok =
-  | { k: 'lit'; v: string }
+  /** `q`: text the code writes as it is (quoted, escaped, or a currency symbol), never a number to convert. */
+  | { k: 'lit'; v: string; q?: boolean }
   | { k: 'ph'; v: string }
   | { k: 'dot' | 'comma' | 'pct' | 'slash' | 'at' | 'gen' }
   | { k: 'exp'; v: string; e: string }
@@ -370,7 +373,8 @@ type Tok =
   | { k: 'el'; v: string }
   | { k: 'sub'; n: number }
 
-type Section = { toks: Tok[]; color: string | null; cond: [string, number] | null; date: boolean; text: boolean; locale: string }
+/** `dbnum`: [DBNum1]–[DBNum3], the number written in Chinese (counted, legal characters, or full-width digits); 0 for none. */
+type Section = { toks: Tok[]; color: string | null; cond: [string, number] | null; date: boolean; text: boolean; locale: string; dbnum: number }
 
 const NAMED_COLORS: Record<string, string> = {
   black: '000000', blue: '0000FF', cyan: '00FFFF', green: '00FF00', magenta: 'FF00FF', red: 'FF0000', white: 'FFFFFF', yellow: 'FFFF00'
@@ -408,17 +412,18 @@ function compileSection(source: string, palette: string[]): Section {
   let color: string | null = null
   let cond: [string, number] | null = null
   let locale = ''
-  const lit = (v: string) => toks.push({ k: 'lit', v })
+  let dbnum = 0
+  const lit = (v: string, q = false) => toks.push(q ? { k: 'lit', v, q } : { k: 'lit', v })
   for (let i = 0; i < source.length; ) {
     const ch = source[i]
     const rest = source.slice(i)
     if (ch === '"') {
       const end = source.indexOf('"', i + 1)
       const stop = end < 0 ? source.length : end
-      lit(source.slice(i + 1, stop))
+      lit(source.slice(i + 1, stop), true)
       i = stop + 1
     } else if (ch === '\\') {
-      lit(source[i + 1] ?? '')
+      lit(source[i + 1] ?? '', true)
       i += 2
     } else if (ch === '_') {
       lit(' ')
@@ -439,11 +444,12 @@ function compileSection(source: string, palette: string[]): Section {
       else if (NAMED_COLORS[lower]) color = NAMED_COLORS[lower]
       else if ((match = /^colou?r\s*(\d+)$/i.exec(body))) color = palette[Number(match[1]) + 7] ?? null
       else if ((match = /^(<=|>=|<>|<|>|=)\s*(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)$/i.exec(body))) cond = [match[1], Number(match[2])]
+      else if ((match = /^dbnum([1-4])$/i.exec(body))) dbnum = Number(match[1])
       else if (body.startsWith('$')) {
         const inner = body.slice(1)
         const dash = inner.indexOf('-')
         const symbol = dash < 0 ? inner : inner.slice(0, dash)
-        if (symbol) lit(symbol)
+        if (symbol) lit(symbol, true)
         if (dash >= 0) locale = inner.slice(dash + 1).toLowerCase()
       }
     } else if (/^general/i.test(rest)) {
@@ -531,7 +537,7 @@ function compileSection(source: string, palette: string[]): Section {
   } else {
     for (const tok of toks) out.push(tok.k === 'dt' ? { k: 'lit', v: tok.v } : tok.k === 'ampm' ? { k: 'lit', v: tok.v } : tok)
   }
-  return { toks: out, color, cond, date, text: out.some((tok) => tok.k === 'at'), locale }
+  return { toks: out, color, cond, date, text: out.some((tok) => tok.k === 'at'), locale, dbnum }
 }
 
 type Format = { sections: Section[]; date: boolean }
@@ -862,6 +868,49 @@ function formatDateSection(section: Section, serial: number, date1904: boolean):
 
 type Formatted = { text: string; color: string | null }
 
+/** The smallest and largest of any number of values, without spreading them into arguments (V8 caps those). */
+function extent(values: Iterable<number>): { lo: number; hi: number } {
+  let lo = Infinity
+  let hi = -Infinity
+  for (const v of values) {
+    if (v < lo) lo = v
+    if (v > hi) hi = v
+  }
+  return { lo, hi }
+}
+
+const FULL_WIDTH_DIGITS = '０１２３４５６７８９'
+
+/**
+ * The digits of a formatted number as [DBNum1] (一千二百三十四), [DBNum2] (壹仟貳佰參拾肆) or [DBNum3] (１２３４) write
+ * them. A whole number is counted with its units (10 is 一十, as Excel writes it) and loses its thousands separators;
+ * decimals, and the year of a date, are read digit by digit.
+ */
+function chineseDigits(text: string, dbnum: number, date: boolean): string {
+  if (!dbnum) return text
+  if (dbnum >= 3) return text.replace(/\d/g, (d) => FULL_WIDTH_DIGITS[Number(d)])
+  const legal = dbnum === 2
+  const digits = legal ? CN_LEGAL : CN_DIGITS
+  const units = legal ? ['', '拾', '佰', '仟'] : ['', '十', '百', '千']
+  const each = (run: string) => run.replace(/\d/g, (d) => digits[Number(d)])
+  return text.replace(/(\d{1,3}(?:,\d{3})+|\d+)((?:\.\d+)?)/g, (_, whole: string, fraction: string) => {
+    const plain = whole.replace(/,/g, '')
+    const counted = (date && plain.length === 4) || plain.length > 8 ? each(plain) : chineseCount(Number(plain), digits, units, '萬', date)
+    return counted + (fraction ? `.${each(fraction.slice(1))}` : '')
+  })
+}
+
+/**
+ * A section for writing digits in Chinese: its literal text stands aside as private-use placeholders, so only the
+ * number's own digits are converted; `restore` puts the text back afterwards.
+ */
+function guardLiterals(section: Section): { section: Section; restore: (text: string) => string } {
+  if (!section.dbnum) return { section, restore: (text) => text }
+  const saved: string[] = []
+  const toks = section.toks.map((tok): Tok => (tok.k === 'lit' && tok.q && saved.length < 6000 ? (saved.push(tok.v), { k: 'lit', v: String.fromCharCode(0xe000 + saved.length - 1) }) : tok))
+  return { section: { ...section, toks }, restore: (text) => text.replace(/[\ue000-\uf76f]/g, (ch) => saved[ch.charCodeAt(0) - 0xe000] ?? ch) }
+}
+
 /** A number, shown the way a number format code says. */
 export function formatNumber(code: string, value: number, date1904 = false, palette: string[] = DEFAULT_INDEXED): Formatted {
   const format = compileFormat(code, palette)
@@ -897,13 +946,15 @@ export function formatNumber(code: string, value: number, date1904 = false, pale
     // A negative duration keeps its sign; a negative date cannot be shown.
     if (value < 0 && section.toks.some((tok) => tok.k === 'el')) return { text: `-${formatDateSection(section, -value, date1904)}`, color: section.color }
     if (value < 0) return { text: '#'.repeat(8), color: section.color }
-    return { text: formatDateSection(section, value, date1904), color: section.color }
+    const guarded = guardLiterals(section)
+    return { text: guarded.restore(chineseDigits(formatDateSection(guarded.section, value, date1904), section.dbnum, true)), color: section.color }
   }
   if (section.toks.length === 0) return { text: '', color: section.color }
-  const body = formatNumberSection(section.toks, shown)
+  const guarded = guardLiterals(section)
+  const body = formatNumberSection(guarded.section.toks, shown)
   // A negative number that rounds to zero in a single-section format shows no sign, as in Excel.
   const allZero = !/[1-9]/.test(body)
-  return { text: (sign && !allZero ? sign : '') + body, color: section.color }
+  return { text: (sign && !allZero ? sign : '') + guarded.restore(chineseDigits(body, section.dbnum, false)), color: section.color }
 }
 
 /** Text through a number format: the text section if there is one, else the text as is. */
@@ -918,7 +969,8 @@ export function formatText(code: string, text: string, palette: string[] = DEFAU
 // Styles
 
 type Side = { style: string; color: string; weight: number } | null
-type Border = { left: Side; right: Side; top: Side; bottom: Side }
+/** `diagonal`: the line corner to corner, rising (up: bottom-left to top-right), falling (down), or both. */
+type Border = { left: Side; right: Side; top: Side; bottom: Side; diagonal?: { up: boolean; down: boolean; side: NonNullable<Side> } | null }
 type Align = { h: string; v: string; wrap: boolean; indent: number; rot: number; shrink: boolean }
 type Xf = { fmt: number; font: number; fill: number; border: number; align: Align | null }
 type Dxf = { font: Partial<Font> & { set: boolean }; fill: string; border: Border | null }
@@ -943,10 +995,6 @@ const BORDER_CSS: Record<string, string> = {
   hair: '1px dotted', dotted: '1px dotted', dashDotDot: '1px dashed', dashDot: '1px dashed', dashed: '1px dashed', thin: '1px solid',
   mediumDashDotDot: '2px dashed', slantDashDot: '2px dashed', mediumDashDot: '2px dashed', mediumDashed: '2px dashed', medium: '2px solid', double: '3px double', thick: '3px solid'
 }
-const PATTERN_RATIO: Record<string, number> = {
-  gray0625: 0.0625, gray125: 0.125, lightGray: 0.25, mediumGray: 0.5, darkGray: 0.75, darkHorizontal: 0.5, darkVertical: 0.5, darkDown: 0.5, darkUp: 0.5,
-  darkGrid: 0.5, darkTrellis: 0.75, lightHorizontal: 0.25, lightVertical: 0.25, lightDown: 0.25, lightUp: 0.25, lightGrid: 0.25, lightTrellis: 0.25
-}
 
 function readSide(node: XmlNode | null, palette: Palette): Side {
   const style = attr(node, 'style')
@@ -955,12 +1003,28 @@ function readSide(node: XmlNode | null, palette: Palette): Side {
 }
 
 function readBorder(node: XmlNode | null, palette: Palette): Border {
+  const on = (name: string) => ['1', 'true'].includes(attr(node, name) ?? '')
+  const side = readSide(child(node, 'diagonal'), palette)
   return {
     left: readSide(child(node, 'left') ?? child(node, 'start'), palette),
     right: readSide(child(node, 'right') ?? child(node, 'end'), palette),
     top: readSide(child(node, 'top'), palette),
-    bottom: readSide(child(node, 'bottom'), palette)
+    bottom: readSide(child(node, 'bottom'), palette),
+    diagonal: side && (on('diagonalUp') || on('diagonalDown')) ? { up: on('diagonalUp'), down: on('diagonalDown'), side } : null
   }
+}
+
+/** A cell's diagonal lines as a CSS background layer: an SVG stretched over the cell, its stroke one width at any size. */
+function diagonalCss(diagonal: Border['diagonal']): string {
+  if (!diagonal) return ''
+  const { style, color } = diagonal.side
+  const [width, kind] = BORDER_CSS[style].split(' ')
+  const px = parseFloat(width)
+  const dash = kind === 'dotted' ? ` stroke-dasharray="${px} ${px * 2}"` : kind === 'dashed' ? ` stroke-dasharray="${px * 4} ${px * 2}"` : ''
+  const line = (x1: number, y1: number, x2: number, y2: number) =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#${color}" stroke-width="${px}"${dash} vector-effect="non-scaling-stroke"/>`
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="none">${diagonal.up ? line(0, 100, 100, 0) : ''}${diagonal.down ? line(0, 0, 100, 100) : ''}</svg>`
+  return `url('data:image/svg+xml,${encodeURIComponent(svg)}') 0 0/100% 100% no-repeat`
 }
 
 /** A fill as a CSS background and, for solid-looking fills, its colour (to pick readable text). */
@@ -972,8 +1036,10 @@ function readFill(node: XmlNode | null, palette: Palette): { css: string; hex: s
     if (type === 'none') return { css: '', hex: null }
     const fg = xColor(fgNode, palette) ?? '000000'
     const bg = xColor(child(pattern, 'bgColor'), palette) ?? 'FFFFFF'
-    const hex = type === 'solid' ? fg : mix(fg, bg, PATTERN_RATIO[type] ?? 0.5)
-    return { css: `#${hex}`, hex }
+    if (type === 'solid') return { css: `#${fg}`, hex: fg }
+    // Any other pattern is its hatch in its two colours; the hex is how dark it reads, to pick the text colour.
+    const bits = CELL_PATTERNS[type] ?? CELL_PATTERNS.mediumGray
+    return { css: `url('data:image/svg+xml,${encodeURIComponent(patternSvg(`#${fg}`, `#${bg}`, bits))}') 0 0/8px 8px repeat`, hex: mix(fg, bg, patternCover(bits)) }
   }
   const gradient = child(node, 'gradientFill')
   if (gradient) {
@@ -1403,6 +1469,8 @@ function openWorkbook(data: Buffer, mediaBase: string): Workbook {
   try {
     pkg = new Package(data)
   } catch (error) {
+    // A file past a size limit is readable, only too big for this page: say so, not that it is broken.
+    if (error instanceof ZipError && error.limit) throw new Error(`${error.message}。檔案本身沒有壞,請下載原始檔查看。`)
     throw new Error(`這不是 .xlsx 檔,或檔案已損壞(${reason(error)})`)
   }
   const rel = pkg.relOfType('', 'officeDocument')
@@ -1891,8 +1959,8 @@ function evaluateFormula(node: FNode, ctx: FContext): FValue {
         case 'AVERAGE': {
           if (!args.length) throw new Unsupported()
           const values = args.map((a) => fNumber(ev(a)))
-          if (node.name === 'MIN') return Math.min(...values)
-          if (node.name === 'MAX') return Math.max(...values)
+          if (node.name === 'MIN') return extent(values).lo
+          if (node.name === 'MAX') return extent(values).hi
           const total = values.reduce((s, v) => s + v, 0)
           return node.name === 'SUM' ? total : total / values.length
         }
@@ -1976,6 +2044,172 @@ const ICON_SETS: Record<string, [string, string][]> = (() => {
     '5Rating': [['▁', B], ['▂', B], ['▄', B], ['▆', B], ['█', B]], '5Quarters': [['○', K], ['◔', K], ['◑', K], ['◕', K], ['●', K]], '5Boxes': [['▁', B], ['▃', B], ['▅', B], ['▇', B], ['█', B]]
   }
 })()
+
+// ---------------------------------------------------------------------------------------------
+// Sparklines (Excel 2010's x14:sparklineGroups): a small line, column or win/loss chart drawn inside one cell
+
+/** At most this many sparklines are drawn on one sheet; past it the rest are labelled in their cells. */
+const SPARKLINES_PER_SHEET = 4000
+
+/**
+ * The sparklines on the shown part of a sheet, as SVG keyed by cell (r * 20000 + c), sized to the cell. Data may sit
+ * on any sheet, within the rows and columns the reader keeps of it; one whose data cannot be found says so in its cell.
+ */
+function sparklines(wb: Workbook, head: XmlNode, lastRow: number, lastCol: number, size: (r: number, c: number) => [number, number]): Map<number, string> {
+  const out = new Map<number, string>()
+  const palette = wb.styles.palette
+  const groups = children(child(head, 'extLst'), 'ext').flatMap((ext) => children(child(ext, 'sparklineGroups'), 'sparklineGroup'))
+  let count = 0
+  for (const group of groups) {
+    const flag = (name: string) => ['1', 'true'].includes(attr(group, name) ?? '')
+    const color = (name: string, fallback: string) => `#${xColor(child(group, name), palette) ?? fallback}`
+    const type = attr(group, 'type') ?? 'line'
+    const look: SparkLook = {
+      type: type === 'column' || type === 'stacked' ? type : 'line',
+      empty: attr(group, 'displayEmptyCellsAs') ?? 'zero',
+      series: color('colorSeries', '376092'), negative: flag('negative') ? color('colorNegative', 'D00000') : null,
+      axis: flag('displayXAxis') ? color('colorAxis', '000000') : null, markers: flag('markers') ? color('colorMarkers', 'D00000') : null,
+      high: flag('high') ? color('colorHigh', 'D00000') : null, low: flag('low') ? color('colorLow', 'D00000') : null,
+      first: flag('first') ? color('colorFirst', 'D00000') : null, last: flag('last') ? color('colorLast', 'D00000') : null,
+      weight: Math.min(6, Math.max(0.25, num(group, 'lineWeight') ?? 0.75)) * (4 / 3), rtl: flag('rightToLeft'), min: null, max: null
+    }
+    const lines = children(child(group, 'sparklines'), 'sparkline').map((line) => ({ f: child(line, 'f')?.text.trim() ?? '', ref: parseRef(child(line, 'sqref')?.text.trim()) }))
+    const series = lines.map((line) => lookupRange(wb, line.f).map((v) => (v !== null && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null)))
+    // An axis shared by the group, or set in the file; otherwise each sparkline scales to its own values.
+    const bound = (which: 'min' | 'max') => {
+      const kind = attr(group, `${which}AxisType`) ?? 'individual'
+      if (kind === 'custom') return num(group, which === 'min' ? 'manualMin' : 'manualMax') ?? null
+      if (kind !== 'group') return null
+      const all = series.flat().filter((v): v is number => v !== null)
+      if (!all.length) return null
+      const { lo, hi } = extent(all)
+      return which === 'min' ? lo : hi
+    }
+    look.min = bound('min')
+    look.max = bound('max')
+    lines.forEach((line, at) => {
+      if (!line.ref || line.ref.r > lastRow || line.ref.c > lastCol) return
+      const key = line.ref.r * 20000 + line.ref.c
+      if (++count > SPARKLINES_PER_SHEET) {
+        out.set(key, '<span class="xl-cellmiss">走勢圖(此工作表的走勢圖太多,請下載原始檔查看)</span>')
+        return
+      }
+      const values = series[at]
+      if (!values.some((v) => v !== null)) {
+        out.set(key, '<span class="xl-cellmiss">走勢圖(找不到資料)</span>')
+        return
+      }
+      const [w, h] = size(line.ref.r, line.ref.c)
+      out.set(key, sparklineSvg(look.rtl ? [...values].reverse() : values, look, w, h))
+    })
+  }
+  return out
+}
+
+/** The cells a sheet's sparklines are drawn in, as many as one sheet draws. */
+function sparklineTargets(head: XmlNode): { r: number; c: number }[] {
+  const out: { r: number; c: number }[] = []
+  for (const ext of children(child(head, 'extLst'), 'ext')) {
+    for (const group of children(child(ext, 'sparklineGroups'), 'sparklineGroup')) {
+      for (const line of children(child(group, 'sparklines'), 'sparkline')) {
+        const ref = parseRef(child(line, 'sqref')?.text.trim())
+        if (ref) out.push(ref)
+        if (out.length >= SPARKLINES_PER_SHEET) return out
+      }
+    }
+  }
+  return out
+}
+
+type SparkLook = {
+  type: 'line' | 'column' | 'stacked'
+  empty: string
+  series: string
+  negative: string | null
+  axis: string | null
+  markers: string | null
+  high: string | null
+  low: string | null
+  first: string | null
+  last: string | null
+  weight: number
+  rtl: boolean
+  min: number | null
+  max: number | null
+}
+
+function sparklineSvg(raw: (number | null)[], look: SparkLook, w: number, h: number): string {
+  const values = look.empty === 'zero' ? raw.map((v) => v ?? 0) : raw
+  const known = values.filter((v): v is number => v !== null)
+  const n = values.length
+  const pad = 2
+  const W = Math.max(4, w - 2 * pad)
+  const H = Math.max(4, h - 2 * pad)
+  const r2 = (v: number) => round(v, 2)
+  const { lo, hi } = extent(known)
+  const firstAt = values.findIndex((x) => x !== null)
+  const lastAt = n - 1 - [...values].reverse().findIndex((x) => x !== null)
+  // Which point takes which colour: first, last, high, low and negative points over the series colour, as Excel layers them.
+  const pointColor = (v: number, at: number, base: string) => {
+    let fill = base
+    if (look.negative && v < 0) fill = look.negative
+    if (look.low && v === lo) fill = look.low
+    if (look.high && v === hi) fill = look.high
+    if (look.first && at === firstAt) fill = look.first
+    if (look.last && at === lastAt) fill = look.last
+    return fill
+  }
+  let body = ''
+  if (look.type === 'stacked') {
+    // Win/loss: every win the same bar up from the middle, every loss the same bar down; a zero draws nothing.
+    const slot = W / n
+    const bar = H / 2 - 1
+    values.forEach((v, at) => {
+      if (!v) return
+      const fill = v < 0 ? (look.negative ?? look.series) : pointColor(v, at, look.series)
+      body += `<rect x="${r2(pad + at * slot + slot * 0.1)}" y="${r2(v > 0 ? pad : pad + H / 2 + 1)}" width="${r2(slot * 0.8)}" height="${r2(bar)}" fill="${fill}"/>`
+    })
+  } else {
+    // Columns stand on zero (or the axis minimum when it is set above zero); a line spans its own range.
+    let min = look.min ?? (look.type === 'column' ? Math.min(0, lo) : lo)
+    let max = look.max ?? (look.type === 'column' ? Math.max(0, hi) : hi)
+    if (max === min) {
+      max += 1
+      min -= 1
+    }
+    const y = (v: number) => pad + ((max - Math.min(max, Math.max(min, v))) / (max - min)) * H
+    const base = y(Math.min(max, Math.max(min, 0)))
+    if (look.axis && min < 0 && max > 0) body += `<line x1="${pad}" y1="${r2(base)}" x2="${r2(pad + W)}" y2="${r2(base)}" stroke="${look.axis}" stroke-width="1"/>`
+    if (look.type === 'column') {
+      const slot = W / n
+      values.forEach((v, at) => {
+        if (v === null) return
+        const top = Math.min(y(v), base)
+        body += `<rect x="${r2(pad + at * slot + slot * 0.1)}" y="${r2(top)}" width="${r2(slot * 0.8)}" height="${r2(Math.max(1, Math.abs(y(v) - base)))}" fill="${pointColor(v, at, look.series)}"/>`
+      })
+    } else {
+      const x = (at: number) => (n > 1 ? pad + (at / (n - 1)) * W : pad + W / 2)
+      // A blank breaks the line ("gap") or is stepped over ("span").
+      const runs: string[][] = [[]]
+      values.forEach((v, at) => {
+        if (v === null) {
+          if (look.empty !== 'span' && runs[runs.length - 1].length) runs.push([])
+          return
+        }
+        runs[runs.length - 1].push(`${r2(x(at))},${r2(y(v))}`)
+      })
+      const drawn = runs.some((run) => run.length > 1)
+      for (const run of runs) if (run.length > 1) body += `<polyline points="${run.join(' ')}" fill="none" stroke="${look.series}" stroke-width="${r2(look.weight)}" stroke-linejoin="round"/>`
+      values.forEach((v, at) => {
+        if (v === null) return
+        const special = pointColor(v, at, '')
+        const fill = special || look.markers || (drawn ? '' : look.series)
+        if (fill) body += `<circle cx="${r2(x(at))}" cy="${r2(y(v))}" r="${r2(Math.max(1.5, look.weight))}" fill="${fill}"/>`
+      })
+    }
+  }
+  return `<svg class="xl-spark" viewBox="0 0 ${r2(w)} ${r2(h)}" preserveAspectRatio="none" aria-hidden="true">${body}</svg>`
+}
 
 type CfResult = { looks: Map<number, CfLook>; skipped: Set<string> }
 
@@ -2715,6 +2949,12 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
     usedRow = Math.max(usedRow, Math.min(range.r2, XLSX_LIMITS.rows))
     usedCol = Math.max(usedCol, Math.min(range.c2, XLSX_LIMITS.cols))
   }
+  // A sparkline's cell may hold nothing (its data can sit on another sheet): the grid reaches it too.
+  const sparkTargets = sparklineTargets(head)
+  for (const { r, c } of sparkTargets) {
+    usedRow = Math.max(usedRow, Math.min(r, XLSX_LIMITS.rows))
+    usedCol = Math.max(usedCol, Math.min(c, XLSX_LIMITS.cols))
+  }
   for (const anchor of drawingXml?.children ?? []) {
     const end = anchorEnd(anchor, colPx, rowPx)
     if (end) {
@@ -2722,7 +2962,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       usedCol = Math.max(usedCol, Math.min(end.col + 2, XLSX_LIMITS.cols))
     }
   }
-  const empty = usedRow === 0 && usedCol === 0 && !drawingXml
+  const empty = usedRow === 0 && usedCol === 0 && !drawingXml && !sparkTargets.length
   // A little empty grid past the last cell, as Excel shows it; never past the limits.
   const lastCol = Math.min(XLSX_LIMITS.cols, Math.max(usedCol + 1, 10))
   let lastRow = Math.min(XLSX_LIMITS.rows, Math.max(usedRow + 1, 30))
@@ -2846,6 +3086,11 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
         text.push(body)
       }
     }
+  } catch {}
+
+  let sparks = new Map<number, string>()
+  try {
+    sparks = sparklines(wb, head, lastRow, lastCol, (r, c) => [colPx(c), rowPx(r)])
   } catch {}
 
   /** A picture placed in the cell, fitted inside it keeping its shape; or a label saying why not. */
@@ -3054,6 +3299,12 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       }
       // An icon-set icon sits at the start of the cell, the value where its alignment puts it.
       if (cf?.icon) inner = `<span class="xl-ico" style="color:#${cf.icon.color}">${escapeHtml(cf.icon.glyph)}</span>${inner}`
+      // A sparkline fills its cell behind whatever value the cell holds.
+      const spark = sparks.get(key)
+      if (spark) {
+        if (!classes.includes('rc')) classes.push('rc')
+        inner = spark + inner
+      }
       const attrs = [
         span && span.cols > 1 ? ` colspan="${span.cols}"` : '',
         span && span.rows > 1 ? ` rowspan="${span.rows}"` : '',
@@ -3144,7 +3395,10 @@ function xfCss(wb: Workbook, index: number): string {
   const fontRules = fontCss(font, base, wb.theme)
   if (fontRules) rules.push(fontRules)
   const fill = wb.styles.fills[xf.fill]
-  if (fill) rules.push(`background:${fill};border-inline-end-color:transparent;border-bottom-color:transparent`)
+  // Diagonal lines lie over the fill, as the first background layer.
+  const diagonal = diagonalCss(wb.styles.borders[xf.border]?.diagonal)
+  if (fill || diagonal) rules.push(`background:${[diagonal, fill].filter(Boolean).join(',')}`)
+  if (fill) rules.push('border-inline-end-color:transparent;border-bottom-color:transparent')
   const align = xf.align
   if (align) {
     const h = { left: 'left', center: 'center', right: 'right', justify: 'justify', distributed: 'justify', centerContinuous: 'center', fill: 'left' }[align.h]
@@ -3204,6 +3458,7 @@ body{display:flex;flex-direction:column;font:14px/1.4 -apple-system,BlinkMacSyst
 .xl-grid td .rot{position:absolute;left:2px;bottom:0;transform-origin:left bottom;white-space:pre}
 .xl-grid td .rot.dn{top:0;bottom:auto;transform-origin:left top}
 .xl-grid td.sh>span{display:inline-block}
+.xl-grid td .xl-spark{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 .xl-grid td img.xl-cellpic{display:block;object-fit:contain;margin:0 auto}
 .xl-grid td .xl-cellmiss{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;color:#666;font:italic 11px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 .xl-grid td .xl-ico{float:inline-start;margin-inline-end:3px}
@@ -3232,6 +3487,9 @@ a.xl-link{color:inherit;cursor:pointer}
 `
 
 /**
+ * A number too wide for its column shrinks a little or shows #, judged as Excel judges it: every digit as wide as
+ * 0 (Office fonts draw digits one width), so values of one format in one column all fit or all do not; those that
+ * shrink all take the smallest shrink of their column and format, so the column keeps one size whatever the font measures.
  * Tabs live in the hash (#sheet-2) so the viewer's place report keeps the reader's sheet; the viewer
  * accepts only letters, digits, '-' and '_' there. Panels use other ids, so no hash scrolls the page.
  */
@@ -3239,8 +3497,10 @@ const PAGE_SCRIPT = `(()=>{const tabs=[...document.querySelectorAll('.xl-tab')];
 function fit(root){if(root.dataset.fitted)return;root.dataset.fitted='1';const writes=[];
 for(const td of root.querySelectorAll('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4,w=s.offsetWidth;if(room>0&&w>room)writes.push([s,(parseFloat(getComputedStyle(s).fontSize)*room/w).toFixed(2)+'px'])}
 const ctx=document.createElement('canvas').getContext('2d'),hash={};
-for(const td of root.querySelectorAll('td.n:not(.sh)')){const sw=td.scrollWidth,cw=td.clientWidth;if(sw<=cw+1)continue;const k=cw/sw,cs=getComputedStyle(td);if(k>=0.7){writes.push([td,(parseFloat(cs.fontSize)*k*0.97).toFixed(2)+'px'])}else if(!td.querySelector('*')){const font=cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;if(!(font in hash)){ctx.font=font;hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
-for(const [el,size,text] of writes){if(size)el.style.fontSize=size;else{el.title=el.textContent;el.textContent=text}}}
+let last='';const use=f=>{if(f!==last){ctx.font=f;last=f}};
+const looks={},groups={};const lookOf=td=>{const st=td.getAttribute('style')||'',k=td.className+(/font/.test(st)?st:'');let l=looks[k];if(!l){const cs=getComputedStyle(td);l=looks[k]={cs,font:cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily,px:parseFloat(cs.fontSize),pad:parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight)}}return l};
+for(const td of root.querySelectorAll('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const lk=lookOf(td);if(!over&&t.length*lk.px*0.7+lk.pad<cw)continue;const cs=lk.cs,font=lk.font;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+lk.pad}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){const g=td.offsetLeft+'|'+((/\\bx\\d+\\b/.exec(td.className)||[''])[0])+'|'+font;groups[g]=Math.min(groups[g]??1,k);writes.push([td,g,null,parseFloat(cs.fontSize)])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
+for(const w of writes){const el=w[0];if(w.length===4){el.style.fontSize=(w[3]*groups[w[1]]*0.97).toFixed(2)+'px'}else if(w[1])el.style.fontSize=w[1];else{el.title=el.textContent;el.textContent=w[2]}}}
 function show(n){if(!(n>=1&&n<=sheets.length))n=first;sheets.forEach((s,i)=>{s.hidden=i!==n-1});tabs.forEach((t,i)=>{t.setAttribute('aria-selected',String(i===n-1));t.tabIndex=i===n-1?0:-1});const tab=tabs[n-1];if(tab){const bar=tab.parentElement;const l=tab.offsetLeft-bar.offsetLeft;if(l<bar.scrollLeft||l+tab.offsetWidth>bar.scrollLeft+bar.clientWidth)bar.scrollLeft=l-16}fit(sheets[n-1])}
 function fromHash(){const m=/^#sheet-(\\d+)$/.exec(location.hash);show(m?Number(m[1]):first)}
 addEventListener('hashchange',fromHash);fromHash()})()`

@@ -215,6 +215,30 @@ describe('number formats', () => {
     assert.equal(formatNumber('[$-zh-TW]aaaa', 45000).text, '星期三')
     assert.equal(formatNumber('yyyy/m/d', -1).text, '########')
   })
+
+  test('X-5: [DBNum1], [DBNum2] and [DBNum3] write the number in Chinese, as Excel does for cheques and ledgers', () => {
+    const cases: [string, number, string][] = [
+      ['[DBNum1][$-404]General', 1234, '一千二百三十四'],
+      ['[DBNum1][$-404]General', 10, '一十'],
+      ['[DBNum1][$-404]General', 1001, '一千〇一'],
+      ['[DBNum1][$-404]General', 120000, '一十二萬'],
+      ['[DBNum1][$-404]General', 12.5, '一十二.五'],
+      ['[DBNum1][$-404]General', -3, '-三'],
+      ['[DBNum2][$-404]General', 5678, '伍仟陸佰柒拾捌'],
+      ['[DBNum2][$-404]#,##0', 1234567, '壹佰貳拾參萬肆仟伍佰陸拾柒'],
+      ['[DBNum2][$-404]0.00', 0.5, '零.伍零'],
+      ['[DBNum3][$-404]General', 1234, '１２３４'],
+      ['[DBNum3][$-404]0.0', 12.34, '１２.３']
+    ]
+    for (const [code, value, text] of cases) assert.equal(formatNumber(code, value).text, text, `${code} ${value}`)
+    // Quoted and escaped text keeps its digits: only the number is written in Chinese.
+    assert.equal(formatNumber('[DBNum1]0" (ISO 9001)"', 25).text, '二十五 (ISO 9001)')
+    assert.equal(formatNumber('[DBNum1]0\\2"號"', 7).text, '七2號')
+    assert.equal(formatNumber('[DBNum2][$-404]"第"0"5"', 3).text, '第參5')
+    assert.equal(formatNumber('[DBNum3]0"-9"', 12).text, '１２-9')
+    // In a date the year is read digit by digit, the month and day as numbers.
+    assert.equal(formatNumber('[DBNum1][$-404]yyyy"年"m"月"d"日"', 46027).text, '二〇二六年一月五日')
+  })
 })
 
 describe('reading Excel workbooks', () => {
@@ -249,7 +273,7 @@ describe('reading Excel workbooks', () => {
     // theme 4 (accent1 4F81BD) darkened by 25%; the font name loses its quotes and markup.
     assert.match(html, /\.xl-grid td\.x3\{text-decoration:line-through;color:#376092;font-family:'Evilstylescriptx',/)
     assert.match(html, /\.xl-grid td\.x3\{[^}]*background:#FFFF00/)
-    assert.match(html, /\.xl-grid td\.x4\{color:#FF0000;font-family:'Arial',[^}]*background:#BFBFBF;border-inline-end-color:transparent;border-bottom-color:transparent;text-align:right;padding-inline-end:20px\}/)
+    assert.match(html, /\.xl-grid td\.x4\{color:#FF0000;font-family:'Arial',[^}]*background:url\('data:image\/svg\+xml,[^']*'\) 0 0\/8px 8px repeat;border-inline-end-color:transparent;border-bottom-color:transparent;text-align:right;padding-inline-end:20px\}/)
     assert.doesNotMatch(html, /Evil'|<\/style><script>x/)
   })
 
@@ -1075,5 +1099,160 @@ describe('conditional formats beyond comparisons and scales', () => {
     assert.match(cell('A1'), /<span class="xl-ico" style="color:#D9363E">⚑<\/span>1</)
     assert.doesNotMatch(cell('A2'), /xl-ico/)
     assert.match(cell('A3'), /<span class="xl-ico" style="color:#F2B705">★<\/span>9</)
+  })
+})
+
+describe('numbers too wide for their column (matrix round)', () => {
+  test('X-2: in a browser, dates of one format in one column all shrink or all show #, whatever their digits', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+    const styles = `<styleSheet ${NS}><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs count="2"><xf/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>`
+    // 2026-01-01, 2026-01-11, 2026-01-15, 2026-08-28, 2026-12-31 …: the 1s are narrow in a font with proportional digits.
+    const serials = [46023, 46033, 46037, 46262, 46387, 46100, 46200, 46300]
+    // Column B holds numbers that fit however narrow their 1s are: they keep their size.
+    const fits = [1, 31000, 11111]
+    // The default width (as openpyxl leaves it) shows #; a column 10 wide shrinks the dates, and each date's own
+    // measure differs a little by font (Linux and macOS draw these widths apart): Georgia stands in for that here.
+    const cases: { width?: number; font?: string }[] = [{}, { width: 10 }, { width: 10, font: 'Georgia' }]
+    const browser = await chromium.launch({ executablePath: chromiumPath })
+    try {
+      const page = await browser.newPage()
+      for (const { width, font } of cases) {
+        const cols = width ? `<cols><col min="1" max="1" width="${width}" customWidth="1"/></cols>` : ''
+        const body = sheet(serials.map((v, at) => `<row r="${at + 1}"><c r="A${at + 1}" s="1"><v>${v}</v></c>${at < fits.length ? `<c r="B${at + 1}"><v>${fits[at]}</v></c>` : ''}</row>`).join(''), cols)
+        const html = renderXlsxPage(book([{ name: 's', body }], { styles }), 'b.xlsx', 'b')
+        await page.setContent(font ? html.replace('</head>', `<style>.xl-grid{font-family:'${font}'!important}</style></head>`) : html)
+        const look = (column: number) =>
+          page.evaluate((column) => [...document.querySelectorAll('tbody tr')].map((tr) => tr.children[column] as HTMLElement).filter((td) => td?.classList.contains('n')).map((td) => (/^#+$/.test(td.textContent ?? '') ? '#' : td.style.fontSize || 'as set')), column)
+        const shown = await look(1)
+        const what = `width ${width ?? 'default'}, font ${font ?? 'default'}`
+        assert.equal(shown.length, serials.length, what)
+        assert.deepEqual(await look(2), fits.map(() => 'as set'), what)
+        assert.equal(new Set(shown).size, 1, `${what}: ${shown.join(' | ')}`)
+      }
+    } finally {
+      await browser.close()
+    }
+  })
+})
+
+describe('cell fills and borders (matrix round)', () => {
+  const PATTERN_TYPES = ['gray0625', 'gray125', 'lightGray', 'mediumGray', 'darkGray', 'darkHorizontal', 'darkVertical', 'darkDown', 'darkUp', 'darkGrid', 'darkTrellis', 'lightHorizontal', 'lightVertical', 'lightDown', 'lightUp', 'lightGrid', 'lightTrellis']
+  const styled = (fills: string, borders: string, xfs: string) =>
+    `<styleSheet ${NS}><fills count="99"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${fills}</fills><borders count="9"><border/>${borders}</borders><cellXfs count="99"><xf/>${xfs}</cellXfs></styleSheet>`
+  const cssOf = (html: string, xf: number) => new RegExp(`\\.xl-grid td\\.x${xf}\\{([^}]*)\\}`).exec(html)?.[1] ?? ''
+
+  test('X-3: each of the 17 pattern fills is its hatch in its two colours, not a blend', () => {
+    const fills = PATTERN_TYPES.map((type) => `<fill><patternFill patternType="${type}"><fgColor rgb="FF1F4E79"/><bgColor rgb="FFFFE699"/></patternFill></fill>`).join('')
+    const xfs = PATTERN_TYPES.map((_, at) => `<xf fillId="${at + 2}" applyFill="1"/>`).join('')
+    const body = sheet(`<row r="1">${PATTERN_TYPES.map((_, at) => `<c r="${colName(at + 1)}1" s="${at + 1}"><v>${at}</v></c>`).join('')}</row>`)
+    const html = renderXlsxPage(book([{ name: 's', body }], { styles: styled(fills, '', xfs) }), 'b.xlsx', 'b')
+    const tiles = new Set<string>()
+    PATTERN_TYPES.forEach((type, at) => {
+      const css = cssOf(html, at + 1)
+      const m = /background:url\('data:image\/svg\+xml,([^']*)'\) 0 0\/8px 8px repeat/.exec(css)
+      assert.ok(m, `${type}: ${css}`)
+      const svg = decodeURIComponent(m[1])
+      assert.match(svg, /<rect width="8" height="8" fill="#FFE699"\/><path d="M[^"]+" fill="#1F4E79"\/>/, type)
+      tiles.add(svg)
+    })
+    assert.equal(tiles.size, PATTERN_TYPES.length, 'every pattern its own tile')
+    // A solid fill stays its foreground colour.
+    const solid = renderXlsxPage(book([{ name: 's', body: sheet('<row r="1"><c r="A1" s="1"><v>1</v></c></row>') }], { styles: styled('<fill><patternFill patternType="solid"><fgColor rgb="FF00B050"/></patternFill></fill>', '', '<xf fillId="2" applyFill="1"/>') }), 'b.xlsx', 'b')
+    assert.match(cssOf(solid, 1), /background:#00B050/)
+  })
+
+  test('X-3: diagonalUp and diagonalDown borders draw their lines over the fill', () => {
+    const borders = `<border diagonalUp="1"><diagonal style="thin"><color rgb="FFFF0000"/></diagonal></border><border diagonalUp="1" diagonalDown="1"><diagonal style="dashed"><color rgb="FF0000FF"/></diagonal></border><border diagonalDown="1"><diagonal style="none"/></border>`
+    const fills = '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill>'
+    const xfs = '<xf borderId="1" applyBorder="1"/><xf borderId="2" fillId="2" applyBorder="1" applyFill="1"/><xf borderId="3" applyBorder="1"/>'
+    const body = sheet('<row r="1"><c r="A1" s="1"/><c r="B1" s="2"/><c r="C1" s="3"/></row>')
+    const html = renderXlsxPage(book([{ name: 's', body }], { styles: styled(fills, borders, xfs) }), 'b.xlsx', 'b')
+    const lines = (css: string) => [...css.matchAll(/url\('data:image\/svg\+xml,([^']*)'\) 0 0\/100% 100% no-repeat/g)].map((m) => decodeURIComponent(m[1]))
+    const up = lines(cssOf(html, 1))
+    assert.equal(up.length, 1)
+    assert.match(up[0], /<line x1="0" y1="100" x2="100" y2="0" stroke="#FF0000"[^>]*vector-effect="non-scaling-stroke"/)
+    const both = cssOf(html, 2)
+    assert.equal(lines(both).length, 1)
+    assert.match(lines(both)[0], /<line x1="0" y1="100" x2="100" y2="0"[^>]*stroke-dasharray/)
+    assert.match(lines(both)[0], /<line x1="0" y1="0" x2="100" y2="100"/)
+    // The lines lie over the cell's own fill, the last background layer.
+    assert.match(both, /background:url\([^)]*\) 0 0\/100% 100% no-repeat,#FFFF00/)
+    assert.equal(lines(cssOf(html, 3)).length, 0)
+  })
+})
+
+describe('workbooks past the zip limits (matrix round)', () => {
+  test('P-1 (Excel): a workbook past the zip limits is called too big, not broken', () => {
+    const saved = { ...ZIP_LIMITS }
+    ZIP_LIMITS.entries = 2
+    try {
+      const html = renderXlsxPage(book([{ name: 's', body: sheet('<row r="1"><c r="A1"><v>1</v></c></row>') }]), 'big.xlsx', 'big')
+      assert.match(html, /檔案太大/)
+      assert.doesNotMatch(html, /損[毀壞]|不是/)
+    } finally {
+      Object.assign(ZIP_LIMITS, saved)
+    }
+  })
+})
+
+describe('sparklines (matrix round)', () => {
+  const X14 = 'xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"'
+  const group = (attrs: string, f: string, sqref: string) =>
+    `<x14:sparklineGroup ${attrs}><x14:colorSeries rgb="FF376092"/><x14:colorNegative rgb="FFD00000"/><x14:colorAxis rgb="FF000000"/><x14:colorMarkers rgb="FF00B050"/><x14:colorHigh rgb="FFFFC000"/><x14:colorLow rgb="FF7030A0"/><x14:sparklines><x14:sparkline><xm:f>${f}</xm:f><xm:sqref>${sqref}</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup>`
+  const row = (r: number, values: number[]) => `<row r="${r}">${values.map((v, at) => `<c r="${colName(at + 2)}${r}"><v>${v}</v></c>`).join('')}</row>`
+  const page = () => {
+    const ext = `<extLst><ext ${X14} uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}"><x14:sparklineGroups ${X14}>` +
+      group('markers="1" high="1"', "'銷售 表'!B2:E2", 'F2') + group('type="column" negative="1" low="1"', "'銷售 表'!B3:E3", 'F3') + group('type="stacked" negative="1"', "'銷售 表'!B4:E4", 'F4') +
+      group('', 'Nowhere!B2:E2', 'F5') + `</x14:sparklineGroups></ext></extLst>`
+    const body = sheet(row(2, [3, 7, 2, 5]) + row(3, [4, -2, 6, -1]) + row(4, [1, -1, 0, 1]) + '<row r="5"><c r="A5" t="inlineStr"><is><t>壞</t></is></c></row>', '', ext)
+    return renderXlsxPage(book([{ name: '銷售 表', body }]), 'b.xlsx', 'b')
+  }
+
+  test('X-1: line, column and win/loss sparklines draw in their cells, in their colours', () => {
+    const html = page()
+    const svgIn = (ref: string) => {
+      const [, col, r] = /^([A-Z]+)(\d+)$/.exec(ref)!
+      const tr = html.split('<tr').find((t) => new RegExp(`^[^>]*><th[^>]*>${r}</th>`).test(t)) ?? ''
+      const cells = tr.split('<td').slice(1)
+      return cells[col.charCodeAt(0) - 65] ?? ''
+    }
+    const line = svgIn('F2')
+    assert.match(line, /<svg class="xl-spark"[^>]*>/)
+    assert.match(line, /<polyline points="[\d.,\s]+" fill="none" stroke="#376092"/)
+    // Markers on every point, the high point in its own colour.
+    assert.equal((line.match(/<circle [^>]*fill="#00B050"/g) ?? []).length, 3)
+    assert.equal((line.match(/<circle [^>]*fill="#FFC000"/g) ?? []).length, 1)
+    const column = svgIn('F3')
+    assert.equal((column.match(/<rect /g) ?? []).length, 4)
+    // The low point's colour goes over the negative colour, as Excel layers them.
+    assert.equal((column.match(/<rect [^>]*fill="#D00000"/g) ?? []).length, 1, 'the other negative bar')
+    assert.equal((column.match(/<rect [^>]*fill="#7030A0"/g) ?? []).length, 1, 'the low bar')
+    const winLoss = svgIn('F4')
+    // Win/loss: one bar per non-zero value, up for a win and down for a loss, all one height.
+    const bars = [...winLoss.matchAll(/<rect x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="([\d.]+)" fill="(#[0-9A-F]+)"/g)].map((m) => ({ y: +m[1], h: +m[2], fill: m[3] }))
+    assert.equal(bars.length, 3)
+    assert.equal(new Set(bars.map((b) => b.h)).size, 1)
+    assert.deepEqual(bars.map((b) => b.fill), ['#376092', '#D00000', '#376092'])
+    assert.ok(bars[1].y > bars[0].y)
+  })
+
+  test('X-1 round 2: a group axis over many long sparklines still draws (no spread past the argument limit)', () => {
+    // 70 sparklines of 2000 points each: 140,000 values for the group's shared min and max.
+    const data = Array.from({ length: 2000 }, (_, at) => `<row r="${at + 1}"><c r="A${at + 1}"><v>${at % 97}</v></c></row>`).join('')
+    const many = Array.from({ length: 70 }, (_, at) => `<x14:sparkline><xm:f>資料!A1:A2000</xm:f><xm:sqref>B${at + 1}</xm:sqref></x14:sparkline>`).join('')
+    const ext = `<extLst><ext ${X14} uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}"><x14:sparklineGroups ${X14}><x14:sparklineGroup minAxisType="group" maxAxisType="group"><x14:colorSeries rgb="FF376092"/><x14:sparklines>${many}</x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>`
+    const html = renderXlsxPage(book([{ name: '圖', body: sheet('', '', ext) }, { name: '資料', body: sheet(data) }]), 'b.xlsx', 'b')
+    assert.equal((html.match(/<svg class="xl-spark"/g) ?? []).length, 70)
+  })
+
+  test('X-1 round 2: a sparkline in a cell past the used range of an otherwise empty sheet draws', () => {
+    const ext = `<extLst><ext ${X14} uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}"><x14:sparklineGroups ${X14}>${group('', '資料!A1:D1', 'K40')}</x14:sparklineGroups></ext></extLst>`
+    const html = renderXlsxPage(book([{ name: '圖', body: sheet('', '', ext) }, { name: '資料', body: sheet(row(1, [1, 3, 2, 4]).replace(/r="([B-E])1"/g, (_, c) => `r="${String.fromCharCode(c.charCodeAt(0) - 1)}1"`)) }]), 'b.xlsx', 'b')
+    const first = panel(html, 1)
+    assert.equal((first.match(/<svg class="xl-spark"/g) ?? []).length, 1, 'the K40 sparkline')
+    assert.match(first, /<th[^>]*>K<\/th>/)
+  })
+
+  test('X-1: a sparkline whose data cannot be found says so in its cell', () => {
+    assert.match(page(), /<span class="xl-cellmiss">走勢圖\(找不到資料\)<\/span>/)
   })
 })

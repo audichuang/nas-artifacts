@@ -453,3 +453,37 @@ describe('date systems', () => {
     assert.ok(texts(draw(dated('')).svg).includes('2019-12-31'), 'the 1900 system stays the default')
   })
 })
+
+describe('axis labels and titles keep inside the chart (matrix round)', () => {
+  const textAt = (svg: string, body: string) => {
+    const m = new RegExp(`<text x="([-\\d.]+)" y="([-\\d.]+)" font-size="([\\d.]+)"([^>]*)>${body}</text>`).exec(svg)
+    assert.ok(m, `no label ${body}`)
+    return { x: +m[1], y: +m[2], fs: +m[3], attrs: m[4] }
+  }
+
+  // 18 pt text, as python-pptx writes a chart's default size.
+  const BIG = '<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1800"/></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr>'
+
+  test('C-1: the last value label of a horizontal bar chart fits inside the chart', () => {
+    const node = chart(`<c:barChart><c:barDir val="bar"/><c:grouping val="clustered"/>${ser('S', [12, 25, 38])}${ids()}</c:barChart>${catAx(1, 2).replace('"b"', '"l"')}${valAx(2, 1, '<c:scaling><c:orientation val="minMax"/><c:max val="40"/></c:scaling>', 'b')}`, '', BIG)
+    const { svg } = draw(node, { widthPt: 300, heightPt: 200 })
+    const last = textAt(svg, '40')
+    assert.match(last.attrs, /text-anchor="middle"/)
+    // A middle-anchored "40" reaches about 0.6 em right of its x; the chart is 300 wide.
+    assert.ok(last.x + last.fs * 0.6 <= 300, `x=${last.x} fs=${last.fs}`)
+  })
+
+  test('X-4: a rotated secondary axis title sits clear of a legend on the right', () => {
+    const plot =
+      `<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>${ser('北區', [100, 140, 90])}${ids(1, 2)}</c:barChart>` +
+      `<c:lineChart><c:grouping val="standard"/>${ser('中區', [20, 35, 10])}${ids(3, 4)}</c:lineChart>` +
+      `${catAx(1, 2)}${valAx(2, 1)}${valAx(4, 3, '<c:title><c:tx><c:rich><a:p><a:r><a:t>次座標</a:t></a:r></a:p></c:rich></c:tx></c:title><c:crosses val="max"/>', 'r')}${catAx(3, 4).replace('<c:delete val="0"/>', '<c:delete val="1"/>')}`
+    const { svg } = draw(chart(plot, '<c:legend><c:legendPos val="r"/></c:legend>', BIG))
+    const title = textAt(svg, '次座標')
+    assert.match(title.attrs, /rotate\(90 /)
+    const legendX = Math.min(...[...svg.matchAll(/<text x="([-\d.]+)"[^>]*data-legend=""/g)].map((m) => +m[1]))
+    // Turned a quarter clockwise, the title's glyphs stand to the right of its baseline, about one em wide. The legend
+    // starts at its keys, 1.6 em before its text, and a line key reaches a little further left.
+    assert.ok(title.x + title.fs <= legendX - title.fs * 1.9, `title x=${title.x} fs=${title.fs}, legend text x=${legendX}`)
+  })
+})

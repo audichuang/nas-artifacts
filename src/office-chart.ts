@@ -1293,6 +1293,8 @@ function drawCategories(
     bottom = scales[0] && shown(valueAxes[0].node) ? axisFs(valueAxes[0].node) * 1.6 : 4
     if (valTitles[0]) bottom += fs * 1.4
     if (valueAxes[1]) topPad += shown(valueAxes[1].node) ? axisFs(valueAxes[1].node) * 1.6 : 0
+    // Value labels are centred on their ticks: the last one needs half its width beyond the plot's right edge.
+    right = Math.max(fs * 0.3, ...valueAxes.map((a, at) => valLabelSize(scales[at], a.node) / 2 + 2))
   } else {
     left = valLabelSize(scales[0], valueAxes[0].node) + fs * 0.6 + (valTitles[0] ? fs * 1.4 : 0)
     right = valueAxes[1] ? valLabelSize(scales[1], valueAxes[1].node) + fs * 0.6 + (valTitles[1] ? fs * 1.4 : 0) : fs * 0.6
@@ -1409,7 +1411,8 @@ function drawCategories(
     if (titleText) {
       if (horizontal) ctx.out.push(textEl(plotX + plotW / 2, axis.secondary ? area.y + fs : area.y + area.h - fs * 0.3, ellipsize(titleText, plotW, fs), fs, ' text-anchor="middle"'))
       else {
-        const x = axis.secondary ? area.x + area.w - fs * 0.3 : area.x + fs
+        // Turned a quarter, a title's glyphs stand on the far side of its baseline: right of it on the right axis.
+        const x = axis.secondary ? area.x + area.w - fs : area.x + fs
         const y = plotY + plotH / 2
         ctx.out.push(textEl(x, y, ellipsize(titleText, plotH, fs), fs, ` text-anchor="middle" transform="rotate(${axis.secondary ? 90 : -90} ${r2(x)} ${r2(y)})"`))
       }

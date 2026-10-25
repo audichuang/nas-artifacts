@@ -6,6 +6,7 @@ import { after, before, describe, test } from 'node:test'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
 import { docxText, readDocx, renderDocxPage } from '../src/docx.ts'
+import { ZIP_LIMITS } from '../src/zip.ts'
 import { zip } from './helpers/zip.ts'
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
@@ -773,5 +774,93 @@ describe('Word drawings: charts and shape geometry', () => {
     // Two shapes never share a pattern id.
     const ids = [...html.matchAll(/<pattern id="([^"]+)"/g)].map((m) => m[1])
     assert.equal(new Set(ids).size, ids.length)
+  })
+})
+
+describe('Word shapes and layout (matrix round)', () => {
+  const docOf = (body: string, parts: Record<string, string> = {}, relList: [string, string, string][] = []) =>
+    zip({ 'word/document.xml': `<w:document ${W}><w:body>${body}</w:body></w:document>`, 'word/_rels/document.xml.rels': rels(relList), 'word/theme/theme1.xml': theme, ...parts })
+  const shapeIn = (xfrm: string, prst: string, bodyPr = '') =>
+    p(`<w:r><w:drawing><wp:inline><wp:extent cx="1828800" cy="914400"/><wp:docPr id="3" name="d"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr><a:xfrm${xfrm}><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:txbx><w:txbxContent>${p(r('箭頭字'))}</w:txbxContent></wps:txbx><wps:bodyPr${bodyPr}/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`)
+  const boxes = (html: string) => [...html.matchAll(/<span class="dx-txbx" style="([^"]*)">([\s\S]*?)<\/span>/g)].map((m) => ({ style: m[1], body: m[2] }))
+
+  test('P-1 (Word): a document past the zip limits is called too big, not broken', () => {
+    const saved = { ...ZIP_LIMITS }
+    ZIP_LIMITS.entries = 1
+    try {
+      const html = renderDocxPage(docOf(p(r('x'))), 'big.docx', 'big')
+      assert.match(html, /檔案太大/)
+      assert.doesNotMatch(html, /損[毀壞]|不是/)
+    } finally {
+      Object.assign(ZIP_LIMITS, saved)
+    }
+  })
+
+  test('W-1: a flipped shape mirrors its geometry, not its text; a rotation and vert270 share one transform', () => {
+    const html = readDocx(docOf(shapeIn(' flipH="1"', 'rightArrow') + shapeIn(' flipV="1"', 'triangle') + shapeIn(' rot="5400000"', 'rect', ' vert="vert270"') + shapeIn(' rot="2700000" flipH="1"', 'rightArrow', ' vert="vert270"')), '').html
+    const [h, v, rv, all] = boxes(html)
+    assert.match(h.body, /^<svg class="dx-geom"[^>]*style="transform:scaleX\(-1\)"/)
+    assert.doesNotMatch(h.style, /transform/)
+    assert.match(v.body, /^<svg class="dx-geom"[^>]*style="transform:scaleY\(-1\)"/)
+    for (const box of [rv, all]) assert.equal(box.style.match(/transform:/g)?.length, 1, box.style)
+    assert.match(rv.style, /transform:rotate\(90deg\) rotate\(180deg\)/)
+    assert.match(all.style, /transform:rotate\(45deg\) rotate\(180deg\)/)
+    // The box turns over for vert270; the geometry turns back, so the arrow still points the way the file says (flipped: left).
+    assert.match(all.body, /^<svg class="dx-geom"[^>]*style="transform:rotate\(180deg\) scaleX\(-1\)"/)
+  })
+
+  test('W-1: a flipped group mirrors where its members sit and how each is drawn, its text still readable', () => {
+    const member = (x: number, prst: string) =>
+      `<wps:wsp><wps:spPr><a:xfrm><a:off x="${x}" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:txbx><w:txbxContent>${p(r(prst))}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>`
+    const group = `<wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:grpSpPr><a:xfrm flipH="1"><a:off x="0" y="0"/><a:ext cx="3657600" cy="914400"/><a:chOff x="0" y="0"/><a:chExt cx="3657600" cy="914400"/></a:xfrm></wpg:grpSpPr>${member(0, 'rightArrow')}${member(2743200, 'triangle')}</wpg:wgp>`
+    const html = readDocx(docOf(p(`<w:r><w:drawing><wp:inline><wp:extent cx="3657600" cy="914400"/><wp:docPr id="3" name="g"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">${group}</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`)), '').html
+    const items = [...html.matchAll(/<span class="dx-gi" style="left:([\d.]+)%[^"]*">([\s\S]*?)<\/span><\/span>/g)].map((m) => ({ left: Number(m[1]), body: m[2] }))
+    // The arrow, first at the left, sits at the right and points left; the triangle moves to the left.
+    assert.equal(items.length, 2)
+    assert.equal(items[0].left, 75)
+    assert.match(items[0].body, /<svg class="dx-geom"[^>]*style="transform:scaleX\(-1\)"/)
+    assert.equal(items[1].left, 0)
+    assert.match(items[0].body, />rightArrow</)
+  })
+
+  test('W-2: a tbRl section starts at the right margin, as Word lays vertical text out', () => {
+    const html = renderDocxPage(docOf(p(r('直書內容')) + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:textDirection w:val="tbRl"/></w:sectPr>'), 'v.docx', 'v')
+    assert.match(html, /<div class="dx-vert"/)
+    const rule = /\.dx-vert\{([^}]*)\}/.exec(html)?.[1] ?? ''
+    // The box spans the text column, so vertical-rl lines begin at its right edge rather than shrinking to the left.
+    assert.match(rule, /(^|;)width:100%/)
+  })
+
+  test('W-3: with a different first page (titlePg), the header at the top is the first-page header', () => {
+    const hdr = (text: string) => `<w:hdr ${W}>${p(r(text))}</w:hdr>`
+    const parts = { 'word/header1.xml': hdr('首頁頁首 FIRST'), 'word/header2.xml': hdr('奇數頁頁首 ODD') }
+    const relList: [string, string, string][] = [['h1', 'header', 'header1.xml'], ['h2', 'header', 'header2.xml']]
+    const sect = (titlePg: string) => `<w:sectPr><w:headerReference w:type="default" r:id="h2"/><w:headerReference w:type="first" r:id="h1"/>${titlePg}</w:sectPr>`
+    const top = (html: string) => /<div class="dx-header"[^>]*>([\s\S]*?)<\/div><div class="dx-body">/.exec(html)?.[1] ?? ''
+    assert.match(top(readDocx(docOf(p(r('本文')) + sect('<w:titlePg/>'), parts, relList), '').html), /首頁頁首 FIRST/)
+    // Without titlePg (or with it turned off) the first page shows the default header.
+    assert.match(top(readDocx(docOf(p(r('本文')) + sect(''), parts, relList), '').html), /奇數頁頁首 ODD/)
+    assert.match(top(readDocx(docOf(p(r('本文')) + sect('<w:titlePg w:val="0"/>'), parts, relList), '').html), /奇數頁頁首 ODD/)
+  })
+
+  test('W-4: kana, English-word and other list formats number as Word does, not as 1, 2, 3', () => {
+    const cases: [string, number, string][] = [
+      ['aiueo', 1, 'ｱ'], ['aiueo', 2, 'ｲ'], ['aiueo', 6, 'ｶ'], ['aiueoFullWidth', 1, 'ア'], ['aiueoFullWidth', 46, 'ン'],
+      ['iroha', 1, 'ｲ'], ['iroha', 2, 'ﾛ'], ['irohaFullWidth', 1, 'イ'], ['irohaFullWidth', 3, 'ハ'],
+      ['cardinalText', 1, 'One'], ['cardinalText', 21, 'Twenty-one'], ['cardinalText', 115, 'One hundred fifteen'],
+      ['ordinalText', 1, 'First'], ['ordinalText', 12, 'Twelfth'], ['ordinalText', 23, 'Twenty-third'], ['ordinalText', 100, 'One hundredth'],
+      ['ordinal', 2, '2nd'], ['ordinal', 11, '11th'], ['hex', 26, '1A'], ['chicago', 1, '*'], ['chicago', 5, '**'],
+      ['ideographEnclosedCircle', 3, '㊂'], ['ganada', 2, '나'], ['chosung', 3, 'ㄷ'], ['russianLower', 2, 'б'], ['russianUpper', 3, 'В']
+    ]
+    const abstract = cases.map(([fmt, start], i) => `<w:abstractNum w:abstractNumId="${i}"><w:lvl w:ilvl="0"><w:start w:val="${start}"/><w:numFmt w:val="${fmt}"/><w:lvlText w:val="%1|"/></w:lvl></w:abstractNum>`).join('')
+    const nums = cases.map((_, i) => `<w:num w:numId="${i + 1}"><w:abstractNumId w:val="${i}"/></w:num>`).join('')
+    const body = cases.map(([fmt], i) => p(r(fmt), `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="${i + 1}"/></w:numPr>`)).join('')
+    const html = readDocx(docOf(body, { 'word/numbering.xml': `<w:numbering ${W}>${abstract}${nums}</w:numbering>` }, [['n', 'numbering', 'numbering.xml']]), '').html
+    const labels = [...html.matchAll(/class="dx-num[^"]*">([^<|]*)\|/g)].map((m) => m[1])
+    // The standard spells cardinalText/ordinalText in lower case; Word capitalises the first word in a list. The casing
+    // inside a compound (Twenty-one or Twenty-One) is not pinned.
+    const fold = (label: string, at: number) => (cases[at][0].endsWith('Text') ? label.toLowerCase() : label)
+    assert.deepEqual(labels.map(fold), cases.map(([, , label], at) => fold(label, at)))
+    assert.ok(labels.filter((_, at) => cases[at][0].endsWith('Text')).every((label) => /^[A-Z]/.test(label)), labels.join())
   })
 })

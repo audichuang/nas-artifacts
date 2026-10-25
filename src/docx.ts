@@ -2,6 +2,8 @@ import { posix } from 'node:path'
 import { escapeHtml, injectBridge } from './content-render.ts'
 import { chartTitle, renderChart } from './office-chart.ts'
 import { fillShade, shapeGeometry } from './office-geometry.ts'
+import { AIUEO, AIUEO_HALF, cardinalText, chineseCounting, circled, chineseLegal, CHOSUNG, CN_DIGITS, GANADA, IROHA, IROHA_HALF, letters, ordinal, ordinalText, repeating, roman, RUSSIAN } from './office-numbers.ts'
+import { PATTERN_PT, PATTERNS, patternCover, patternSvg, patternTile as sharedTile } from './office-patterns.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, XmlError, type XmlNode } from './xml.ts'
 import { ZipReader, ZipError } from './zip.ts'
@@ -241,47 +243,7 @@ function symbolChar(font: string, code: number): string | null {
 // ---------------------------------------------------------------------------------------------
 // Number formats
 
-function roman(n: number): string {
-  if (n <= 0 || n >= 4000) return String(n)
-  const table: [number, string][] = [[1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']]
-  let out = ''
-  for (const [value, letters] of table) while (n >= value) {
-    out += letters
-    n -= value
-  }
-  return out
-}
-
-// Word repeats the letter (AA, AAA, ...); past a few dozen repeats the label is drawn as a number.
-const letters = (n: number) => (n <= 0 || n > 26 * 40 ? String(n) : String.fromCharCode(65 + ((n - 1) % 26)).repeat(Math.floor((n - 1) / 26) + 1))
-
 const listStart = (n: number | undefined) => (n === undefined || !Number.isFinite(n) ? undefined : clamp(Math.trunc(n), 0, MAX_LIST_START))
-
-function chineseCount(n: number, digits: string, units: string[], big: string, lowTen: boolean): string {
-  if (n === 0) return digits[0]
-  if (n < 0 || n >= 100_000_000) return String(n)
-  if (n >= 10000) {
-    const high = Math.floor(n / 10000)
-    const low = n % 10000
-    return chineseCount(high, digits, units, big, lowTen) + big + (low ? (low < 1000 ? digits[0] : '') + chineseCount(low, digits, units, big, false) : '')
-  }
-  let out = ''
-  let zero = false
-  for (let place = 3; place >= 0; place--) {
-    const digit = Math.floor(n / 10 ** place) % 10
-    if (digit === 0) {
-      if (out) zero = true
-      continue
-    }
-    if (zero) out += digits[0]
-    zero = false
-    out += place === 1 && digit === 1 && !out && lowTen ? units[1] : digits[digit] + units[place]
-  }
-  return out
-}
-
-const CN_DIGITS = '〇一二三四五六七八九'
-const CN_LEGAL = '零壹貳參肆伍陸柒捌玖'
 
 function formatNumber(n: number, format: string): string {
   switch (format) {
@@ -297,22 +259,43 @@ function formatNumber(n: number, format: string): string {
       return letters(n)
     case 'lowerLetter':
       return letters(n).toLowerCase()
-    case 'ordinal': {
-      const tens = n % 100
-      const suffix = tens >= 11 && tens <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'
-      return `${n}${suffix}`
-    }
+    case 'ordinal':
+      return ordinal(n)
+    case 'cardinalText':
+      return cardinalText(n)
+    case 'ordinalText':
+      return ordinalText(n)
+    case 'hex':
+      return n >= 0 ? n.toString(16).toUpperCase() : String(n)
+    case 'chicago':
+      return repeating(n, ['*', '†', '‡', '§'])
+    case 'aiueo':
+      return repeating(n, AIUEO_HALF)
+    case 'aiueoFullWidth':
+      return repeating(n, AIUEO)
+    case 'iroha':
+      return repeating(n, IROHA_HALF)
+    case 'irohaFullWidth':
+      return repeating(n, IROHA)
+    case 'ganada':
+      return repeating(n, GANADA)
+    case 'chosung':
+      return repeating(n, CHOSUNG)
+    case 'russianLower':
+      return repeating(n, RUSSIAN)
+    case 'russianUpper':
+      return repeating(n, RUSSIAN).toUpperCase()
     case 'chineseCounting':
     case 'chineseCountingThousand':
     case 'taiwaneseCounting':
     case 'taiwaneseCountingThousand':
     case 'japaneseCounting':
     case 'koreanCounting':
-      return chineseCount(n, CN_DIGITS, ['', '十', '百', '千'], '萬', true)
+      return chineseCounting(n)
     case 'chineseLegalSimplified':
     case 'ideographLegalTraditional':
     case 'japaneseLegal':
-      return chineseCount(n, CN_LEGAL, ['', '拾', '佰', '仟'], '萬', false)
+      return chineseLegal(n)
     case 'ideographDigital':
     case 'taiwaneseDigital':
     case 'japaneseDigitalTenThousand':
@@ -321,9 +304,11 @@ function formatNumber(n: number, format: string): string {
       return n > 0 ? '甲乙丙丁戊己庚辛壬癸'[(n - 1) % 10] : String(n)
     case 'ideographZodiac':
       return n > 0 ? '子丑寅卯辰巳午未申酉戌亥'[(n - 1) % 12] : String(n)
+    case 'ideographEnclosedCircle':
+      return n >= 1 && n <= 10 ? String.fromCodePoint(0x3280 + n - 1) : String(n)
     case 'decimalEnclosedCircle':
     case 'decimalEnclosedCircleChinese':
-      return n >= 1 && n <= 20 ? String.fromCodePoint(0x2460 + n - 1) : n >= 21 && n <= 35 ? String.fromCodePoint(0x3251 + n - 21) : n >= 36 && n <= 50 ? String.fromCodePoint(0x32b1 + n - 36) : String(n)
+      return circled(n)
     case 'decimalEnclosedParen':
       return n >= 1 && n <= 20 ? String.fromCodePoint(0x2474 + n - 1) : `(${n})`
     case 'decimalEnclosedFullstop':
@@ -407,7 +392,8 @@ type Story = { part: string; kind: 'body' | 'header' | 'footer' | 'note'; fields
 type Layer = { pPr: (XmlNode | null)[]; rPr: (XmlNode | null)[] }
 type Geometry = { w: number; h: number; top: number; right: number; bottom: number; left: number; header: number; footer: number; cols: number; colSpace: number; grid: number; vertical: boolean; type: string }
 /** `groupFill`: the shape properties of the group a drawing sits in, for shapes that take the group's fill (`grpFill`). */
-type Scope = { story: Story; layer: Layer; depth: number; width: number; dark: boolean; grid: number; sheet: Geometry | null; groupFill?: XmlNode | null }
+/** `flipH`/`flipV`: the enclosing groups mirror what they hold (the flips of every group around a drawing, combined). */
+type Scope = { story: Story; layer: Layer; depth: number; width: number; dark: boolean; grid: number; sheet: Geometry | null; groupFill?: XmlNode | null; flipH?: boolean; flipV?: boolean }
 /** A shape's fill: a colour, one of Office's 8 × 8 hatches, or a picture from the file (stretched over the shape, or tiled). */
 type Paint = { color: Rgba } | { pattern: { fg: Rgba; bg: Rgba; bits: string } } | { picture: string; tile: boolean }
 type Link = { href?: string; title?: string } | null
@@ -418,6 +404,9 @@ type Link = { href?: string; title?: string } | null
 type Inline = { parts: string[]; text: string[]; visual: boolean; pins: string[]; floats: string[] }
 /** Where a floating drawing sits, in points: `relH`/`relV` are Word's relativeFrom values. */
 type Placement = { relH: string; relV: string; alignH?: string; alignV?: string; offH: number; offV: number; w: number; h: number; behind: boolean; rotate?: number }
+
+/** Whether the groups around a drawing mirror it along exactly one axis, which turns its rotation the other way. */
+const mirrored = (scope: Scope) => Boolean(scope.flipH) !== Boolean(scope.flipV)
 
 /** An offset along one side: an alignment inside [start, start + area], or start + offset. */
 const alignIn = (align: string | undefined, start: number, area: number, size: number, offset: number) => {
@@ -433,46 +422,22 @@ const vmlLength = (value: string | undefined): number => {
   const factor = { pt: 1, in: 72, cm: 72 / 2.54, mm: 72 / 25.4, px: 0.75, pc: 12 }[match[2] ?? 'px'] ?? 0.75
   return clamp(Number(match[1]) * factor, -4000, 4000) || 0
 }
-// Pattern fills: Office's 8 × 8 hatches, each row a byte from the top, high bit leftmost (the same table pptx.ts draws from).
-const PATTERNS: Record<string, string> = {
-  pct5: '8000000008000000', pct10: '8000080080000800', pct20: '8800220088002200', pct25: '8822882288228822', pct30: 'aa44aa11aa44aa11', pct40: 'aa55aa51aa55aa15',
-  pct50: 'aa55aa55aa55aa55', pct60: 'ee55bb55ee55bb55', pct70: '77dd77dd77dd77dd', pct75: '77ffddff77ffddff', pct80: 'effffeffeffffeff', pct90: 'fffffff7ffffff7f',
-  horz: 'ff00000000000000', vert: '8080808080808080', ltHorz: 'ff000000ff000000', ltVert: '8888888888888888', dkHorz: 'ffff0000ffff0000', dkVert: 'cccccccccccccccc',
-  narHorz: 'ff00ff00ff00ff00', narVert: '5555555555555555', dashHorz: 'f00000000f000000', dashVert: '8080808008080808', cross: 'ff80808080808080',
-  dnDiag: '8040201008040201', upDiag: '0102040810204080', ltDnDiag: '8844221188442211', ltUpDiag: '1122448811224488', dkDnDiag: 'cc663399cc663399',
-  dkUpDiag: '3366cc993366cc99', wdDnDiag: 'c1e070381c0e0783', wdUpDiag: '83070e1c3870e0c1', dashDnDiag: '0000884422110000', dashUpDiag: '0000112244880000',
-  diagCross: '8142241818244281', smCheck: '9966669999666699', lgCheck: 'f0f0f0f00f0f0f0f', smGrid: 'ff888888ff888888', lgGrid: 'ff80808080808080',
-  dotGrid: 'aa00800080008000', smConfetti: '8008400210012004', lgConfetti: 'b130031bd8c00c8d', horzBrick: 'ff808080ff080808', diagBrick: '0102040818244281',
-  solidDmnd: '10387cfe7c381000', openDmnd: '8244281028448201', dotDmnd: '8000220008002200', plaid: 'aa55aa55f0f0f0f0', sphere: '77898f8f7798f8f8',
-  weave: '8854224588142251', divot: '0010081000800180', shingle: '038448300c020101', wave: '001825c0001825c0', trellis: 'ff66ff99ff66ff99', zigZag: '8142241881422418'
-}
 
-/** One hatch tile is 8 screen pixels at 100 % zoom: 6 points. */
-const PATTERN_PT = 6
-
-/** A hatch tile's SVG content: the background, then the foreground pixels, in an 8 × 8 box. */
-function patternTile({ fg, bg, bits }: { fg: Rgba; bg: Rgba; bits: string }): string {
-  let d = ''
-  for (let y = 0; y < 8; y++) {
-    const row = parseInt(bits.slice(y * 2, y * 2 + 2), 16)
-    for (let x = 0; x < 8; x++) if (row & (0x80 >> x)) d += `M${x},${y}h1v1h-1z`
-  }
-  return `<rect width="8" height="8" fill="${cssColor(bg)}"/>${d ? `<path d="${d}" fill="${cssColor(fg)}"/>` : ''}`
-}
+/** A hatch tile's SVG content, in the shape's colours. */
+const patternTile = ({ fg, bg, bits }: { fg: Rgba; bg: Rgba; bits: string }): string => sharedTile(cssColor(fg), cssColor(bg), bits)
 
 /** The colour a fill reads as from a distance, for choosing the text colour on it; null for a picture. */
 function paintTone(paint: Paint): Rgba | null {
   if ('color' in paint) return paint.color
   if ('picture' in paint) return null
-  const set = [...paint.pattern.bits].reduce((sum, hex) => sum + [...parseInt(hex, 16).toString(2)].filter((bit) => bit === '1').length, 0)
-  return mix(paint.pattern.fg, paint.pattern.bg, set / 64)
+  return mix(paint.pattern.fg, paint.pattern.bg, patternCover(paint.pattern.bits))
 }
 
 /** A fill as a CSS background, for shapes drawn as plain boxes. */
 function paintCss(paint: Paint): string {
   if ('color' in paint) return `background:${cssColor(paint.color)}`
   if ('picture' in paint) return `background:url('${esc(paint.picture)}') 0 0${paint.tile ? ' repeat' : '/100% 100% no-repeat'}`
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" shape-rendering="crispEdges">${patternTile(paint.pattern)}</svg>`
+  const svg = patternSvg(cssColor(paint.pattern.fg), cssColor(paint.pattern.bg), paint.pattern.bits)
   return `background:url('data:image/svg+xml,${encodeURIComponent(svg)}') 0 0/${PATTERN_PT}pt ${PATTERN_PT}pt repeat`
 }
 
@@ -1285,7 +1250,10 @@ class DocxRenderer {
 
   private headerFooter(sectPr: XmlNode | null, kind: 'header' | 'footer', geometry: Geometry, dark: boolean): string {
     const refs = children(sectPr, `${kind}Reference`)
-    const ref = refs.find((candidate) => attr(candidate, 'type') === 'default') ?? refs[0]
+    // The header is drawn once, where the first page has it: a section with a different first page (titlePg) shows
+    // its first-page header there. The footer closes the document, so it stays the default one.
+    const titlePage = kind === 'header' && child(sectPr, 'titlePg') !== null && truthy(child(sectPr, 'titlePg'))
+    const ref = (titlePage ? refs.find((candidate) => attr(candidate, 'type') === 'first') : undefined) ?? refs.find((candidate) => attr(candidate, 'type') === 'default') ?? refs[0]
     const rel = ref ? this.pkg.rel(this.mainPart, relAttr(ref, 'id')) : undefined
     if (!rel || rel.external) return ''
     const label = kind === 'header' ? '頁首' : '頁尾'
@@ -2600,9 +2568,9 @@ class DocxRenderer {
     const xfrm = path(pic, 'spPr', 'xfrm')
     const transforms: string[] = []
     const rot = num(xfrm, 'rot')
-    if (rot) transforms.push(`rotate(${round(rot / 60000)}deg)`)
-    if (attr(xfrm, 'flipH') === '1') transforms.push('scaleX(-1)')
-    if (attr(xfrm, 'flipV') === '1') transforms.push('scaleY(-1)')
+    if (rot) transforms.push(`rotate(${round(mirrored(scope) ? -rot / 60000 : rot / 60000)}deg)`)
+    if ((attr(xfrm, 'flipH') === '1') !== Boolean(scope.flipH)) transforms.push('scaleX(-1)')
+    if ((attr(xfrm, 'flipV') === '1') !== Boolean(scope.flipV)) transforms.push('scaleY(-1)')
     const ratio = !fill && w > 0 && h > 0 ? `;aspect-ratio:${round(w)}/${round(h)}` : ''
     const transform = transforms.length ? `;transform:${transforms.join(' ')}` : ''
     return `<img class="dx-img" src="${esc(this.media(rel!.target))}" alt="${esc(alt)}" style="${size}${ratio}${transform}">`
@@ -2642,9 +2610,20 @@ class DocxRenderer {
     const bodyPr = child(wsp, 'bodyPr')
     const rect = shape && w > 0 && h > 0 ? shape.textRect : { l: 0, t: 0, r: w, b: h }
     const inset = (name: string, fallback: number, extra: number) => pt(clamp((num(bodyPr, name) ?? fallback) / EMU_PER_PT, 0, 100) + clamp(extra, 0, 1000))
+    const xfrm = path(spPr, 'xfrm')
+    const vert = attr(bodyPr, 'vert')
+    // vert270 turns the whole box over (its text reads bottom to top); the geometry turns back, and a flip mirrors
+    // only the geometry, so the text stays readable and sits in the text rectangle the flip moved.
+    const turned = vert === 'vert270'
+    const flipH = (attr(xfrm, 'flipH') === '1') !== Boolean(scope.flipH)
+    const flipV = (attr(xfrm, 'flipV') === '1') !== Boolean(scope.flipV)
+    const swapX = flipH !== turned
+    const swapY = flipV !== turned
     const css = [size, 'box-sizing:border-box']
     if (!fill && h) css.push(`min-height:${pt(h)}`)
-    css.push(`padding:${inset('tIns', 45720, rect.t)} ${inset('rIns', 91440, w - rect.r)} ${inset('bIns', 45720, h - rect.b)} ${inset('lIns', 91440, rect.l)}`)
+    const [padL, padR] = swapX ? [w - rect.r, rect.l] : [rect.l, w - rect.r]
+    const [padT, padB] = swapY ? [h - rect.b, rect.t] : [rect.t, h - rect.b]
+    css.push(`padding:${inset('tIns', 45720, padT)} ${inset('rIns', 91440, padR)} ${inset('bIns', 45720, padB)} ${inset('lIns', 91440, padL)}`)
     let svg = ''
     if (shape) {
       css.push('position:relative;z-index:0')
@@ -2661,7 +2640,9 @@ class DocxRenderer {
         }
       }
       if (lineColor) for (const p of shape.paths) if (p.stroke) paths += `<path d="${p.d}" fill="none" stroke="${cssColor(lineColor)}" stroke-width="${round(lineWidth)}" stroke-linejoin="round"/>`
-      if (paths) svg = `<svg class="dx-geom" viewBox="0 0 ${round(Math.max(w, 0.01))} ${round(Math.max(h, 0.01))}" preserveAspectRatio="none" aria-hidden="true">${defs ? `<defs>${defs}</defs>` : ''}${paths}</svg>`
+      const geomTransform = [turned ? 'rotate(180deg)' : '', flipH ? 'scaleX(-1)' : '', flipV ? 'scaleY(-1)' : ''].filter(Boolean).join(' ')
+      const geomStyle = geomTransform ? ` style="transform:${geomTransform}"` : ''
+      if (paths) svg = `<svg class="dx-geom" viewBox="0 0 ${round(Math.max(w, 0.01))} ${round(Math.max(h, 0.01))}" preserveAspectRatio="none" aria-hidden="true"${geomStyle}>${defs ? `<defs>${defs}</defs>` : ''}${paths}</svg>`
     } else {
       if (paint) css.push(paintCss(paint))
       if (border) css.push(`border:${border}`)
@@ -2670,16 +2651,15 @@ class DocxRenderer {
     const anchor = attr(bodyPr, 'anchor')
     if (anchor === 'ctr') css.push('justify-content:center')
     else if (anchor === 'b') css.push('justify-content:flex-end')
-    const vert = attr(bodyPr, 'vert')
-    if (vert === 'vert' || vert === 'eaVert' || vert === 'wordArtVert') css.push('writing-mode:vertical-rl')
-    else if (vert === 'vert270') css.push('writing-mode:vertical-rl;transform:rotate(180deg)')
-    const rot = num(path(spPr, 'xfrm'), 'rot')
-    if (rot) css.push(`transform:rotate(${round(rot / 60000)}deg)`)
+    if (vert === 'vert' || vert === 'eaVert' || vert === 'wordArtVert' || turned) css.push('writing-mode:vertical-rl')
+    const rot = num(xfrm, 'rot')
+    const transforms = [rot ? `rotate(${round(mirrored(scope) ? -rot / 60000 : rot / 60000)}deg)` : '', turned ? 'rotate(180deg)' : ''].filter(Boolean)
+    if (transforms.length) css.push(`transform:${transforms.join(' ')}`)
     let inner = ''
     if (content) {
       if (scope.depth >= LIMITS.depth) inner = unsupported('多層巢狀文字方塊')
       else {
-        const innerScope: Scope = { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, rect.r - rect.l - 14), dark: background ? isDark(background) : scope.dark, sheet: null, groupFill: null }
+        const innerScope: Scope = { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, rect.r - rect.l - 14), dark: background ? isDark(background) : scope.dark, sheet: null, groupFill: null, flipH: false, flipV: false }
         inner = this.renderBlocks(content.children, innerScope)
       }
     }
@@ -2702,7 +2682,10 @@ class DocxRenderer {
     // A member that takes the group's fill takes this group's, or the enclosing group's when this one does too.
     const own = child(node, 'grpSpPr')
     const groupFill = own && !child(own, 'grpFill') ? own : scope.groupFill
-    const inner: Scope = { ...scope, depth: scope.depth + 1, sheet: null, groupFill }
+    // A flipped group mirrors where its members sit and how each is drawn; text inside stays readable.
+    const flipH = Boolean(scope.flipH) !== (attr(xfrm, 'flipH') === '1')
+    const flipV = Boolean(scope.flipV) !== (attr(xfrm, 'flipV') === '1')
+    const inner: Scope = { ...scope, depth: scope.depth + 1, sheet: null, groupFill, flipH, flipV }
     for (const c of node.children) {
       const name = local(c.name)
       if (!['wsp', 'pic', 'grpSp', 'wgp', 'graphicFrame'].includes(name)) continue
@@ -2712,8 +2695,10 @@ class DocxRenderer {
       const ext = child(childXfrm, 'ext')
       const cx = num(ext, 'cx') ?? 0
       const cy = num(ext, 'cy') ?? 0
-      const left = (((num(off, 'x') ?? 0) - ox) / ew) * 100
-      const top = (((num(off, 'y') ?? 0) - oy) / eh) * 100
+      const x0 = (((num(off, 'x') ?? 0) - ox) / ew) * 100
+      const y0 = (((num(off, 'y') ?? 0) - oy) / eh) * 100
+      const left = flipH ? 100 - x0 - (cx / ew) * 100 : x0
+      const top = flipV ? 100 - y0 - (cy / eh) * 100 : y0
       const box = `left:${round(left, 3)}%;top:${round(top, 3)}%;width:${round((cx / ew) * 100, 3)}%;height:${round((cy / eh) * 100, 3)}%`
       const target = name === 'graphicFrame' ? (path(c, 'graphic', 'graphicData')?.children[0] ?? null) : c
       let html: string
@@ -2842,7 +2827,7 @@ class DocxRenderer {
     else if (stroked && attr(node, 'strokecolor')) css.push(`border:${pt(strokeWidth)} solid ${cssColor(strokeColor)}`)
     if (name === 'oval') css.push('border-radius:50%')
     if (scope.depth >= LIMITS.depth) return unsupported('多層巢狀文字方塊')
-    const inner = this.renderBlocks(content.children, { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, (w || scope.width) - 14), dark: background ? isDark(background) : scope.dark, sheet: null })
+    const inner = this.renderBlocks(content.children, { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, (w || scope.width) - 14), dark: background ? isDark(background) : scope.dark, sheet: null, flipH: false, flipV: false })
     return `<span class="dx-txbx" style="${css.join(';')}">${inner}</span>`
   }
 
@@ -3176,7 +3161,7 @@ span.dx-lnk{cursor:help}
 .dx-notes:before{content:"";position:absolute;top:0;left:0;width:33%;border-top:.75pt solid currentColor}
 .dx-note{font-size:90%}
 .dx-cols{column-fill:balance}
-.dx-vert{writing-mode:vertical-rl;overflow-x:auto;max-width:100%}
+.dx-vert{writing-mode:vertical-rl;overflow-x:auto;width:100%}
 .dx-math{font-family:'Cambria Math','STIX Two Math','Latin Modern Math','Times New Roman',serif;white-space:nowrap}
 .dx-mathpara{display:block;text-align:center;margin:4pt 0}
 .m-frac{display:inline-flex;flex-direction:column;vertical-align:middle;text-align:center;font-size:90%;margin:0 .1em}
@@ -3208,6 +3193,7 @@ export function readDocx(data: Buffer, mediaBase: string): { html: string; css: 
 
 function failureReason(error: unknown, data: Buffer): string {
   if (data.length >= 8 && data.readUInt32BE(0) === 0xd0cf11e0) return '這是舊版 Word (.doc) 或受密碼保護的檔案,網頁版無法開啟。'
+  if (error instanceof ZipError && error.limit) return `${error.message}。檔案本身沒有壞,請下載原始檔查看。`
   if (error instanceof ZipError) return '檔案不是有效的 .docx(zip 格式),可能已損毀,或副檔名不符。'
   if (error instanceof XmlError) return '文件內容的 XML 無法解析,檔案可能已損毀。'
   if (error instanceof Error && /[一-鿿]/.test(error.message)) return error.message

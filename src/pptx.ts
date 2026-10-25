@@ -2,6 +2,8 @@ import { posix } from 'node:path'
 import { escapeHtml } from './content-render.ts'
 import { chartTitle, renderChart } from './office-chart.ts'
 import { adjustValues, customGeometry, fillShade, presetGeometry, type Geometry } from './office-geometry.ts'
+import { chineseCounting, circled } from './office-numbers.ts'
+import { PATTERN_PT, PATTERNS, patternSvg, patternTile } from './office-patterns.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { deckPage, type DeckAssets } from './slides.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, XmlError, type XmlNode } from './xml.ts'
@@ -326,36 +328,14 @@ const gradientStops = (fill: XmlNode, ctx: Ctx): Stop[] =>
     .sort((a, b) => a.pos - b.pos)
 
 // ---------------------------------------------------------------------------------------------
-// Pattern fills: PowerPoint's 8 × 8 hatches, each row a byte from the top, high bit leftmost.
-
-const PATTERNS: Record<string, string> = {
-  pct5: '8000000008000000', pct10: '8000080080000800', pct20: '8800220088002200', pct25: '8822882288228822', pct30: 'aa44aa11aa44aa11', pct40: 'aa55aa51aa55aa15',
-  pct50: 'aa55aa55aa55aa55', pct60: 'ee55bb55ee55bb55', pct70: '77dd77dd77dd77dd', pct75: '77ffddff77ffddff', pct80: 'effffeffeffffeff', pct90: 'fffffff7ffffff7f',
-  horz: 'ff00000000000000', vert: '8080808080808080', ltHorz: 'ff000000ff000000', ltVert: '8888888888888888', dkHorz: 'ffff0000ffff0000', dkVert: 'cccccccccccccccc',
-  narHorz: 'ff00ff00ff00ff00', narVert: '5555555555555555', dashHorz: 'f00000000f000000', dashVert: '8080808008080808', cross: 'ff80808080808080',
-  dnDiag: '8040201008040201', upDiag: '0102040810204080', ltDnDiag: '8844221188442211', ltUpDiag: '1122448811224488', dkDnDiag: 'cc663399cc663399',
-  dkUpDiag: '3366cc993366cc99', wdDnDiag: 'c1e070381c0e0783', wdUpDiag: '83070e1c3870e0c1', dashDnDiag: '0000884422110000', dashUpDiag: '0000112244880000',
-  diagCross: '8142241818244281', smCheck: '9966669999666699', lgCheck: 'f0f0f0f00f0f0f0f', smGrid: 'ff888888ff888888', lgGrid: 'ff80808080808080',
-  dotGrid: 'aa00800080008000', smConfetti: '8008400210012004', lgConfetti: 'b130031bd8c00c8d', horzBrick: 'ff808080ff080808', diagBrick: '0102040818244281',
-  solidDmnd: '10387cfe7c381000', openDmnd: '8244281028448201', dotDmnd: '8000220008002200', plaid: 'aa55aa55f0f0f0f0', sphere: '77898f8f7798f8f8',
-  weave: '8854224588142251', divot: '0010081000800180', shingle: '038448300c020101', wave: '001825c0001825c0', trellis: 'ff66ff99ff66ff99', zigZag: '8142241881422418'
-}
-
-/** One hatch tile is 8 screen pixels at 100 % zoom: 6 points. */
-const PATTERN_PT = 6
+// Pattern fills: Office's 8 × 8 hatches (src/office-patterns.ts).
 
 /** A pattern fill as an 8 × 8 SVG (background, then the foreground pixels) and its two colours. */
 function patternOf(fill: XmlNode, ctx: Ctx): { svg: string; inner: string } | null {
   const fg = colorIn(child(fill, 'fgClr'), ctx) ?? { r: 0, g: 0, b: 0, a: 1 }
   const bg = colorIn(child(fill, 'bgClr'), ctx) ?? { r: 255, g: 255, b: 255, a: 1 }
   const bits = PATTERNS[attr(fill, 'prst') ?? ''] ?? PATTERNS.pct5
-  let d = ''
-  for (let y = 0; y < 8; y++) {
-    const row = parseInt(bits.slice(y * 2, y * 2 + 2), 16)
-    for (let x = 0; x < 8; x++) if (row & (0x80 >> x)) d += `M${x},${y}h1v1h-1z`
-  }
-  const inner = `<rect width="8" height="8" fill="${cssColor(bg)}"/>${d ? `<path d="${d}" fill="${cssColor(fg)}"/>` : ''}`
-  return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" shape-rendering="crispEdges">${inner}</svg>`, inner }
+  return { svg: patternSvg(cssColor(fg), cssColor(bg), bits), inner: patternTile(cssColor(fg), cssColor(bg), bits) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -978,11 +958,8 @@ function autoNumber(type: string, n: number): string {
     while (value > 0) { out = String.fromCharCode(97 + ((value - 1) % 26)) + out; value = Math.floor((value - 1) / 26) }
     return out
   }
-  const CJK = '〇一二三四五六七八九十'
-  const cjk = (value: number) => (value <= 10 ? CJK[value] : value < 20 ? `十${CJK[value - 10]}` : String(value))
-  const circled = (value: number) => (value >= 1 && value <= 20 ? String.fromCodePoint(0x2460 + value - 1) : String(value))
   const base = type.startsWith('alphaLc') ? alpha(n) : type.startsWith('alphaUc') ? alpha(n).toUpperCase() : type.startsWith('romanLc') ? roman(n)
-    : type.startsWith('romanUc') ? roman(n).toUpperCase() : type.startsWith('circleNum') ? circled(n) : /ea1Cht|ea1Chs|ea1Jpn|taiwan|chinese/i.test(type) ? cjk(n) : String(n)
+    : type.startsWith('romanUc') ? roman(n).toUpperCase() : type.startsWith('circleNum') ? circled(n) : /ea1Cht|ea1Chs|ea1Jpn|taiwan|chinese/i.test(type) ? chineseCounting(n) : String(n)
   if (type.endsWith('ParenBoth')) return `(${base})`
   if (type.endsWith('ParenR')) return `${base})`
   if (type.endsWith('Period')) return `${base}.`
@@ -1938,6 +1915,7 @@ export function pptxText(data: Buffer): string {
 
 /** Why a deck cannot be read, in words for the reader. */
 function failureReason(error: unknown): string {
+  if (error instanceof ZipError && error.limit) return `${error.message}。檔案本身沒有壞,請下載原始檔查看。`
   if (error instanceof ZipError) return '檔案不是有效的 .pptx(zip 格式),可能已損毀,或副檔名不符。'
   if (error instanceof XmlError) return '簡報內容的 XML 無法解析,檔案可能已損毀。'
   if (error instanceof Error && /[一-鿿]/.test(error.message)) return error.message
@@ -1957,7 +1935,8 @@ export function renderPptxDeck(data: Buffer, fileName: string, title: string, as
   } catch (error) {
     const message = `PowerPoint: ${error instanceof Error ? error.message : String(error)}`
     const reason = failureReason(error)
-    const detail = readerMessage(error)
+    // A size limit's message is already the reason; it is not repeated as a detail.
+    const detail = error instanceof ZipError && error.limit ? reason : readerMessage(error)
     const box = `<div class="pp-missing" role="alert" style="flex-direction:column;gap:calc(6*var(--pt))"><strong style="font-size:calc(20*var(--pt))">這份 PowerPoint 檔無法顯示</strong><span>${escapeHtml(reason)}</span>${detail === reason ? '' : `<code>${escapeHtml(detail)}</code>`}<span>可以下載原始檔,用 PowerPoint 開啟查看。</span></div>`
     const slide = `<section class="slide layout-pptx" id="slide-1" data-number="1" aria-label="第 1 頁"><div class="pp-canvas">${box}</div></section>`
     return deckPage(slide, title, assets, failureScript(message))
