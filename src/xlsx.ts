@@ -2018,6 +2018,153 @@ const ICON_SETS: Record<string, [string, string][]> = (() => {
   }
 })()
 
+// ---------------------------------------------------------------------------------------------
+// Sparklines (Excel 2010's x14:sparklineGroups): a small line, column or win/loss chart drawn inside one cell
+
+/** At most this many sparklines are drawn on one sheet; past it the rest are labelled in their cells. */
+const SPARKLINES_PER_SHEET = 4000
+
+/**
+ * The sparklines on the shown part of a sheet, as SVG keyed by cell (r * 20000 + c), sized to the cell. Data comes
+ * from the whole workbook (any sheet, not only its shown rows); one whose data cannot be found says so in its cell.
+ */
+function sparklines(wb: Workbook, head: XmlNode, lastRow: number, lastCol: number, size: (r: number, c: number) => [number, number]): Map<number, string> {
+  const out = new Map<number, string>()
+  const palette = wb.styles.palette
+  const groups = children(child(head, 'extLst'), 'ext').flatMap((ext) => children(child(ext, 'sparklineGroups'), 'sparklineGroup'))
+  let count = 0
+  for (const group of groups) {
+    const flag = (name: string) => ['1', 'true'].includes(attr(group, name) ?? '')
+    const color = (name: string, fallback: string) => `#${xColor(child(group, name), palette) ?? fallback}`
+    const type = attr(group, 'type') ?? 'line'
+    const look: SparkLook = {
+      type: type === 'column' || type === 'stacked' ? type : 'line',
+      empty: attr(group, 'displayEmptyCellsAs') ?? 'zero',
+      series: color('colorSeries', '376092'), negative: flag('negative') ? color('colorNegative', 'D00000') : null,
+      axis: flag('displayXAxis') ? color('colorAxis', '000000') : null, markers: flag('markers') ? color('colorMarkers', 'D00000') : null,
+      high: flag('high') ? color('colorHigh', 'D00000') : null, low: flag('low') ? color('colorLow', 'D00000') : null,
+      first: flag('first') ? color('colorFirst', 'D00000') : null, last: flag('last') ? color('colorLast', 'D00000') : null,
+      weight: Math.min(6, Math.max(0.25, num(group, 'lineWeight') ?? 0.75)) * (4 / 3), rtl: flag('rightToLeft'), min: null, max: null
+    }
+    const lines = children(child(group, 'sparklines'), 'sparkline').map((line) => ({ f: child(line, 'f')?.text.trim() ?? '', ref: parseRef(child(line, 'sqref')?.text.trim()) }))
+    const series = lines.map((line) => lookupRange(wb, line.f).map((v) => (v !== null && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null)))
+    // An axis shared by the group, or set in the file; otherwise each sparkline scales to its own values.
+    const bound = (which: 'min' | 'max') => {
+      const kind = attr(group, `${which}AxisType`) ?? 'individual'
+      if (kind === 'custom') return num(group, which === 'min' ? 'manualMin' : 'manualMax') ?? null
+      if (kind !== 'group') return null
+      const all = series.flat().filter((v): v is number => v !== null)
+      return all.length ? (which === 'min' ? Math.min(...all) : Math.max(...all)) : null
+    }
+    look.min = bound('min')
+    look.max = bound('max')
+    lines.forEach((line, at) => {
+      if (!line.ref || line.ref.r > lastRow || line.ref.c > lastCol) return
+      const key = line.ref.r * 20000 + line.ref.c
+      if (++count > SPARKLINES_PER_SHEET) {
+        out.set(key, '<span class="xl-cellmiss">走勢圖(此工作表的走勢圖太多,請下載原始檔查看)</span>')
+        return
+      }
+      const values = series[at]
+      if (!values.some((v) => v !== null)) {
+        out.set(key, '<span class="xl-cellmiss">走勢圖(找不到資料)</span>')
+        return
+      }
+      const [w, h] = size(line.ref.r, line.ref.c)
+      out.set(key, sparklineSvg(look.rtl ? [...values].reverse() : values, look, w, h))
+    })
+  }
+  return out
+}
+
+type SparkLook = {
+  type: 'line' | 'column' | 'stacked'
+  empty: string
+  series: string
+  negative: string | null
+  axis: string | null
+  markers: string | null
+  high: string | null
+  low: string | null
+  first: string | null
+  last: string | null
+  weight: number
+  rtl: boolean
+  min: number | null
+  max: number | null
+}
+
+function sparklineSvg(raw: (number | null)[], look: SparkLook, w: number, h: number): string {
+  const values = look.empty === 'zero' ? raw.map((v) => v ?? 0) : raw
+  const known = values.filter((v): v is number => v !== null)
+  const n = values.length
+  const pad = 2
+  const W = Math.max(4, w - 2 * pad)
+  const H = Math.max(4, h - 2 * pad)
+  const r2 = (v: number) => round(v, 2)
+  const hi = Math.max(...known)
+  const lo = Math.min(...known)
+  // Which point takes which colour: first, last, high, low and negative points over the series colour, as Excel layers them.
+  const pointColor = (v: number, at: number, base: string) => {
+    let fill = base
+    if (look.negative && v < 0) fill = look.negative
+    if (look.low && v === lo) fill = look.low
+    if (look.high && v === hi) fill = look.high
+    if (look.first && at === values.findIndex((x) => x !== null)) fill = look.first
+    if (look.last && at === n - 1 - [...values].reverse().findIndex((x) => x !== null)) fill = look.last
+    return fill
+  }
+  let body = ''
+  if (look.type === 'stacked') {
+    // Win/loss: every win the same bar up from the middle, every loss the same bar down; a zero draws nothing.
+    const slot = W / n
+    const bar = H / 2 - 1
+    values.forEach((v, at) => {
+      if (!v) return
+      const fill = v < 0 ? (look.negative ?? look.series) : pointColor(v, at, look.series)
+      body += `<rect x="${r2(pad + at * slot + slot * 0.1)}" y="${r2(v > 0 ? pad : pad + H / 2 + 1)}" width="${r2(slot * 0.8)}" height="${r2(bar)}" fill="${fill}"/>`
+    })
+  } else {
+    // Columns stand on zero (or the axis minimum when it is set above zero); a line spans its own range.
+    let min = look.min ?? (look.type === 'column' ? Math.min(0, lo) : lo)
+    let max = look.max ?? (look.type === 'column' ? Math.max(0, hi) : hi)
+    if (max === min) {
+      max += 1
+      min -= 1
+    }
+    const y = (v: number) => pad + ((max - Math.min(max, Math.max(min, v))) / (max - min)) * H
+    const base = y(Math.min(max, Math.max(min, 0)))
+    if (look.axis && min < 0 && max > 0) body += `<line x1="${pad}" y1="${r2(base)}" x2="${r2(pad + W)}" y2="${r2(base)}" stroke="${look.axis}" stroke-width="1"/>`
+    if (look.type === 'column') {
+      const slot = W / n
+      values.forEach((v, at) => {
+        if (v === null) return
+        const top = Math.min(y(v), base)
+        body += `<rect x="${r2(pad + at * slot + slot * 0.1)}" y="${r2(top)}" width="${r2(slot * 0.8)}" height="${r2(Math.max(1, Math.abs(y(v) - base)))}" fill="${pointColor(v, at, look.series)}"/>`
+      })
+    } else {
+      const x = (at: number) => (n > 1 ? pad + (at / (n - 1)) * W : pad + W / 2)
+      // A blank breaks the line ("gap") or is stepped over ("span").
+      const runs: string[][] = [[]]
+      values.forEach((v, at) => {
+        if (v === null) {
+          if (look.empty !== 'span' && runs[runs.length - 1].length) runs.push([])
+          return
+        }
+        runs[runs.length - 1].push(`${r2(x(at))},${r2(y(v))}`)
+      })
+      for (const run of runs) if (run.length > 1) body += `<polyline points="${run.join(' ')}" fill="none" stroke="${look.series}" stroke-width="${r2(look.weight)}" stroke-linejoin="round"/>`
+      values.forEach((v, at) => {
+        if (v === null) return
+        const special = pointColor(v, at, '')
+        const fill = special || look.markers || (runs.every((run) => run.length < 2) ? look.series : '')
+        if (fill) body += `<circle cx="${r2(x(at))}" cy="${r2(y(v))}" r="${r2(Math.max(1.5, look.weight))}" fill="${fill}"/>`
+      })
+    }
+  }
+  return `<svg class="xl-spark" viewBox="0 0 ${r2(w)} ${r2(h)}" preserveAspectRatio="none" aria-hidden="true">${body}</svg>`
+}
+
 type CfResult = { looks: Map<number, CfLook>; skipped: Set<string> }
 
 function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo>, lastRow: number, lastCol: number): CfResult {
@@ -2889,6 +3036,11 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
     }
   } catch {}
 
+  let sparks = new Map<number, string>()
+  try {
+    sparks = sparklines(wb, head, lastRow, lastCol, (r, c) => [colPx(c), rowPx(r)])
+  } catch {}
+
   /** A picture placed in the cell, fitted inside it keeping its shape; or a label saying why not. */
   const inCellPicture = (cell: Cell, r: number, c: number): Shown | null => {
     if (cell.vm === null) return null
@@ -3095,6 +3247,12 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       }
       // An icon-set icon sits at the start of the cell, the value where its alignment puts it.
       if (cf?.icon) inner = `<span class="xl-ico" style="color:#${cf.icon.color}">${escapeHtml(cf.icon.glyph)}</span>${inner}`
+      // A sparkline fills its cell behind whatever value the cell holds.
+      const spark = sparks.get(key)
+      if (spark) {
+        if (!classes.includes('rc')) classes.push('rc')
+        inner = spark + inner
+      }
       const attrs = [
         span && span.cols > 1 ? ` colspan="${span.cols}"` : '',
         span && span.rows > 1 ? ` rowspan="${span.rows}"` : '',
@@ -3248,6 +3406,7 @@ body{display:flex;flex-direction:column;font:14px/1.4 -apple-system,BlinkMacSyst
 .xl-grid td .rot{position:absolute;left:2px;bottom:0;transform-origin:left bottom;white-space:pre}
 .xl-grid td .rot.dn{top:0;bottom:auto;transform-origin:left top}
 .xl-grid td.sh>span{display:inline-block}
+.xl-grid td .xl-spark{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 .xl-grid td img.xl-cellpic{display:block;object-fit:contain;margin:0 auto}
 .xl-grid td .xl-cellmiss{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;color:#666;font:italic 11px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 .xl-grid td .xl-ico{float:inline-start;margin-inline-end:3px}

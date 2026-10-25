@@ -1181,3 +1181,49 @@ describe('workbooks past the zip limits (matrix round)', () => {
     }
   })
 })
+
+describe('sparklines (matrix round)', () => {
+  const X14 = 'xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"'
+  const group = (attrs: string, f: string, sqref: string) =>
+    `<x14:sparklineGroup ${attrs}><x14:colorSeries rgb="FF376092"/><x14:colorNegative rgb="FFD00000"/><x14:colorAxis rgb="FF000000"/><x14:colorMarkers rgb="FF00B050"/><x14:colorHigh rgb="FFFFC000"/><x14:colorLow rgb="FF7030A0"/><x14:sparklines><x14:sparkline><xm:f>${f}</xm:f><xm:sqref>${sqref}</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup>`
+  const row = (r: number, values: number[]) => `<row r="${r}">${values.map((v, at) => `<c r="${colName(at + 2)}${r}"><v>${v}</v></c>`).join('')}</row>`
+  const page = () => {
+    const ext = `<extLst><ext ${X14} uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}"><x14:sparklineGroups ${X14}>` +
+      group('markers="1" high="1"', "'銷售 表'!B2:E2", 'F2') + group('type="column" negative="1" low="1"', "'銷售 表'!B3:E3", 'F3') + group('type="stacked" negative="1"', "'銷售 表'!B4:E4", 'F4') +
+      group('', 'Nowhere!B2:E2', 'F5') + `</x14:sparklineGroups></ext></extLst>`
+    const body = sheet(row(2, [3, 7, 2, 5]) + row(3, [4, -2, 6, -1]) + row(4, [1, -1, 0, 1]) + '<row r="5"><c r="A5" t="inlineStr"><is><t>壞</t></is></c></row>', '', ext)
+    return renderXlsxPage(book([{ name: '銷售 表', body }]), 'b.xlsx', 'b')
+  }
+
+  test('X-1: line, column and win/loss sparklines draw in their cells, in their colours', () => {
+    const html = page()
+    const svgIn = (ref: string) => {
+      const [, col, r] = /^([A-Z]+)(\d+)$/.exec(ref)!
+      const tr = html.split('<tr').find((t) => new RegExp(`^[^>]*><th[^>]*>${r}</th>`).test(t)) ?? ''
+      const cells = tr.split('<td').slice(1)
+      return cells[col.charCodeAt(0) - 65] ?? ''
+    }
+    const line = svgIn('F2')
+    assert.match(line, /<svg class="xl-spark"[^>]*>/)
+    assert.match(line, /<polyline points="[\d.,\s]+" fill="none" stroke="#376092"/)
+    // Markers on every point, the high point in its own colour.
+    assert.equal((line.match(/<circle [^>]*fill="#00B050"/g) ?? []).length, 3)
+    assert.equal((line.match(/<circle [^>]*fill="#FFC000"/g) ?? []).length, 1)
+    const column = svgIn('F3')
+    assert.equal((column.match(/<rect /g) ?? []).length, 4)
+    // The low point's colour goes over the negative colour, as Excel layers them.
+    assert.equal((column.match(/<rect [^>]*fill="#D00000"/g) ?? []).length, 1, 'the other negative bar')
+    assert.equal((column.match(/<rect [^>]*fill="#7030A0"/g) ?? []).length, 1, 'the low bar')
+    const winLoss = svgIn('F4')
+    // Win/loss: one bar per non-zero value, up for a win and down for a loss, all one height.
+    const bars = [...winLoss.matchAll(/<rect x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="([\d.]+)" fill="(#[0-9A-F]+)"/g)].map((m) => ({ y: +m[1], h: +m[2], fill: m[3] }))
+    assert.equal(bars.length, 3)
+    assert.equal(new Set(bars.map((b) => b.h)).size, 1)
+    assert.deepEqual(bars.map((b) => b.fill), ['#376092', '#D00000', '#376092'])
+    assert.ok(bars[1].y > bars[0].y)
+  })
+
+  test('X-1: a sparkline whose data cannot be found says so in its cell', () => {
+    assert.match(page(), /<span class="xl-cellmiss">走勢圖\(找不到資料\)<\/span>/)
+  })
+})
