@@ -215,6 +215,25 @@ describe('number formats', () => {
     assert.equal(formatNumber('[$-zh-TW]aaaa', 45000).text, '星期三')
     assert.equal(formatNumber('yyyy/m/d', -1).text, '########')
   })
+
+  test('X-5: [DBNum1], [DBNum2] and [DBNum3] write the number in Chinese, as Excel does for cheques and ledgers', () => {
+    const cases: [string, number, string][] = [
+      ['[DBNum1][$-404]General', 1234, '一千二百三十四'],
+      ['[DBNum1][$-404]General', 10, '一十'],
+      ['[DBNum1][$-404]General', 1001, '一千〇一'],
+      ['[DBNum1][$-404]General', 120000, '一十二萬'],
+      ['[DBNum1][$-404]General', 12.5, '一十二.五'],
+      ['[DBNum1][$-404]General', -3, '-三'],
+      ['[DBNum2][$-404]General', 5678, '伍仟陸佰柒拾捌'],
+      ['[DBNum2][$-404]#,##0', 1234567, '壹佰貳拾參萬肆仟伍佰陸拾柒'],
+      ['[DBNum2][$-404]0.00', 0.5, '零.伍零'],
+      ['[DBNum3][$-404]General', 1234, '１２３４'],
+      ['[DBNum3][$-404]0.0', 12.34, '１２.３']
+    ]
+    for (const [code, value, text] of cases) assert.equal(formatNumber(code, value).text, text, `${code} ${value}`)
+    // In a date the year is read digit by digit, the month and day as numbers.
+    assert.equal(formatNumber('[DBNum1][$-404]yyyy"年"m"月"d"日"', 46027).text, '二〇二六年一月五日')
+  })
 })
 
 describe('reading Excel workbooks', () => {
@@ -1075,5 +1094,30 @@ describe('conditional formats beyond comparisons and scales', () => {
     assert.match(cell('A1'), /<span class="xl-ico" style="color:#D9363E">⚑<\/span>1</)
     assert.doesNotMatch(cell('A2'), /xl-ico/)
     assert.match(cell('A3'), /<span class="xl-ico" style="color:#F2B705">★<\/span>9</)
+  })
+})
+
+describe('numbers too wide for their column (matrix round)', () => {
+  test('X-2: in a browser, dates of one format in one column all shrink or all show #, whatever their digits', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+    const styles = `<styleSheet ${NS}><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs count="2"><xf/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>`
+    // 2026-01-01, 2026-01-11, 2026-01-15, 2026-08-28, 2026-12-31 …, in a column of the default width (as openpyxl
+    // leaves it): the 1s are narrow in a font with proportional digits.
+    const serials = [46023, 46033, 46037, 46262, 46387, 46100, 46200, 46300]
+    // Column B holds numbers that fit however narrow their 1s are: they keep their size.
+    const fits = [1, 31000, 11111]
+    const body = sheet(serials.map((v, at) => `<row r="${at + 1}"><c r="A${at + 1}" s="1"><v>${v}</v></c>${at < fits.length ? `<c r="B${at + 1}"><v>${fits[at]}</v></c>` : ''}</row>`).join(''))
+    const browser = await chromium.launch({ executablePath: chromiumPath })
+    try {
+      const page = await browser.newPage()
+      await page.setContent(renderXlsxPage(book([{ name: 's', body }], { styles }), 'b.xlsx', 'b'))
+      const look = (column: number) =>
+        page.evaluate((column) => [...document.querySelectorAll('tbody tr')].map((tr) => tr.children[column] as HTMLElement).filter((td) => td?.classList.contains('n')).map((td) => (/^#+$/.test(td.textContent ?? '') ? '#' : td.style.fontSize || 'as set')), column)
+      const shown = await look(1)
+      assert.equal(shown.length, serials.length)
+      assert.deepEqual(await look(2), fits.map(() => 'as set'))
+      assert.equal(new Set(shown).size, 1, shown.join(' | '))
+    } finally {
+      await browser.close()
+    }
   })
 })

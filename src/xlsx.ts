@@ -9,6 +9,7 @@ import { posix } from 'node:path'
 import { escapeHtml, injectBridge } from './content-render.ts'
 import { chartTitle, renderChart, type ChartResult } from './office-chart.ts'
 import { fillShade, presetGeometry, shapeGeometry } from './office-geometry.ts'
+import { chineseCount, CN_DIGITS, CN_LEGAL } from './office-numbers.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, tagAttrs, type XmlNode } from './xml.ts'
 import { ZipReader } from './zip.ts'
@@ -370,7 +371,8 @@ type Tok =
   | { k: 'el'; v: string }
   | { k: 'sub'; n: number }
 
-type Section = { toks: Tok[]; color: string | null; cond: [string, number] | null; date: boolean; text: boolean; locale: string }
+/** `dbnum`: [DBNum1]–[DBNum3], the number written in Chinese (counted, legal characters, or full-width digits); 0 for none. */
+type Section = { toks: Tok[]; color: string | null; cond: [string, number] | null; date: boolean; text: boolean; locale: string; dbnum: number }
 
 const NAMED_COLORS: Record<string, string> = {
   black: '000000', blue: '0000FF', cyan: '00FFFF', green: '00FF00', magenta: 'FF00FF', red: 'FF0000', white: 'FFFFFF', yellow: 'FFFF00'
@@ -408,6 +410,7 @@ function compileSection(source: string, palette: string[]): Section {
   let color: string | null = null
   let cond: [string, number] | null = null
   let locale = ''
+  let dbnum = 0
   const lit = (v: string) => toks.push({ k: 'lit', v })
   for (let i = 0; i < source.length; ) {
     const ch = source[i]
@@ -439,6 +442,7 @@ function compileSection(source: string, palette: string[]): Section {
       else if (NAMED_COLORS[lower]) color = NAMED_COLORS[lower]
       else if ((match = /^colou?r\s*(\d+)$/i.exec(body))) color = palette[Number(match[1]) + 7] ?? null
       else if ((match = /^(<=|>=|<>|<|>|=)\s*(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)$/i.exec(body))) cond = [match[1], Number(match[2])]
+      else if ((match = /^dbnum([1-4])$/i.exec(body))) dbnum = Number(match[1])
       else if (body.startsWith('$')) {
         const inner = body.slice(1)
         const dash = inner.indexOf('-')
@@ -531,7 +535,7 @@ function compileSection(source: string, palette: string[]): Section {
   } else {
     for (const tok of toks) out.push(tok.k === 'dt' ? { k: 'lit', v: tok.v } : tok.k === 'ampm' ? { k: 'lit', v: tok.v } : tok)
   }
-  return { toks: out, color, cond, date, text: out.some((tok) => tok.k === 'at'), locale }
+  return { toks: out, color, cond, date, text: out.some((tok) => tok.k === 'at'), locale, dbnum }
 }
 
 type Format = { sections: Section[]; date: boolean }
@@ -862,6 +866,27 @@ function formatDateSection(section: Section, serial: number, date1904: boolean):
 
 type Formatted = { text: string; color: string | null }
 
+const FULL_WIDTH_DIGITS = '０１２３４５６７８９'
+
+/**
+ * The digits of a formatted number as [DBNum1] (一千二百三十四), [DBNum2] (壹仟貳佰參拾肆) or [DBNum3] (１２３４) write
+ * them. A whole number is counted with its units (10 is 一十, as Excel writes it) and loses its thousands separators;
+ * decimals, and the year of a date, are read digit by digit.
+ */
+function chineseDigits(text: string, dbnum: number, date: boolean): string {
+  if (!dbnum) return text
+  if (dbnum >= 3) return text.replace(/\d/g, (d) => FULL_WIDTH_DIGITS[Number(d)])
+  const legal = dbnum === 2
+  const digits = legal ? CN_LEGAL : CN_DIGITS
+  const units = legal ? ['', '拾', '佰', '仟'] : ['', '十', '百', '千']
+  const each = (run: string) => run.replace(/\d/g, (d) => digits[Number(d)])
+  return text.replace(/(\d{1,3}(?:,\d{3})+|\d+)((?:\.\d+)?)/g, (_, whole: string, fraction: string) => {
+    const plain = whole.replace(/,/g, '')
+    const counted = (date && plain.length === 4) || plain.length > 8 ? each(plain) : chineseCount(Number(plain), digits, units, '萬', date)
+    return counted + (fraction ? `.${each(fraction.slice(1))}` : '')
+  })
+}
+
 /** A number, shown the way a number format code says. */
 export function formatNumber(code: string, value: number, date1904 = false, palette: string[] = DEFAULT_INDEXED): Formatted {
   const format = compileFormat(code, palette)
@@ -897,13 +922,13 @@ export function formatNumber(code: string, value: number, date1904 = false, pale
     // A negative duration keeps its sign; a negative date cannot be shown.
     if (value < 0 && section.toks.some((tok) => tok.k === 'el')) return { text: `-${formatDateSection(section, -value, date1904)}`, color: section.color }
     if (value < 0) return { text: '#'.repeat(8), color: section.color }
-    return { text: formatDateSection(section, value, date1904), color: section.color }
+    return { text: chineseDigits(formatDateSection(section, value, date1904), section.dbnum, true), color: section.color }
   }
   if (section.toks.length === 0) return { text: '', color: section.color }
   const body = formatNumberSection(section.toks, shown)
   // A negative number that rounds to zero in a single-section format shows no sign, as in Excel.
   const allZero = !/[1-9]/.test(body)
-  return { text: (sign && !allZero ? sign : '') + body, color: section.color }
+  return { text: (sign && !allZero ? sign : '') + chineseDigits(body, section.dbnum, false), color: section.color }
 }
 
 /** Text through a number format: the text section if there is one, else the text as is. */
@@ -3232,6 +3257,8 @@ a.xl-link{color:inherit;cursor:pointer}
 `
 
 /**
+ * A number too wide for its column shrinks a little or shows #, judged as Excel judges it: every digit as wide as
+ * 0 (Office fonts draw digits one width), so values of one format in one column all fit or all do not.
  * Tabs live in the hash (#sheet-2) so the viewer's place report keeps the reader's sheet; the viewer
  * accepts only letters, digits, '-' and '_' there. Panels use other ids, so no hash scrolls the page.
  */
@@ -3239,7 +3266,8 @@ const PAGE_SCRIPT = `(()=>{const tabs=[...document.querySelectorAll('.xl-tab')];
 function fit(root){if(root.dataset.fitted)return;root.dataset.fitted='1';const writes=[];
 for(const td of root.querySelectorAll('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4,w=s.offsetWidth;if(room>0&&w>room)writes.push([s,(parseFloat(getComputedStyle(s).fontSize)*room/w).toFixed(2)+'px'])}
 const ctx=document.createElement('canvas').getContext('2d'),hash={};
-for(const td of root.querySelectorAll('td.n:not(.sh)')){const sw=td.scrollWidth,cw=td.clientWidth;if(sw<=cw+1)continue;const k=cw/sw,cs=getComputedStyle(td);if(k>=0.7){writes.push([td,(parseFloat(cs.fontSize)*k*0.97).toFixed(2)+'px'])}else if(!td.querySelector('*')){const font=cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;if(!(font in hash)){ctx.font=font;hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
+let last='';const use=f=>{if(f!==last){ctx.font=f;last=f}};
+for(const td of root.querySelectorAll('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const cs=getComputedStyle(td),font=cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight)}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){writes.push([td,(parseFloat(cs.fontSize)*k*0.97).toFixed(2)+'px'])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
 for(const [el,size,text] of writes){if(size)el.style.fontSize=size;else{el.title=el.textContent;el.textContent=text}}}
 function show(n){if(!(n>=1&&n<=sheets.length))n=first;sheets.forEach((s,i)=>{s.hidden=i!==n-1});tabs.forEach((t,i)=>{t.setAttribute('aria-selected',String(i===n-1));t.tabIndex=i===n-1?0:-1});const tab=tabs[n-1];if(tab){const bar=tab.parentElement;const l=tab.offsetLeft-bar.offsetLeft;if(l<bar.scrollLeft||l+tab.offsetWidth>bar.scrollLeft+bar.clientWidth)bar.scrollLeft=l-16}fit(sheets[n-1])}
 function fromHash(){const m=/^#sheet-(\\d+)$/.exec(location.hash);show(m?Number(m[1]):first)}
