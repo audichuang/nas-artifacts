@@ -65,7 +65,7 @@ describe('Office files next to pages', () => {
   test('the entry error names every kind of page', () => {
     assert.throws(
       () => store.publish({ title: 'X', entry: 'a.png', files: { 'a.png': { content: Buffer.from('png') } } }),
-      /\.html, \.md, \.pptx, \.docx or \.xlsx/
+      /\.html, \.htm, \.md.*\.pptx, \.docx, \.xlsx/
     )
   })
 

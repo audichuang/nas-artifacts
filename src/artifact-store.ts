@@ -279,7 +279,7 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
       throw new ArtifactError(400, 'invalid_entry', `Entry "${requested}" is not one of the published files.`)
     }
     if (!isPagePath(entry)) {
-      throw new ArtifactError(400, 'invalid_entry', 'The entry must be an .html, .md, .pptx, .docx or .xlsx file.')
+      throw new ArtifactError(400, 'invalid_entry', 'The entry must be a page: .html, .htm, .md, or a PowerPoint, Word or Excel file (.pptx, .docx, .xlsx and their macro, show, template and old binary forms).')
     }
     return entry
   }
