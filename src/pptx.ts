@@ -2,6 +2,7 @@ import { posix } from 'node:path'
 import { escapeHtml } from './content-render.ts'
 import { chartTitle, renderChart } from './office-chart.ts'
 import { adjustValues, customGeometry, fillShade, presetGeometry, type Geometry } from './office-geometry.ts'
+import { chineseCounting, circled } from './office-numbers.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { deckPage, type DeckAssets } from './slides.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, XmlError, type XmlNode } from './xml.ts'
@@ -978,11 +979,8 @@ function autoNumber(type: string, n: number): string {
     while (value > 0) { out = String.fromCharCode(97 + ((value - 1) % 26)) + out; value = Math.floor((value - 1) / 26) }
     return out
   }
-  const CJK = '〇一二三四五六七八九十'
-  const cjk = (value: number) => (value <= 10 ? CJK[value] : value < 20 ? `十${CJK[value - 10]}` : String(value))
-  const circled = (value: number) => (value >= 1 && value <= 20 ? String.fromCodePoint(0x2460 + value - 1) : String(value))
   const base = type.startsWith('alphaLc') ? alpha(n) : type.startsWith('alphaUc') ? alpha(n).toUpperCase() : type.startsWith('romanLc') ? roman(n)
-    : type.startsWith('romanUc') ? roman(n).toUpperCase() : type.startsWith('circleNum') ? circled(n) : /ea1Cht|ea1Chs|ea1Jpn|taiwan|chinese/i.test(type) ? cjk(n) : String(n)
+    : type.startsWith('romanUc') ? roman(n).toUpperCase() : type.startsWith('circleNum') ? circled(n) : /ea1Cht|ea1Chs|ea1Jpn|taiwan|chinese/i.test(type) ? chineseCounting(n) : String(n)
   if (type.endsWith('ParenBoth')) return `(${base})`
   if (type.endsWith('ParenR')) return `${base})`
   if (type.endsWith('Period')) return `${base}.`

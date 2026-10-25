@@ -200,6 +200,13 @@ describe('crafted and unusual PowerPoint files', () => {
     assert.match(slide.html, /class="pp-bu"[^>]*>[^<]{1,16}<\/span>[^]*第一點/)
   })
 
+  test('W-4 (PowerPoint): Chinese and circled auto-numbers keep counting past twenty, as Word lists do', () => {
+    const list = (type: string, start: number) => `<a:p><a:pPr><a:buAutoNum type="${type}" startAt="${start}"/></a:pPr><a:r><a:t>項目</a:t></a:r></a:p>`
+    const [slide] = readPptx(deckOf([shape(xfrm(), list('ea1ChtPeriod', 25) + list('circleNumDbPlain', 30) + list('ea1JpnChsDbPeriod', 101))]), '').slides
+    const labels = [...slide.html.matchAll(/class="pp-bu"[^>]*>([^<]*)<\/span>/g)].map((m) => m[1].trim())
+    assert.deepEqual(labels, ['二十五.', '㉚', '一百〇一.'])
+  })
+
   test('a SmartArt drawing that leads back to itself draws once, as a labelled box inside', () => {
     const smartArt = frame('diagram', '<dgm:relIds xmlns:dgm="d" r:dm="dm" r:lo="lo" r:qs="qs" r:cs="cs"/>')
     const parts = {
