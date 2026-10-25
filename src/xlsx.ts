@@ -8,12 +8,14 @@
 import { posix } from 'node:path'
 import { escapeHtml, injectBridge } from './content-render.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
-import { attr, child, children, local, num, parseXml, path, relAttr, type XmlNode } from './xml.ts'
+import { attr, child, children, local, num, parseXml, path, relAttr, tagAttrs, type XmlNode } from './xml.ts'
 import { ZipReader } from './zip.ts'
 
 /** How much of a workbook one page draws. Past these the page says what was cut. */
 export const XLSX_LIMITS = {
-  rows: 2000, cols: 200, sheetCells: 100_000, workbookCells: 250_000, drawings: 300, textChars: 300_000, chartPoints: 2000,
+  rows: 2000, cols: 200, sheetCells: 100_000, workbookCells: 600_000, drawings: 300, textChars: 300_000, chartPoints: 2000,
+  /** Every sheet draws at least its first this many rows, however the workbook budget was shared. */
+  floorRows: 200,
   /** Excel's own limit for one cell, and the text one page may carry in all. */
   cellChars: 32_767, pageChars: 8_000_000
 }
@@ -1119,10 +1121,12 @@ class SharedStrings {
 // ---------------------------------------------------------------------------------------------
 // Sheets
 
-type Cell = { c: number; s: number | null; t: string; v: string | null; f: string | null; is: XmlNode | null }
+/** `vm`: the cell's value metadata (1-based), which is how Excel 365 places a picture in a cell. */
+type Cell = { c: number; s: number | null; t: string; v: string | null; f: string | null; is: XmlNode | null; vm: number | null }
 type RowInfo = { ht?: number; hidden: boolean; s?: number; cells: Map<number, Cell> }
 
-type ScannedSheet = { head: XmlNode; rows: Map<number, RowInfo>; maxRow: number; maxCol: number; totalRows: number; totalCols: number }
+/** `cut`: the part was too large to read whole, so only its first rows were read and what follows sheetData is lost. */
+type ScannedSheet = { head: XmlNode; rows: Map<number, RowInfo>; maxRow: number; maxCol: number; totalRows: number; totalCols: number; cut: boolean; exact: boolean }
 
 const colIndex = (letters: string): number => {
   let n = 0
@@ -1151,26 +1155,45 @@ const parseRange = (ref: string | undefined): Range | null => {
   return { r1: Math.min(start.r, end.r), c1: Math.min(start.c, end.c), r2: Math.max(start.r, end.r), c2: Math.max(start.c, end.c) }
 }
 
+/** The `r` of a raw `<row …>` start tag, quoted either way and with any space around `=`. */
+const rowNumber = (tag: string): number | null => {
+  const value = tagAttrs(tag).r
+  return value !== undefined && /^\d{1,7}$/.test(value) ? Number(value) : null
+}
+
+/** The number of the last row in a stretch of sheetData, looking back from its end. */
+function lastRowNumber(body: string, prefix: string): number | null {
+  const token = `<${prefix}row`
+  for (let at = body.lastIndexOf(token); at >= 0; at = at ? body.lastIndexOf(token, at - 1) : -1) {
+    if (!/[\s>/]/.test(body[at + token.length] ?? '')) continue
+    const close = body.indexOf('>', at)
+    return close < 0 ? null : rowNumber(body.slice(at, close + 1))
+  }
+  return null
+}
+
 /**
  * A worksheet is read without building a tree for all of it: the parts around `<sheetData>` are
  * parsed whole, rows one at a time, and reading stops at the row limit.
  */
-function scanSheet(source: string, rowLimit: number, colLimit: number, cellLimit = XLSX_LIMITS.sheetCells): ScannedSheet {
-  const open = /<((?:[\w.-]+:)?)sheetData(?:\s[^>]*)?(\/?)>/.exec(source)
+function scanSheet(source: string, rowLimit: number, colLimit: number, cellLimit = XLSX_LIMITS.sheetCells, cut = false): ScannedSheet {
+  // `<sheetData/>`, `<sheetData />` and `<x:sheetData>` alike; a slash just before `>` closes it.
+  const open = /<((?:[\w.-]+:)?)sheetData(?=[\s/>])[^>]*>/.exec(source)
   const rows = new Map<number, RowInfo>()
   let maxRow = 0
   let maxCol = 0
   let totalRows = 0
   let totalCols = 0
-  let truncated = false
+  let truncated = cut
   let head: XmlNode
-  if (!open) head = parseXml(source)
-  else if (open[2] === '/') head = parseXml(source.slice(0, open.index) + source.slice(open.index + open[0].length))
+  if (!open) head = parseXml(source, undefined, cut)
+  else if (open[0].endsWith('/>')) head = parseXml(source.slice(0, open.index) + source.slice(open.index + open[0].length))
   else {
     const closeTag = `</${open[1]}sheetData>`
-    const close = source.indexOf(closeTag, open.index)
-    if (close < 0) throw new Error('工作表的 sheetData 沒有結束')
-    head = parseXml(source.slice(0, open.index) + source.slice(close + closeTag.length))
+    const found = source.indexOf(closeTag, open.index)
+    if (found < 0 && !cut) throw new Error('工作表的 sheetData 沒有結束')
+    const close = found < 0 ? source.length : found
+    head = parseXml(source.slice(0, open.index) + (found < 0 ? '' : source.slice(close + closeTag.length)), undefined, cut)
     const body = source.slice(open.index + open[0].length, close)
     const rowPattern = /<((?:[\w.-]+:)?)row[\s>/]/g
     let previous = 0
@@ -1180,21 +1203,22 @@ function scanSheet(source: string, rowLimit: number, colLimit: number, cellLimit
       let end = tagEnd + 1
       if (body[tagEnd - 1] !== '/') {
         const rowClose = `</${match[1]}row>`
-        const found = body.indexOf(rowClose, tagEnd)
-        if (found < 0) throw new Error('工作表的列沒有結束')
-        end = found + rowClose.length
+        const rowEnd = body.indexOf(rowClose, tagEnd)
+        // In a part read only in part, the row the read stopped in is left out.
+        if (rowEnd < 0 && cut) break
+        if (rowEnd < 0) throw new Error('工作表的列沒有結束')
+        end = rowEnd + rowClose.length
       }
       rowPattern.lastIndex = end
-      const rAttr = /\sr="(\d+)"/.exec(body.slice(match.index, tagEnd))
-      const r = rAttr ? Number(rAttr[1]) : previous + 1
+      const rAttr = rowNumber(body.slice(match.index, tagEnd + 1))
+      const r = rAttr ?? previous + 1
       previous = r
       // Past the row limit, or once the grid drawn so far would use up the cell budget, stop reading.
       if (r > rowLimit || (r - 1) * Math.max(10, Math.min(colLimit, maxCol + 1)) >= cellLimit) {
         truncated = true
         totalRows = Math.max(totalRows, r)
-        const last = body.lastIndexOf(`<${match[1]}row `)
-        const lastR = last >= 0 ? /\sr="(\d+)"/.exec(body.slice(last, body.indexOf('>', last))) : null
-        if (lastR) totalRows = Math.max(totalRows, Number(lastR[1]))
+        const lastR = lastRowNumber(body, match[1])
+        if (lastR) totalRows = Math.max(totalRows, lastR)
         break
       }
       const row = parseXml(body.slice(match.index, end))
@@ -1215,7 +1239,8 @@ function scanSheet(source: string, rowLimit: number, colLimit: number, cellLimit
           t: attr(cellNode, 't') ?? 'n',
           v: child(cellNode, 'v')?.text ?? null,
           f: f ? f.text : null,
-          is: child(cellNode, 'is')
+          is: child(cellNode, 'is'),
+          vm: num(cellNode, 'vm') ?? null
         }
         info.cells.set(col, cell)
         maxCol = Math.max(maxCol, col)
@@ -1231,7 +1256,8 @@ function scanSheet(source: string, rowLimit: number, colLimit: number, cellLimit
     totalRows = Math.max(totalRows, Math.min(dimension.r2, 1_048_576))
     totalCols = Math.max(totalCols, Math.min(dimension.c2, 16_384))
   }
-  return { head, rows, maxRow, maxCol, totalRows, totalCols }
+  // A cut part with no declared extent only says how many rows there are at least.
+  return { head, rows, maxRow, maxCol, totalRows, totalCols, cut, exact: !cut || Boolean(dimension) }
 }
 
 type SheetEntry = { name: string; part: string | null; kind: string; state: string; tab: number }
@@ -1252,15 +1278,83 @@ type Workbook = {
   warnings: string[]
   media: (part: string) => string
   scanned: Map<string, ScannedSheet>
+  /** Pictures placed in cells, by value-metadata index; read when a sheet first asks. */
+  cellPictures?: (vm: number) => CellPicture | null
+}
+
+/** A picture placed in a cell (Excel 365): a part of the file, or a picture from the web. */
+type CellPicture = { target: string; alt: string } | { web: true; alt: string }
+
+/**
+ * The chain Excel writes for a picture in a cell: the cell's vm → metadata.xml valueMetadata →
+ * futureMetadata XLRICHVALUE → a rich value (rdrichvalue.xml) whose structure names the image key →
+ * richValueRel.xml → that part's relationship → the image part.
+ */
+function readCellPictures(wb: Workbook): (vm: number) => CellPicture | null {
+  const partOf = (type: string, fallback: string) => {
+    const rel = wb.pkg.relOfType(wb.part, type)
+    return rel && !rel.external ? rel.target : fallback
+  }
+  const xml = (part: string) => {
+    try {
+      return wb.pkg.xml(part)
+    } catch {
+      return null
+    }
+  }
+  const metadata = xml(partOf('sheetMetadata', 'xl/metadata.xml'))
+  if (!metadata) return () => null
+  const types = children(child(metadata, 'metadataTypes'), 'metadataType').map((node) => attr(node, 'name') ?? '')
+  const future = children(metadata, 'futureMetadata').find((node) => attr(node, 'name') === 'XLRICHVALUE')
+  const futureBlocks = children(future, 'bk')
+  const valueBlocks = children(child(metadata, 'valueMetadata'), 'bk')
+  const values = children(xml(partOf('rdRichValue', 'xl/richData/rdrichvalue.xml')), 'rv')
+  const structures = children(xml(partOf('rdRichValueStructure', 'xl/richData/rdrichvaluestructure.xml')), 's')
+  const relPart = partOf('richValueRel', 'xl/richData/richValueRel.xml')
+  const relIds = children(xml(relPart), 'rel').map((node) => relAttr(node, 'id'))
+  return (vm) => {
+    const rc = child(valueBlocks[vm - 1], 'rc')
+    const type = types[(num(rc, 't') ?? 0) - 1]
+    if (type !== 'XLRICHVALUE') return null
+    const block = futureBlocks[num(rc, 'v') ?? -1]
+    const rvb = block ? findDeep(block, 'rvb') : null
+    const value = values[num(rvb, 'i') ?? -1]
+    if (!value) return null
+    const keys = children(structures[num(value, 's') ?? -1], 'k').map((key) => attr(key, 'n') ?? '')
+    const fields = children(value, 'v').map((field) => field.text)
+    const field = (name: string) => {
+      const at = keys.indexOf(name)
+      return at >= 0 ? fields[at] : undefined
+    }
+    const alt = (field('Text') ?? '').slice(0, 500)
+    if (field('_rvRel:WebImageIdentifier') !== undefined) return { web: true, alt }
+    const local = field('_rvRel:LocalImageIdentifier') ?? (keys.length ? undefined : fields[0])
+    if (local === undefined) return null
+    const rel = wb.pkg.rel(relPart, relIds[Number(local)])
+    if (!rel) return null
+    if (rel.external) return { web: true, alt }
+    return { target: rel.target, alt }
+  }
+}
+
+function cellPicture(wb: Workbook, cell: Cell): CellPicture | null {
+  if (cell.vm === null) return null
+  wb.cellPictures ??= readCellPictures(wb)
+  try {
+    return wb.cellPictures(cell.vm)
+  } catch {
+    return null
+  }
 }
 
 /** A worksheet's cells, read once per page however many charts point at it. */
 function scannedSheet(wb: Workbook, part: string): ScannedSheet {
   let sheet = wb.scanned.get(part)
   if (!sheet) {
-    const source = wb.pkg.text(part)
-    if (source === null) throw new Error(`找不到 ${part}`)
-    sheet = scanSheet(source, XLSX_LIMITS.rows, XLSX_LIMITS.cols)
+    // A sheet too large to inflate whole still shows its first rows: only the start of the part is read.
+    const read = wb.pkg.zip.readPrefix(wb.pkg.stored(part))
+    if (read === null) throw new Error(`找不到 ${part}`)
+    sheet = scanSheet(read.data.toString('utf8'), XLSX_LIMITS.rows, XLSX_LIMITS.cols, XLSX_LIMITS.sheetCells, read.cut)
     wb.scanned.set(part, sheet)
   }
   return sheet
@@ -1331,12 +1425,20 @@ function openWorkbook(data: Buffer, mediaBase: string): Workbook {
   return { pkg, part, sheets, date1904, recalc, activeTab, theme, styles, strings, warnings, media: (target) => officeMediaUrl(mediaBase, target), scanned: new Map() }
 }
 
-const reason = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 300)
+/**
+ * What went wrong, for the page and the error log. The reader's own errors are already in
+ * Traditional Chinese; a runtime error (a file shaped in a way the code did not expect) is named so.
+ */
+const reason = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error)
+  const runtime = error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError || error instanceof ReferenceError
+  return (runtime ? `檔案內容不符預期(${message})` : message).slice(0, 300)
+}
 
 // ---------------------------------------------------------------------------------------------
 // Cell values
 
-type Shown = { text: string; html: string; color: string | null; kind: 'num' | 'text' | 'bool' | 'err' | 'formula' | 'empty' }
+type Shown = { text: string; html: string; color: string | null; kind: 'num' | 'text' | 'bool' | 'err' | 'formula' | 'empty' | 'picture' }
 
 function formatCode(wb: Workbook, xf: Xf | undefined): string {
   const id = xf?.fmt ?? 0
@@ -1490,14 +1592,390 @@ function tableLook(wb: Workbook, name: string, kind: 'header' | 'total' | 'band'
 }
 
 // ---------------------------------------------------------------------------------------------
-// Conditional formatting: the rules a value alone decides (comparisons, colour scales, data bars)
+// Conditional formatting: what each rule decides from the values on the sheet
 
-type CfLook = { fill?: string; color?: string; bold?: boolean; italic?: boolean; bar?: string }
+type CfLook = { fill?: string; color?: string; bold?: boolean; italic?: boolean; bar?: string; icon?: { glyph: string; color: string }; hideValue?: boolean }
 
 const CF_CELLS = 60_000
 
-function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo>, lastRow: number, lastCol: number): Map<number, CfLook> {
+/** What a formula rule sees in a cell, and what it may produce. */
+type FValue = number | string | boolean | null | FError
+
+class FError {
+  readonly code: string
+  constructor(code: string) {
+    this.code = code
+  }
+}
+
+/** A formula this evaluator does not cover (a range, another sheet, a function it lacks): the rule is left out and said so. */
+class Unsupported extends Error {}
+
+type FNode =
+  | { k: 'lit'; v: FValue }
+  | { k: 'ref'; r: number; c: number; absR: boolean; absC: boolean }
+  | { k: 'un'; op: string; a: FNode }
+  | { k: 'bin'; op: string; a: FNode; b: FNode }
+  | { k: 'fn'; name: string; args: FNode[] }
+
+type FToken = { t: 'num' | 'str' | 'ref' | 'fn' | 'bool' | 'op'; v: string }
+
+const FORMULA_TOKEN = /\s+|(\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)|"((?:[^"]|"")*)"|(\$?[A-Za-z]{1,3}\$?\d{1,7})(?![\w(!:])|([A-Za-z_][\w.]*)(?=\s*\()|(TRUE|FALSE)(?![\w(!:])|(<>|<=|>=|[-+*/^&=<>(),%])/y
+
+/** Parses the formula of a conditional format: the small part of Excel's language these rules use. */
+function compileFormula(source: string): FNode {
+  const tokens: FToken[] = []
+  FORMULA_TOKEN.lastIndex = 0
+  let at = source.startsWith('=') ? 1 : 0
+  while (at < source.length) {
+    FORMULA_TOKEN.lastIndex = at
+    const m = FORMULA_TOKEN.exec(source)
+    if (!m || m[0] === '') throw new Unsupported()
+    at = FORMULA_TOKEN.lastIndex
+    if (m[1] !== undefined) tokens.push({ t: 'num', v: m[1] })
+    else if (m[2] !== undefined) tokens.push({ t: 'str', v: m[2].replace(/""/g, '"') })
+    else if (m[3] !== undefined) tokens.push({ t: 'ref', v: m[3] })
+    else if (m[4] !== undefined) tokens.push({ t: 'fn', v: m[4].toUpperCase() })
+    else if (m[5] !== undefined) tokens.push({ t: 'bool', v: m[5].toUpperCase() })
+    else if (m[6] !== undefined) tokens.push({ t: 'op', v: m[6] })
+    if (tokens.length > 500) throw new Unsupported()
+  }
+  let pos = 0
+  const isOp = (...ops: string[]) => tokens[pos]?.t === 'op' && ops.includes(tokens[pos].v)
+  const expect = (op: string) => {
+    if (!isOp(op)) throw new Unsupported()
+    pos++
+  }
+  const binary = (next: () => FNode, ...ops: string[]) => (): FNode => {
+    let a = next()
+    while (isOp(...ops)) {
+      const op = tokens[pos++].v
+      a = { k: 'bin', op, a, b: next() }
+    }
+    return a
+  }
+  const primary = (): FNode => {
+    const token = tokens[pos++]
+    if (!token) throw new Unsupported()
+    if (token.t === 'num') return { k: 'lit', v: Number(token.v) }
+    if (token.t === 'str') return { k: 'lit', v: token.v }
+    if (token.t === 'bool') return { k: 'lit', v: token.v === 'TRUE' }
+    if (token.t === 'ref') {
+      const m = /^(\$?)([A-Za-z]{1,3})(\$?)(\d+)$/.exec(token.v)!
+      return { k: 'ref', c: colIndex(m[2]), r: Number(m[4]), absC: m[1] === '$', absR: m[3] === '$' }
+    }
+    if (token.t === 'fn') {
+      expect('(')
+      const args: FNode[] = []
+      if (!isOp(')')) {
+        args.push(compare())
+        while (isOp(',')) {
+          pos++
+          args.push(compare())
+        }
+      }
+      expect(')')
+      return { k: 'fn', name: token.v, args }
+    }
+    if (token.v === '(') {
+      const inner = compare()
+      expect(')')
+      return inner
+    }
+    throw new Unsupported()
+  }
+  const percent = (): FNode => {
+    let a = primary()
+    while (isOp('%')) {
+      pos++
+      a = { k: 'bin', op: '/', a, b: { k: 'lit', v: 100 } }
+    }
+    return a
+  }
+  const unary = (): FNode => {
+    if (isOp('-', '+')) {
+      const op = tokens[pos++].v
+      return { k: 'un', op, a: unary() }
+    }
+    return percent()
+  }
+  const power = binary(unary, '^')
+  const product = binary(power, '*', '/')
+  const sum = binary(product, '+', '-')
+  const concat = binary(sum, '&')
+  const compare: () => FNode = binary(concat, '=', '<>', '<', '>', '<=', '>=')
+  const tree = compare()
+  if (pos !== tokens.length) throw new Unsupported()
+  return tree
+}
+
+const fNumber = (value: FValue): number => {
+  if (value instanceof FError) throw value
+  if (value === null) return 0
+  if (typeof value === 'boolean') return value ? 1 : 0
+  if (typeof value === 'number') return value
+  const trimmed = value.trim()
+  const parsed = Number(trimmed)
+  if (trimmed === '' || !Number.isFinite(parsed)) throw new FError('#VALUE!')
+  return parsed
+}
+
+const fText = (value: FValue): string => {
+  if (value instanceof FError) throw value
+  if (value === null) return ''
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
+  return typeof value === 'number' ? formatGeneral(value) : value
+}
+
+const fBool = (value: FValue): boolean => {
+  if (value instanceof FError) throw value
+  if (value === null) return false
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  const upper = value.toUpperCase()
+  if (upper === 'TRUE' || upper === 'FALSE') return upper === 'TRUE'
+  throw new FError('#VALUE!')
+}
+
+/** Excel's order across kinds: numbers, then text (ignoring case), then logicals; an empty cell is 0, "" or FALSE. */
+function fCompare(a: FValue, b: FValue): number {
+  if (a instanceof FError) throw a
+  if (b instanceof FError) throw b
+  const blank = (other: FValue): FValue => (typeof other === 'string' ? '' : typeof other === 'boolean' ? false : 0)
+  const x = a === null ? blank(b) : a
+  const y = b === null ? blank(a) : b
+  const rank = (v: FValue) => (typeof v === 'number' ? 0 : typeof v === 'string' ? 1 : 2)
+  if (rank(x) !== rank(y)) return rank(x) - rank(y)
+  if (typeof x === 'string') {
+    const [p, q] = [x.toLowerCase(), (y as string).toLowerCase()]
+    return p < q ? -1 : p > q ? 1 : 0
+  }
+  const [p, q] = [Number(x), Number(y)]
+  return p < q ? -1 : p > q ? 1 : 0
+}
+
+type FContext = { r: number; c: number; base: { r: number; c: number }; at: (r: number, c: number) => FValue }
+
+function evaluateFormula(node: FNode, ctx: FContext): FValue {
+  const ev = (n: FNode) => evaluateFormula(n, ctx)
+  const place = (n: Extract<FNode, { k: 'ref' }>) => ({ r: n.absR ? n.r : n.r + ctx.r - ctx.base.r, c: n.absC ? n.c : n.c + ctx.c - ctx.base.c })
+  switch (node.k) {
+    case 'lit':
+      return node.v
+    case 'ref': {
+      const { r, c } = place(node)
+      return r < 1 || c < 1 ? new FError('#REF!') : ctx.at(r, c)
+    }
+    case 'un': {
+      const value = fNumber(ev(node.a))
+      return node.op === '-' ? -value : value
+    }
+    case 'bin': {
+      const a = ev(node.a)
+      const b = ev(node.b)
+      switch (node.op) {
+        case '&':
+          return fText(a) + fText(b)
+        case '+':
+          return fNumber(a) + fNumber(b)
+        case '-':
+          return fNumber(a) - fNumber(b)
+        case '*':
+          return fNumber(a) * fNumber(b)
+        case '/': {
+          const d = fNumber(b)
+          if (d === 0) throw new FError('#DIV/0!')
+          return fNumber(a) / d
+        }
+        case '^':
+          return fNumber(a) ** fNumber(b)
+        default: {
+          const order = fCompare(a, b)
+          return node.op === '=' ? order === 0 : node.op === '<>' ? order !== 0 : node.op === '<' ? order < 0 : node.op === '>' ? order > 0 : node.op === '<=' ? order <= 0 : order >= 0
+        }
+      }
+    }
+    case 'fn': {
+      const args = node.args
+      const arg = (at: number) => (args[at] ? ev(args[at]) : null)
+      const count = (min: number, max = min) => {
+        if (args.length < min || args.length > max) throw new Unsupported()
+      }
+      switch (node.name) {
+        case 'AND':
+        case 'OR': {
+          if (!args.length) throw new Unsupported()
+          const values = args.map((a) => fBool(ev(a)))
+          return node.name === 'AND' ? values.every(Boolean) : values.some(Boolean)
+        }
+        case 'NOT':
+          count(1)
+          return !fBool(arg(0))
+        case 'IF':
+          count(2, 3)
+          return fBool(arg(0)) ? arg(1) : args[2] ? arg(2) : false
+        case 'IFERROR':
+          count(2)
+          try {
+            const value = arg(0)
+            if (value instanceof FError) return arg(1)
+            return value
+          } catch (error) {
+            if (error instanceof FError) return arg(1)
+            throw error
+          }
+        case 'ISERROR':
+        case 'ISERR':
+        case 'ISNA':
+          count(1)
+          try {
+            const value = arg(0)
+            return value instanceof FError && (node.name !== 'ISNA' || value.code === '#N/A') && (node.name !== 'ISERR' || value.code !== '#N/A')
+          } catch (error) {
+            if (!(error instanceof FError)) throw error
+            return (node.name !== 'ISNA' || error.code === '#N/A') && (node.name !== 'ISERR' || error.code !== '#N/A')
+          }
+        case 'ISBLANK':
+          count(1)
+          return arg(0) === null
+        case 'ISNUMBER':
+          count(1)
+          return typeof arg(0) === 'number'
+        case 'ISTEXT':
+          count(1)
+          return typeof arg(0) === 'string'
+        case 'ISLOGICAL':
+          count(1)
+          return typeof arg(0) === 'boolean'
+        case 'ISEVEN':
+        case 'ISODD': {
+          count(1)
+          const even = Math.trunc(fNumber(arg(0))) % 2 === 0
+          return node.name === 'ISEVEN' ? even : !even
+        }
+        case 'ROW':
+        case 'COLUMN': {
+          count(0, 1)
+          const target = args[0]
+          if (target && target.k !== 'ref') throw new Unsupported()
+          const where = target ? place(target) : { r: ctx.r, c: ctx.c }
+          return node.name === 'ROW' ? where.r : where.c
+        }
+        case 'MOD': {
+          count(2)
+          const [a, b] = [fNumber(arg(0)), fNumber(arg(1))]
+          if (b === 0) throw new FError('#DIV/0!')
+          return a - b * Math.floor(a / b)
+        }
+        case 'ABS':
+          count(1)
+          return Math.abs(fNumber(arg(0)))
+        case 'INT':
+          count(1)
+          return Math.floor(fNumber(arg(0)))
+        case 'ROUND': {
+          count(1, 2)
+          const scale = 10 ** Math.trunc(fNumber(arg(1)))
+          const value = fNumber(arg(0)) * scale
+          return (Math.sign(value) * Math.round(Math.abs(value))) / scale
+        }
+        case 'MIN':
+        case 'MAX':
+        case 'SUM':
+        case 'AVERAGE': {
+          if (!args.length) throw new Unsupported()
+          const values = args.map((a) => fNumber(ev(a)))
+          if (node.name === 'MIN') return Math.min(...values)
+          if (node.name === 'MAX') return Math.max(...values)
+          const total = values.reduce((s, v) => s + v, 0)
+          return node.name === 'SUM' ? total : total / values.length
+        }
+        case 'LEN':
+          count(1)
+          return [...fText(arg(0))].length
+        case 'TRIM':
+          count(1)
+          return fText(arg(0)).replace(/ +/g, ' ').trim()
+        case 'UPPER':
+          count(1)
+          return fText(arg(0)).toUpperCase()
+        case 'LOWER':
+          count(1)
+          return fText(arg(0)).toLowerCase()
+        case 'LEFT':
+        case 'RIGHT': {
+          count(1, 2)
+          const text = [...fText(arg(0))]
+          const n = args[1] ? Math.max(0, Math.trunc(fNumber(arg(1)))) : 1
+          return (node.name === 'LEFT' ? text.slice(0, n) : text.slice(Math.max(0, text.length - n))).join('')
+        }
+        case 'MID': {
+          count(3)
+          const text = [...fText(arg(0))]
+          const start = Math.trunc(fNumber(arg(1)))
+          if (start < 1) throw new FError('#VALUE!')
+          return text.slice(start - 1, start - 1 + Math.max(0, Math.trunc(fNumber(arg(2))))).join('')
+        }
+        case 'EXACT':
+          count(2)
+          return fText(arg(0)) === fText(arg(1))
+        case 'SEARCH':
+        case 'FIND': {
+          count(2, 3)
+          let needle = fText(arg(0))
+          let hay = fText(arg(1))
+          if (node.name === 'SEARCH') {
+            if (/[*?~]/.test(needle)) throw new Unsupported()
+            needle = needle.toLowerCase()
+            hay = hay.toLowerCase()
+          }
+          const from = args[2] ? Math.trunc(fNumber(arg(2))) : 1
+          const found = from >= 1 ? hay.indexOf(needle, from - 1) : -1
+          if (found < 0) throw new FError('#VALUE!')
+          return found + 1
+        }
+        case 'VALUE':
+          count(1)
+          return fNumber(arg(0))
+        case 'WEEKDAY': {
+          count(1, 2)
+          const serial = Math.floor(fNumber(arg(0)))
+          const kind = args[1] ? fNumber(arg(1)) : 1
+          if (kind !== 1 && kind !== 2 && kind !== 3) throw new Unsupported()
+          const sunday1 = (((serial - 1) % 7) + 7) % 7 + 1
+          return kind === 1 ? sunday1 : kind === 2 ? ((sunday1 + 5) % 7) + 1 : (sunday1 + 5) % 7
+        }
+        default:
+          // TODAY(), NOW(), lookups and the rest: not evaluated here.
+          throw new Unsupported()
+      }
+    }
+  }
+}
+
+/** The icons of Excel's icon sets, lowest value first: a glyph and its colour. */
+const ICON_SETS: Record<string, [string, string][]> = (() => {
+  const [G, Y, R, K, S, P, B] = ['1E9E4A', 'F2B705', 'D9363E', '262626', '8C8C8C', 'F4A6A6', '4472C4']
+  const gray = (set: [string, string][]) => set.map(([glyph]): [string, string] => [glyph, S])
+  const arrows3: [string, string][] = [['↓', R], ['→', Y], ['↑', G]]
+  const arrows4: [string, string][] = [['↓', R], ['↘', Y], ['↗', Y], ['↑', G]]
+  const arrows5: [string, string][] = [['↓', R], ['↘', Y], ['→', Y], ['↗', Y], ['↑', G]]
+  const lights: [string, string][] = [['●', R], ['●', Y], ['●', G]]
+  const symbols: [string, string][] = [['✖', R], ['!', Y], ['✔', G]]
+  return {
+    '3Arrows': arrows3, '3ArrowsGray': gray(arrows3), '3Flags': [['⚑', R], ['⚑', Y], ['⚑', G]], '3TrafficLights1': lights, '3TrafficLights2': lights,
+    '3Signs': [['◆', R], ['▲', Y], ['●', G]], '3Symbols': symbols, '3Symbols2': symbols, '3Stars': [['☆', Y], ['✭', Y], ['★', Y]], '3Triangles': [['▼', R], ['▬', Y], ['▲', G]],
+    '4Arrows': arrows4, '4ArrowsGray': gray(arrows4), '4RedToBlack': [['●', K], ['●', S], ['●', P], ['●', R]], '4Rating': [['▂', B], ['▄', B], ['▆', B], ['█', B]],
+    '4TrafficLights': [['●', K], ['●', R], ['●', Y], ['●', G]], '5Arrows': arrows5, '5ArrowsGray': gray(arrows5),
+    '5Rating': [['▁', B], ['▂', B], ['▄', B], ['▆', B], ['█', B]], '5Quarters': [['○', K], ['◔', K], ['◑', K], ['◕', K], ['●', K]], '5Boxes': [['▁', B], ['▃', B], ['▅', B], ['▇', B], ['█', B]]
+  }
+})()
+
+type CfResult = { looks: Map<number, CfLook>; skipped: Set<string> }
+
+function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo>, lastRow: number, lastCol: number): CfResult {
   const looks = new Map<number, CfLook>()
+  const skipped = new Set<string>()
   let budget = CF_CELLS
   const numberAt = (r: number, c: number): number | null => {
     const cell = rows.get(r)?.cells.get(c)
@@ -1505,20 +1983,43 @@ function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo
     const value = Number(cell.v)
     return cell.v !== '' && Number.isFinite(value) ? value : null
   }
-  /** A rule's operand: a number, or a single cell on this sheet; anything else makes the rule unreadable. */
-  const operand = (text: string | undefined): number | null => {
-    const source = (text ?? '').trim()
-    if (/^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(source)) return Number(source)
-    const ref = parseRef(source.replace(/\$/g, ''))
-    return ref ? numberAt(ref.r, ref.c) : null
+  /** What a formula sees in a cell: a number, text, a logical, an error or nothing. */
+  const valueAt = (r: number, c: number): FValue => {
+    const cell = rows.get(r)?.cells.get(c)
+    if (!cell) return null
+    const v = cell.v
+    switch (cell.t) {
+      case 's':
+        return v === null ? null : (wb.strings?.get(Number(v))?.text ?? null)
+      case 'inlineStr':
+        return richText(cell.is).text
+      case 'str':
+        return v === null ? null : unescapeOoxml(v)
+      case 'b':
+        return v === null ? null : v === '1' || v === 'true'
+      case 'e':
+        return v === null ? null : new FError(v)
+      case 'd':
+        return v === null ? null : isoToSerial(v, wb.date1904)
+      default: {
+        if (v === null || v === '' || uncomputed(wb, cell)) return null
+        const n = Number(v)
+        return Number.isFinite(n) ? n : v
+      }
+    }
   }
-  type Rule = { node: XmlNode; priority: number; cells: [number, number][] }
-  const rules: Rule[] = []
-  for (const block of children(head, 'conditionalFormatting')) {
+  /** The text a cell shows, for the text rules. */
+  const shownAt = (r: number, c: number): string | null => {
+    const cell = rows.get(r)?.cells.get(c)
+    return cell ? showCell(cell, cell.s ?? rows.get(r)?.s ?? 0, wb, false).text : null
+  }
+  const cellsOf = (sqref: string) => {
     const cells: [number, number][] = []
-    for (const ref of (attr(block, 'sqref') ?? '').split(/\s+/)) {
+    let base: { r: number; c: number } | null = null
+    for (const ref of sqref.split(/\s+/)) {
       const range = parseRange(ref)
       if (!range) continue
+      base ??= { r: range.r1, c: range.c1 }
       for (let r = range.r1; r <= Math.min(range.r2, lastRow) && budget > 0; r++) {
         for (let c = range.c1; c <= Math.min(range.c2, lastCol) && budget > 0; c++) {
           cells.push([r, c])
@@ -1526,7 +2027,32 @@ function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo
         }
       }
     }
-    for (const node of children(block, 'cfRule')) rules.push({ node, priority: num(node, 'priority') ?? 1e9, cells })
+    return { cells, base: base ?? { r: 1, c: 1 } }
+  }
+  type Rule = { node: XmlNode; priority: number; cells: [number, number][]; base: { r: number; c: number } }
+  const rules: Rule[] = []
+  const extended = new Set<string>()
+  for (const block of children(head, 'conditionalFormatting')) {
+    const { cells, base } = cellsOf(attr(block, 'sqref') ?? '')
+    for (const node of children(block, 'cfRule')) {
+      rules.push({ node, priority: num(node, 'priority') ?? 1e9, cells, base })
+      for (const ext of children(child(node, 'extLst'), 'ext')) {
+        const id = child(ext, 'id')?.text
+        if (id) extended.add(id)
+      }
+    }
+  }
+  // Excel 2010 rules live in the sheet's extension list: icon sets with custom icons and the rest.
+  for (const ext of children(child(head, 'extLst'), 'ext')) {
+    for (const block of children(child(ext, 'conditionalFormattings'), 'conditionalFormatting')) {
+      const { cells, base } = cellsOf(child(block, 'sqref')?.text ?? '')
+      for (const node of children(block, 'cfRule')) {
+        // A data bar's extension adds to a rule already read above.
+        if (extended.has(attr(node, 'id') ?? '')) continue
+        if (attr(node, 'type') === 'iconSet') rules.push({ node, priority: num(node, 'priority') ?? 1e9, cells, base })
+        else if (cells.length) skipped.add('Excel 2010 新增的規則')
+      }
+    }
   }
   rules.sort((a, b) => a.priority - b.priority)
   const apply = (r: number, c: number, look: CfLook) => {
@@ -1535,40 +2061,165 @@ function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo
     // The rule with the higher priority (lower number) keeps what it set.
     looks.set(key, { ...look, ...had })
   }
-  for (const { node, cells } of rules) {
+  const dxfLook = (node: XmlNode): CfLook | null => {
+    const dxf = wb.styles.dxfs[num(node, 'dxfId') ?? -1]
+    return dxf ? { fill: dxf.fill || undefined, color: dxf.font.color ?? undefined, bold: dxf.font.b, italic: dxf.font.i } : null
+  }
+  const yes = (node: XmlNode | null | undefined, name: string, otherwise = false) => {
+    const value = attr(node, name)
+    return value === undefined ? otherwise : value === '1' || value === 'true'
+  }
+  for (const { node, cells, base } of rules) {
     try {
       const type = attr(node, 'type')
       const values = cells.map(([r, c]) => numberAt(r, c))
       const numbers = values.filter((v): v is number => v !== null)
-      if (type === 'cellIs') {
-        const dxf = wb.styles.dxfs[num(node, 'dxfId') ?? -1]
-        const formulas = children(node, 'formula').map((f) => operand(f.text))
-        if (!dxf || formulas.some((f) => f === null)) continue
-        const [a, b] = formulas as number[]
-        const op = attr(node, 'operator') ?? 'equal'
-        const test = (v: number) =>
-          op === 'greaterThan' ? v > a : op === 'greaterThanOrEqual' ? v >= a : op === 'lessThan' ? v < a : op === 'lessThanOrEqual' ? v <= a
-            : op === 'notEqual' ? v !== a : op === 'between' ? v >= Math.min(a, b) && v <= Math.max(a, b) : op === 'notBetween' ? v < Math.min(a, b) || v > Math.max(a, b) : v === a
-        const look: CfLook = { fill: dxf.fill || undefined, color: dxf.font.color ?? undefined, bold: dxf.font.b, italic: dxf.font.i }
+      const each = (test: (at: number, r: number, c: number) => boolean) => {
+        const look = dxfLook(node)
+        if (!look) return
         cells.forEach(([r, c], at) => {
-          const v = values[at]
-          if (v !== null && test(v)) apply(r, c, look)
+          if (test(at, r, c)) apply(r, c, look)
         })
-      } else if (type === 'colorScale' || type === 'dataBar') {
+      }
+      if (type === 'cellIs') {
+        // The operands are formulas too ("完成", $D$1, A1*2), worked out for each cell from the range's first cell.
+        let formulas: FNode[]
+        try {
+          formulas = children(node, 'formula').map((f) => compileFormula(f.text))
+          if (!formulas.length) throw new Unsupported()
+        } catch {
+          skipped.add('比較規則')
+          continue
+        }
+        const op = attr(node, 'operator') ?? 'equal'
+        let unsupported = false
+        each((_, r, c) => {
+          if (unsupported) return false
+          try {
+            const value = valueAt(r, c)
+            if (value instanceof FError) return false
+            const [x, y] = formulas.map((formula) => evaluateFormula(formula, { r, c, base, at: valueAt }))
+            const vs = (operand: FValue | undefined) => fCompare(value, operand ?? null)
+            if (op === 'between' || op === 'notBetween') {
+              const [lo, hi] = fCompare(x, y ?? null) <= 0 ? [x, y] : [y, x]
+              const inside = vs(lo) >= 0 && vs(hi) <= 0
+              return op === 'between' ? inside : !inside
+            }
+            const order = vs(x)
+            return op === 'greaterThan' ? order > 0 : op === 'greaterThanOrEqual' ? order >= 0 : op === 'lessThan' ? order < 0 : op === 'lessThanOrEqual' ? order <= 0 : op === 'notEqual' ? order !== 0 : order === 0
+          } catch (error) {
+            if (error instanceof Unsupported) unsupported = true
+            return false
+          }
+        })
+        if (unsupported) skipped.add('比較規則')
+      } else if (type === 'expression') {
+        let formula: FNode
+        try {
+          formula = compileFormula(child(node, 'formula')?.text ?? '')
+        } catch {
+          skipped.add('公式規則')
+          continue
+        }
+        let unsupported = false
+        each((_, r, c) => {
+          if (unsupported) return false
+          try {
+            const result = evaluateFormula(formula, { r, c, base, at: valueAt })
+            return typeof result === 'number' ? result !== 0 : result === true
+          } catch (error) {
+            if (error instanceof Unsupported) unsupported = true
+            return false
+          }
+        })
+        if (unsupported) skipped.add('公式規則')
+      } else if (type === 'top10') {
+        if (!numbers.length) continue
+        const rank = num(node, 'rank') ?? 10
+        const bottom = yes(node, 'bottom')
+        const sorted = [...numbers].sort((x, y) => (bottom ? x - y : y - x))
+        const n = yes(node, 'percent') ? Math.max(1, Math.floor((sorted.length * rank) / 100)) : Math.trunc(rank)
+        if (n < 1) continue
+        const edge = sorted[Math.min(n, sorted.length) - 1]
+        each((at) => values[at] !== null && (bottom ? values[at]! <= edge : values[at]! >= edge))
+      } else if (type === 'aboveAverage') {
+        if (!numbers.length) continue
+        const mean = numbers.reduce((s, v) => s + v, 0) / numbers.length
+        const spread = Math.sqrt(numbers.reduce((s, v) => s + (v - mean) ** 2, 0) / numbers.length) * (num(node, 'stdDev') ?? 0)
+        const above = yes(node, 'aboveAverage', true)
+        const equal = yes(node, 'equalAverage')
+        each((at) => {
+          const v = values[at]
+          if (v === null) return false
+          return above ? (equal ? v >= mean + spread : v > mean + spread) : equal ? v <= mean - spread : v < mean - spread
+        })
+      } else if (type === 'containsText' || type === 'notContainsText' || type === 'beginsWith' || type === 'endsWith') {
+        const needle = (attr(node, 'text') ?? '').toLowerCase()
+        each((_, r, c) => {
+          const text = (shownAt(r, c) ?? '').toLowerCase()
+          return type === 'containsText' ? text.includes(needle) : type === 'notContainsText' ? !text.includes(needle) : type === 'beginsWith' ? text.startsWith(needle) : text.endsWith(needle)
+        })
+      } else if (type === 'containsBlanks' || type === 'notContainsBlanks') {
+        each((_, r, c) => {
+          const value = valueAt(r, c)
+          const blank = value === null || (typeof value === 'string' && value.trim() === '')
+          return type === 'containsBlanks' ? blank : !blank
+        })
+      } else if (type === 'containsErrors' || type === 'notContainsErrors') {
+        each((_, r, c) => (valueAt(r, c) instanceof FError) === (type === 'containsErrors'))
+      } else if (type === 'duplicateValues' || type === 'uniqueValues') {
+        const keyOf = (r: number, c: number) => {
+          const value = valueAt(r, c)
+          if (value === null || value instanceof FError) return null
+          return typeof value === 'string' ? `s${value.toLowerCase()}` : `${typeof value}${value}`
+        }
+        const keys = cells.map(([r, c]) => keyOf(r, c))
+        const counts = new Map<string, number>()
+        for (const key of keys) if (key !== null) counts.set(key, (counts.get(key) ?? 0) + 1)
+        each((at) => keys[at] !== null && (counts.get(keys[at]!)! > 1) === (type === 'duplicateValues'))
+      } else if (type === 'colorScale' || type === 'dataBar' || type === 'iconSet') {
         if (!numbers.length) continue
         const scale = child(node, type)
         const sorted = [...numbers].sort((x, y) => x - y)
         const threshold = (cfvo: XmlNode | undefined, fallback: number) => {
           const kind = attr(cfvo, 'type')
-          const val = Number(attr(cfvo, 'val'))
-          if (kind === 'min') return sorted[0]
-          if (kind === 'max') return sorted[sorted.length - 1]
-          if (kind === 'num' && Number.isFinite(val)) return val
+          const val = Number(attr(cfvo, 'val') ?? child(cfvo, 'f')?.text)
+          if (kind === 'min' || kind === 'autoMin') return sorted[0]
+          if (kind === 'max' || kind === 'autoMax') return sorted[sorted.length - 1]
+          if ((kind === 'num' || kind === 'formula') && Number.isFinite(val)) return val
           if (kind === 'percent' && Number.isFinite(val)) return sorted[0] + ((sorted[sorted.length - 1] - sorted[0]) * val) / 100
           if (kind === 'percentile' && Number.isFinite(val)) return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(((sorted.length - 1) * val) / 100)))]
           return fallback
         }
         const cfvos = children(scale, 'cfvo')
+        if (type === 'iconSet') {
+          const setName = attr(scale, 'iconSet') ?? '3TrafficLights1'
+          const custom = children(scale, 'cfIcon')
+          const icons = cfvos.map((_, at) => {
+            const own = custom[at]
+            const set = own ? attr(own, 'iconSet') ?? setName : setName
+            if (set === 'NoIcons') return null
+            return ICON_SETS[set]?.[own ? (num(own, 'iconId') ?? at) : at] ?? null
+          })
+          if (!ICON_SETS[setName] && !custom.length) {
+            skipped.add('圖示集')
+            continue
+          }
+          if (yes(scale, 'reverse')) icons.reverse()
+          const limits = cfvos.map((cfvo, at) => ({ at: threshold(cfvo, at ? sorted[sorted.length - 1] : sorted[0]), gte: yes(cfvo, 'gte', true) }))
+          const hideValue = attr(scale, 'showValue') === '0' || attr(scale, 'showValue') === 'false'
+          cells.forEach(([r, c], at) => {
+            const v = values[at]
+            if (v === null) return
+            let index = 0
+            limits.forEach((limit, i) => {
+              if (i && (limit.gte ? v >= limit.at : v > limit.at)) index = i
+            })
+            const icon = icons[index]
+            if (icon || hideValue) apply(r, c, { ...(icon ? { icon: { glyph: icon[0], color: icon[1] } } : {}), ...(hideValue ? { hideValue } : {}) })
+          })
+          continue
+        }
         const colors = children(scale, 'color').map((color) => xColor(color, wb.styles.palette))
         if (type === 'colorScale') {
           const stops = cfvos.map((cfvo, at) => ({ at: threshold(cfvo, at ? sorted[sorted.length - 1] : sorted[0]), color: colors[at] })).filter((stop): stop is { at: number; color: string } => stop.color !== null)
@@ -1594,10 +2245,13 @@ function conditionalLooks(wb: Workbook, head: XmlNode, rows: Map<number, RowInfo
             apply(r, c, { bar: `linear-gradient(90deg,#${color} 0,#${applyTint(color, 0.6)} ${pct}%,transparent ${pct}%)` })
           })
         }
-      }
-    } catch {}
+      } else if (type === 'timePeriod') skipped.add('日期期間規則')
+      else if (cells.length) skipped.add('其他規則')
+    } catch {
+      skipped.add('無法讀取的規則')
+    }
   }
-  return looks
+  return { looks, skipped }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1772,14 +2426,21 @@ function renderPicture(node: XmlNode, box: Box, ctx: DrawCtx): string {
   const svg = blip ? findDeep(blip, 'svgBlip') : null
   for (const id of [relAttr(svg, 'embed'), relAttr(blip, 'embed')]) {
     const rel = ctx.wb.pkg.rel(ctx.part, id)
-    if (rel && !rel.external && isDrawablePart(rel.target) && ctx.wb.pkg.zip.has(rel.target)) {
+    if (rel && !rel.external && isDrawablePart(rel.target) && ctx.wb.pkg.has(rel.target)) {
       if (label) ctx.text.push(label)
       return `<img class="xl-draw xl-pic" src="${escapeHtml(ctx.wb.media(rel.target))}" alt="${escapeHtml(label)}" loading="lazy" style="${boxStyle(box, rot)}">`
     }
   }
-  const target = ctx.wb.pkg.rel(ctx.part, relAttr(blip, 'embed'))?.target ?? ''
-  const format = /\.([a-z0-9]{2,5})$/i.exec(target)?.[1]?.toUpperCase()
-  return missingBox(box, `圖片(${format ? `${format} 格式,` : ''}${UNSUPPORTED})`)
+  return missingBox(box, pictureProblem(ctx.wb, ctx.part, relAttr(blip, 'embed'), relAttr(blip, 'link')))
+}
+
+/** Why a picture is not drawn, told apart: missing from the file, linked from outside it, or a format the browser cannot show. */
+function pictureProblem(wb: Workbook, part: string, embed: string | undefined, link: string | undefined): string {
+  const rel = wb.pkg.rel(part, embed)
+  if ((!rel && link) || rel?.external) return '圖片(連結到檔案外的圖片,網頁版不會載入;請在 Excel 中開啟原始檔查看)'
+  if (!rel || !wb.pkg.has(rel.target)) return '圖片(檔案裡找不到這張圖片,可能已被移除或檔案不完整)'
+  const format = /\.([a-z0-9]{2,5})$/i.exec(rel.target)?.[1]?.toUpperCase()
+  return `圖片(${format ? `${format} 格式,` : ''}${UNSUPPORTED})`
 }
 
 function findDeep(node: XmlNode, name: string): XmlNode | null {
@@ -2156,7 +2817,41 @@ function sideCss(side: NonNullable<Side>): string {
 
 const stronger = (a: Side, b: Side): Side => (!a ? b : !b ? a : b.weight > a.weight ? b : a)
 
-type Budget = { cells: number; chars: number }
+/**
+ * `cells`: this sheet's share of the workbook's cells (see shareCells); `spare`: what the shares left
+ * unallocated, for a sheet that needs more than its data suggested (merges or a drawing far below it);
+ * `chars`: text left for the whole page.
+ */
+type Budget = { cells: number; spare: number; chars: number }
+
+/**
+ * The workbook's cell budget shared fairly between its worksheets: sheets that need less than an even
+ * share keep all they need, and what they leave is shared among the rest, so one large sheet early in
+ * the workbook cannot starve the sheets after it.
+ */
+function shareCells(wb: Workbook, entries: SheetEntry[]): { shares: Map<SheetEntry, number>; spare: number } {
+  const wanted = entries.map((entry) => {
+    let cells = 0
+    try {
+      if (entry.part && isWorksheet(entry)) {
+        const scanned = scannedSheet(wb, entry.part)
+        cells = Math.min(XLSX_LIMITS.sheetCells, Math.min(XLSX_LIMITS.rows, Math.max(scanned.maxRow + 1, 30)) * Math.min(XLSX_LIMITS.cols, Math.max(scanned.maxCol + 1, 10)))
+      }
+    } catch {}
+    return { entry, cells }
+  })
+  const shares = new Map<SheetEntry, number>()
+  let left = XLSX_LIMITS.workbookCells
+  const sheets = wanted.filter((item) => item.cells > 0).sort((a, b) => a.cells - b.cells)
+  sheets.forEach((item, at) => {
+    const share = Math.min(item.cells, Math.floor(left / (sheets.length - at)))
+    shares.set(item.entry, share)
+    left -= share
+  })
+  return { shares, spare: left }
+}
+
+const isWorksheet = (entry: SheetEntry) => entry.kind === 'worksheet' || (entry.kind === '' && Boolean(entry.part?.includes('worksheets/')))
 
 function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHtml: boolean): SheetResult {
   const part = entry.part!
@@ -2225,9 +2920,10 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
   // A little empty grid past the last cell, as Excel shows it; never past the limits.
   const lastCol = Math.min(XLSX_LIMITS.cols, Math.max(usedCol + 1, 10))
   let lastRow = Math.min(XLSX_LIMITS.rows, Math.max(usedRow + 1, 30))
-  const cellBudget = Math.max(200, Math.min(XLSX_LIMITS.sheetCells, budget.cells))
+  const floor = Math.min(lastRow, XLSX_LIMITS.floorRows) * lastCol
+  const cellBudget = Math.max(floor, Math.min(XLSX_LIMITS.sheetCells, budget.cells + budget.spare))
   if (lastRow * lastCol > cellBudget) lastRow = Math.max(1, Math.floor(cellBudget / lastCol))
-  budget.cells -= lastRow * lastCol
+  budget.spare = Math.max(0, budget.spare - Math.max(0, lastRow * lastCol - budget.cells))
   const totalRows = Math.max(scanned.totalRows, usedRow)
   const totalCols = Math.max(scanned.totalCols, usedCol)
   const cutRows = totalRows > lastRow
@@ -2269,7 +2965,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
   // Which xf applies where: the cell's own, else the row's (customFormat), else the column's.
   const styleAt = (r: number, c: number): number => rows.get(r)?.cells.get(c)?.s ?? rows.get(r)?.s ?? colInfo.get(c)?.style ?? 0
   const looks = tableLooks(wb, part, head)
-  const conditional = conditionalLooks(wb, head, rows, XLSX_LIMITS.rows, XLSX_LIMITS.cols)
+  const { looks: conditional, skipped: cfSkipped } = conditionalLooks(wb, head, rows, XLSX_LIMITS.rows, XLSX_LIMITS.cols)
   const borderAt = (r: number, c: number): Border => {
     const own = styles.borders[styles.xfs[styleAt(r, c)]?.border ?? 0] ?? { left: null, right: null, top: null, bottom: null }
     const look = looks.get(r * 20000 + c)
@@ -2346,6 +3042,29 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
     }
   } catch {}
 
+  /** A picture placed in the cell, fitted inside it keeping its shape; or a label saying why not. */
+  const inCellPicture = (cell: Cell, r: number, c: number): Shown | null => {
+    if (cell.vm === null) return null
+    const picture = cellPicture(wb, cell)
+    const label = (what: string): Shown => ({ text: '', html: wantHtml ? `<span class="xl-cellmiss">${escapeHtml(what)}</span>` : '', color: null, kind: 'picture' })
+    if (!picture) return cell.t === 'e' ? label(`儲存格內的圖片或資料類型(${UNSUPPORTED})`) : null
+    if ('web' in picture) return { ...label('儲存格內的網路圖片(網頁版不會載入)'), text: picture.alt }
+    if (!wb.pkg.has(picture.target)) return { ...label('儲存格內的圖片(檔案裡找不到這張圖片)'), text: picture.alt }
+    if (!isDrawablePart(picture.target)) {
+      const format = /\.([a-z0-9]{2,5})$/i.exec(picture.target)?.[1]?.toUpperCase()
+      return { ...label(`儲存格內的圖片(${format ? `${format} 格式,` : ''}${UNSUPPORTED})`), text: picture.alt }
+    }
+    const span = spans.get(r * 20000 + c)
+    let w = 0
+    let h = 0
+    for (const col of visibleCols) if (col >= c && col <= (span?.c2 ?? c)) w += colPx(col)
+    for (const row of visibleRows) if (row >= r && row <= (span?.r2 ?? r)) h += rowPx(row)
+    const html = wantHtml
+      ? `<img class="xl-cellpic" src="${escapeHtml(wb.media(picture.target))}" alt="${escapeHtml(picture.alt)}" loading="lazy" style="width:${px(Math.max(1, w - 4))};height:${px(Math.max(1, h - 2))}">`
+      : ''
+    return { text: picture.alt, html, color: null, kind: 'picture' }
+  }
+
   const usedXfs = new Set<number>()
   const parts: string[] = []
   let textCut = false
@@ -2387,7 +3106,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       if (covered.has(key)) continue
       const cell = row?.cells.get(c)
       const xfIndex = styleAt(r, c)
-      const shown = cell ? showCell(cell, xfIndex, wb, wantHtml) : null
+      const shown = cell ? (inCellPicture(cell, r, c) ?? showCell(cell, xfIndex, wb, wantHtml)) : null
       if (shown && shown.text && shown.kind !== 'formula') text.push(shown.text)
       if (!wantHtml) continue
       // Past the page's text budget, cells keep their look but not their text.
@@ -2445,18 +3164,30 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       else if (tableFilled) style.push('border-bottom-color:transparent')
       if (ci === 0 && own.left) style.push(`border-inline-start:${sideCss(own.left)}`)
       if (r === visibleRows[0] && own.top) style.push(`border-top:${sideCss(own.top)}`)
-      // Text runs on into empty neighbours, as in Excel, unless it wraps or is centred, and stops at
-      // the first cell that holds something (a value or a merged area).
+      // Text runs on into empty neighbours, as in Excel, unless it wraps, shrinks or turns, and stops
+      // at the first cell that holds something (a value or a merged area): left-aligned text to the
+      // end side, right-aligned text to the start side, centred text both ways around its own cell,
+      // and centred-across-selection text over the empty cells after it that are set the same way.
+      let runBack = 0
       let runOn = 0
-      if (shown && shown.kind === 'text' && !align?.wrap && !span && (h === 'general' || h === 'left') && nextC !== undefined && !hasValue(r, nextC) && !align?.shrink && !(align?.rot)) {
-        classes.push('ov')
-        runOn = colPx(c)
-        for (let k = ci + 1; k < visibleCols.length && k <= ci + 64 && runOn < 4000; k++) {
-          const next = visibleCols[k]
-          const nextKey = r * 20000 + next
-          if (hasValue(r, next) || covered.has(nextKey) || spans.has(nextKey)) break
-          runOn += colPx(next)
+      if (shown && shown.kind === 'text' && !align?.wrap && !span && !align?.shrink && !(align?.rot)) {
+        const free = (k: number) => {
+          const col = visibleCols[k]
+          const colKey = r * 20000 + col
+          return !hasValue(r, col) && !covered.has(colKey) && !spans.has(colKey)
         }
+        const reach = (step: 1 | -1, more: (k: number) => boolean = free) => {
+          let room = 0
+          for (let k = ci + step, n = 0; k >= 0 && k < visibleCols.length && n < 64 && room < 4000 && more(k); k += step, n++) room += colPx(visibleCols[k])
+          return room
+        }
+        if (h === 'general' || h === 'left') runOn = reach(1)
+        else if (h === 'right') runBack = reach(-1)
+        else if (h === 'center') {
+          runBack = reach(-1)
+          runOn = reach(1)
+        } else if (h === 'centerContinuous') runOn = reach(1, (k) => free(k) && styles.xfs[styleAt(r, visibleCols[k])]?.align?.h === 'centerContinuous')
+        if (runBack || runOn) classes.push('ov')
       }
       // Frozen panes stay put while the rest scrolls.
       const frozenRow = r <= freezeRows
@@ -2477,6 +3208,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       if (note) classes.push('cm')
       if (shown?.color) style.push(`color:#${shown.color}`)
       let inner = shown ? shown.html : ''
+      if (cf?.hideValue) inner = ''
       if (align && inner) {
         // Turned text is laid out of flow from the cell's corner, so it neither grows the row nor
         // swings outside the cell to be clipped away: rising text starts bottom-left, falling text
@@ -2500,7 +3232,21 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
           ? `<a class="xl-link" href="${escapeHtml(link.href)}" title="${escapeHtml(link.title)}">${inner}</a>`
           : `<span class="xl-link" title="${escapeHtml(link.title)}">${inner}</span>`
       }
-      if (runOn && inner) inner = `<span class="ovs" style="width:${px(Math.max(0, runOn - 4))}">${inner}</span>`
+      if ((runOn || runBack) && inner) {
+        const own = colPx(c)
+        // Text longer than its run is cut where Excel cuts it: right-aligned text loses its start,
+        // centred text both ends (the flex alignment overflows that way), left-aligned text its end.
+        if (h === 'center') {
+          // Centred on its own cell, then cut where an occupied neighbour begins on either side.
+          const side = Math.max(runBack, runOn)
+          const [physLeft, physRight] = rtl ? [side - runOn, side - runBack] : [side - runBack, side - runOn]
+          const clip = physLeft || physRight ? `;clip-path:inset(0 ${px(physRight)} 0 ${px(physLeft)})` : ''
+          inner = `<span class="ovs ovc" style="width:${px(Math.max(0, own + 2 * side - 4))};margin-inline-start:${px(-side)}${clip}"><span>${inner}</span></span>`
+        } else if (runBack) inner = `<span class="ovs ovr" style="width:${px(Math.max(0, own + runBack - 4))};margin-inline-start:${px(-runBack)}"><span>${inner}</span></span>`
+        else inner = `<span class="ovs" style="width:${px(Math.max(0, own + runOn - 4))}">${inner}</span>`
+      }
+      // An icon-set icon sits at the start of the cell, the value where its alignment puts it.
+      if (cf?.icon) inner = `<span class="xl-ico" style="color:#${cf.icon.color}">${escapeHtml(cf.icon.glyph)}</span>${inner}`
       const attrs = [
         span && span.cols > 1 ? ` colspan="${span.cols}"` : '',
         span && span.rows > 1 ? ` rowspan="${span.rows}"` : '',
@@ -2528,9 +3274,15 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
   if (empty) notes.push('這個工作表是空的。')
   if (cutRows || cutCols) {
     const shownPart = [cutRows ? `前 ${lastRow.toLocaleString('en-US')} 列` : '', cutCols ? `前 ${lastCol.toLocaleString('en-US')} 欄(到 ${colName(lastCol)} 欄)` : ''].filter(Boolean).join('、')
-    notes.push(`此工作表共 ${totalRows.toLocaleString('en-US')} 列 × ${totalCols.toLocaleString('en-US')} 欄,網頁版只顯示${shownPart};完整內容請下載原始檔查看。`)
+    const size = `${totalRows.toLocaleString('en-US')} 列 × ${totalCols.toLocaleString('en-US')} 欄`
+    notes.push(`此工作表${scanned.exact ? `共 ${size}` : `至少有 ${size}`},網頁版只顯示${shownPart};完整內容請下載原始檔查看。`)
+  }
+  if (scanned.cut) {
+    const lead = cutRows || cutCols ? '這個工作表的檔案太大,網頁版只讀取了前段' : `這個工作表的檔案太大,網頁版只讀取了前段(前 ${scanned.maxRow.toLocaleString('en-US')} 列)`
+    notes.push(`${lead};位於檔案後段的合併儲存格、超連結、條件式格式與圖片沒有讀到。`)
   }
   if (textCut) notes.push('這份活頁簿的文字太多,後面部分儲存格的內容沒有顯示;完整內容請下載原始檔查看。')
+  if (cfSkipped.size) notes.push(`此工作表有部分條件式格式(${[...cfSkipped].join('、')})網頁版沒有套用,儲存格以原本的格式顯示。`)
   if (hasControls(head)) notes.push(`此工作表含有表單控制項或內嵌物件,${UNSUPPORTED}。`)
   const noteHtml = notes.map((note) => `<p class="xl-note">${escapeHtml(note)}</p>`).join('')
   const wide = freezeWidth > 200 ? ' data-wide-x' : ''
@@ -2638,10 +3390,16 @@ body{display:flex;flex-direction:column;font:14px/1.4 -apple-system,BlinkMacSyst
 .xl-grid td.fr.rc,.xl-grid td.fc.rc{position:sticky}
 .xl-grid td.ov{overflow:visible}
 .xl-grid td.ov>.ovs{display:inline-block;overflow:hidden;vertical-align:bottom}
+.xl-grid td.ov>.ovr,.xl-grid td.ov>.ovc{display:inline-flex;justify-content:flex-end}
+.xl-grid td.ov>.ovc{justify-content:center}
+.xl-grid td.ov>.ovr>span,.xl-grid td.ov>.ovc>span{flex:none}
 .xl-grid td .vt{position:absolute;top:0;left:50%;transform:translateX(-50%);writing-mode:vertical-rl;text-orientation:upright;white-space:pre}
 .xl-grid td .rot{position:absolute;left:2px;bottom:0;transform-origin:left bottom;white-space:pre}
 .xl-grid td .rot.dn{top:0;bottom:auto;transform-origin:left top}
 .xl-grid td.sh>span{display:inline-block}
+.xl-grid td img.xl-cellpic{display:block;object-fit:contain;margin:0 auto}
+.xl-grid td .xl-cellmiss{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;color:#666;font:italic 11px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+.xl-grid td .xl-ico{float:inline-start;margin-inline-end:3px}
 .xl-link{text-decoration:underline;cursor:help}
 a.xl-link{color:inherit;cursor:pointer}
 .xl-draw{position:absolute;z-index:1;box-sizing:border-box}
@@ -2678,13 +3436,15 @@ export type XlsxSheet = { name: string; html: string; text: string[]; tabColor: 
 export function readXlsx(data: Buffer, mediaBase: string, wantHtml = true): { sheets: XlsxSheet[]; css: string; warnings: string[]; active: number; baseFont: string } {
   const wb = openWorkbook(data, mediaBase)
   const visible = wb.sheets.filter(isShown)
-  const budget: Budget = { cells: XLSX_LIMITS.workbookCells, chars: XLSX_LIMITS.pageChars }
+  const { shares, spare } = shareCells(wb, visible)
+  const budget: Budget = { cells: 0, spare, chars: XLSX_LIMITS.pageChars }
   const used = new Set<number>()
   const sheets = visible.map((entry): XlsxSheet => {
     try {
       if (!entry.part) throw new Error('找不到工作表內容')
       let result: SheetResult
-      if (entry.kind === 'worksheet' || (entry.kind === '' && entry.part.includes('worksheets/'))) {
+      if (isWorksheet(entry)) {
+        budget.cells = shares.get(entry) ?? 0
         result = renderWorksheet(wb, entry, budget, wantHtml)
       } else if (entry.kind === 'chartsheet') result = renderChartsheet(wb, entry, wantHtml)
       else result = { html: `<p class="xl-note">這種工作表(${escapeHtml(entry.kind || '未知')})${UNSUPPORTED}。</p>`, text: [], css: new Set() }

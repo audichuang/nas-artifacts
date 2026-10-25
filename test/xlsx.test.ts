@@ -6,7 +6,8 @@ import { after, before, describe, test } from 'node:test'
 import { chromium } from 'playwright-core'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
-import { formatGeneral, formatNumber, formatText, renderXlsxPage, xlsxText, XLSX_LIMITS } from '../src/xlsx.ts'
+import { colName, formatGeneral, formatNumber, formatText, renderXlsxPage, xlsxText, XLSX_LIMITS } from '../src/xlsx.ts'
+import { ZIP_LIMITS } from '../src/zip.ts'
 import { zip } from './helpers/zip.ts'
 
 const NS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
@@ -413,7 +414,7 @@ describe('reading Excel workbooks', () => {
     assert.match(cellOf(builtIn, '甲'), /background:#DCE6F2/)
   })
 
-  test('conditional formats decided by the value: comparisons with their dxf, colour scales, data bars; formula rules are left alone', () => {
+  test('conditional formats decided by the value: comparisons with their dxf, colour scales, data bars, formula rules', () => {
     const rows = [5, 50, 95].map((v, at) => `<row r="${at + 1}"><c r="A${at + 1}"><v>${v}</v></c><c r="B${at + 1}"><v>${v}</v></c><c r="C${at + 1}"><v>${v}</v></c></row>`).join('')
     const rules =
       '<conditionalFormatting sqref="A1:A3"><cfRule type="cellIs" dxfId="0" priority="2" operator="greaterThan"><formula>$D$1</formula></cfRule><cfRule type="expression" dxfId="0" priority="1"><formula>MOD(ROW(),2)=0</formula></cfRule></conditionalFormatting>' +
@@ -469,7 +470,7 @@ describe('reading Excel workbooks', () => {
     assert.match(renderXlsxPage(legacy, 'x.xlsx', 'x'), /舊版 \.xls 或加密的活頁簿/)
     assert.match(renderXlsxPage(zip({ 'word/document.xml': '<w:document/>' }), 'x.xlsx', 'x'), /這不是 Excel 活頁簿/)
     const dtd = book([{ name: 's', body: '<!DOCTYPE x [<!ENTITY a "aaaa">]><worksheet><sheetData/></worksheet>' }])
-    assert.match(renderXlsxPage(dtd, 'x.xlsx', 'x'), /工作表「s」無法顯示:DTDs are not accepted/)
+    assert.match(renderXlsxPage(dtd, 'x.xlsx', 'x'), /工作表「s」無法顯示:不接受含 DTD 的 XML/)
   })
 
   test('hostile text from the file is escaped everywhere it lands', () => {
@@ -703,3 +704,330 @@ function rotationPage(): string {
   const body = sheet(`<row r="1" ht="90" customHeight="1">${cells}</row>`, '<cols><col min="1" max="4" width="6" customWidth="1"/></cols>')
   return renderXlsxPage(book([{ name: 's', body }], { styles }), 'b.xlsx', 'b')
 }
+
+/** The text of the row-header cell on the row that holds `text`. */
+const rowOf = (html: string, text: string) => {
+  const at = html.indexOf(`>${text}<`)
+  assert.ok(at >= 0, `cell ${text}`)
+  const tr = html.lastIndexOf('<tr', at)
+  return Number(/<th[^>]*>(\d+)<\/th>/.exec(html.slice(tr, at))?.[1])
+}
+
+describe('worksheet XML the way other tools write it', () => {
+  test('row numbers in single quotes or with spaces around = keep their row', () => {
+    const body = sheet(`<row r='3'><c r='A3' t='inlineStr'><is><t>單引號</t></is></c></row><row r = "7"><c r="A7" t="inlineStr"><is><t>等號旁有空白</t></is></c></row><row\nr="9"><c r="A9" t="inlineStr"><is><t>換行</t></is></c></row>`)
+    const page = panel(renderXlsxPage(book([{ name: 's', body }]), 'b.xlsx', 'b'), 1)
+    assert.equal(rowOf(page, '單引號'), 3)
+    assert.equal(rowOf(page, '等號旁有空白'), 7)
+    assert.equal(rowOf(page, '換行'), 9)
+  })
+
+  test('the last row number of a cut sheet is read whatever its quotes', () => {
+    const rows = Array.from({ length: XLSX_LIMITS.rows + 1 }, (_, at) => `<row r="${at + 1}"><c r="A${at + 1}"><v>${at}</v></c></row>`).join('')
+    const page = panel(renderXlsxPage(book([{ name: 's', body: sheet(`${rows}<row r = '4321'><c r="A4321"><v>1</v></c></row>`) }]), 'b.xlsx', 'b'), 1)
+    assert.match(page, /此工作表共 4,321 列/)
+  })
+
+  test('<sheetData /> with a space before the slash is an empty sheet, and what follows it still draws', () => {
+    const drawing = `<xdr:wsDr ${DRAWING_NS}><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="952500" cy="952500"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="t"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr><xdr:spPr/><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>方塊還在</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>`
+    for (const empty of ['<sheetData />', '<sheetData/>', '<x:sheetData  />']) {
+      const body = `<worksheet ${NS} xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${empty}<mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells><drawing r:id="d"/></worksheet>`
+      const page = panel(renderXlsxPage(book([{ name: 's', body, rels: [['d', 'drawing', '../drawings/drawing1.xml']] }], { extra: { 'xl/drawings/drawing1.xml': drawing } }), 'b.xlsx', 'b'), 1)
+      assert.doesNotMatch(page, /無法顯示/, empty)
+      assert.match(page, />方塊還在</, empty)
+      assert.match(page, /colspan="2"/, empty)
+    }
+  })
+})
+
+describe('big workbooks', () => {
+  test('a sheet whose XML is past the per-part limit shows its first rows and says what was cut', () => {
+    const saved = ZIP_LIMITS.entryBytes
+    ZIP_LIMITS.entryBytes = 60_000
+    try {
+      const rows = Array.from({ length: 3000 }, (_, at) => `<row r="${at + 1}"><c r="A${at + 1}" t="inlineStr"><is><t>第${at + 1}列</t></is></c><c r="B${at + 1}"><v>${at}</v></c></row>`).join('')
+      const tail = '<mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells>'
+      for (const dimension of ['<dimension ref="A1:B3000"/>', '']) {
+        const page = renderXlsxPage(book([{ name: '大', body: sheet(rows, dimension, tail) }, { name: '小', body: sheet('<row r="1"><c r="A1" t="inlineStr"><is><t>第二張</t></is></c></row>') }]), 'b.xlsx', 'b')
+        const big = panel(page, 1)
+        assert.doesNotMatch(big, /無法顯示/)
+        assert.match(big, />第1列</)
+        assert.match(big, />第100列</)
+        assert.doesNotMatch(big, />第3000列</)
+        assert.match(big, /這個工作表的檔案太大,網頁版只讀取了前段/)
+        assert.match(big, /合併儲存格、超連結、條件式格式與圖片沒有讀到/)
+        if (dimension) assert.match(big, /此工作表共 3,000 列 × 2 欄,網頁版只顯示前 [\d,]+ 列/)
+        assert.match(panel(page, 2), />第二張</)
+      }
+    } finally {
+      ZIP_LIMITS.entryBytes = saved
+    }
+  })
+
+  const grid = (rowCount: number, colCount: number) =>
+    sheet(Array.from({ length: rowCount }, (_, r) => `<row r="${r + 1}">${Array.from({ length: colCount }, (_, c) => `<c r="${colName(c + 1)}${r + 1}"><v>${r + c}</v></c>`).join('')}</row>`).join(''))
+  const shownRows = (html: string) => (html.match(/<tr style=[^>]*><th[^>]*>\d+<\/th>/g) ?? []).length
+
+  test('an ordinary monthly workbook shows every row of every month', () => {
+    const months = Array.from({ length: 12 }, (_, m) => ({ name: `${m + 1}月`, body: grid(600, 20) }))
+    const page = renderXlsxPage(book(months), 'b.xlsx', 'b')
+    for (let n = 1; n <= 12; n++) {
+      assert.doesNotMatch(panel(page, n), /網頁版只顯示/, `${n}月`)
+      assert.ok(shownRows(panel(page, n)) >= 600, `${n}月: ${shownRows(panel(page, n))} rows`)
+    }
+  })
+
+  test('a sheet whose chart sits far below its data still draws the grid down to the chart', () => {
+    const drawing = `<xdr:wsDr ${DRAWING_NS}><xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>390</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>400</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="t"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr><xdr:spPr/><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>下面的方塊</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>`
+    const page = renderXlsxPage(book([{ name: 's', body: grid(5, 3).replace('</worksheet>', '<drawing r:id="d"/></worksheet>'), rels: [['d', 'drawing', '../drawings/drawing1.xml']] }, { name: 't', body: grid(5, 3) }], { extra: { 'xl/drawings/drawing1.xml': drawing } }), 'b.xlsx', 'b')
+    assert.doesNotMatch(panel(page, 1), /網頁版只顯示/)
+    assert.ok(shownRows(panel(page, 1)) >= 400, `${shownRows(panel(page, 1))} rows`)
+  })
+
+  test('large sheets early in a workbook cannot starve the sheets after them', () => {
+    const hog = grid(2000, 60)
+    const page = renderXlsxPage(book([{ name: 'a', body: hog }, { name: 'b', body: hog }, { name: 'c', body: hog }, { name: 'small', body: grid(600, 20) }]), 'b.xlsx', 'b')
+    assert.ok(shownRows(panel(page, 4)) >= 600, `small: ${shownRows(panel(page, 4))}`)
+    const hogs = [1, 2, 3].map((n) => shownRows(panel(page, n)))
+    assert.equal(new Set(hogs).size, 1, `the large sheets share alike: ${hogs}`)
+    assert.ok(hogs[0] >= XLSX_LIMITS.floorRows, `${hogs[0]}`)
+    // However many sheets share the budget, each still draws its first floorRows rows.
+    const many = renderXlsxPage(book(Array.from({ length: 30 }, (_, at) => ({ name: `s${at}`, body: grid(400, 60) }))), 'b.xlsx', 'b')
+    assert.ok(shownRows(panel(many, 30)) >= XLSX_LIMITS.floorRows, `last of many: ${shownRows(panel(many, 30))}`)
+  })
+})
+
+describe('what is not drawn says why, in Traditional Chinese', () => {
+  test('a missing picture, a linked picture and an undrawable one each have their own label', () => {
+    const anchor = (col: number, blip: string) =>
+      `<xdr:oneCellAnchor><xdr:from><xdr:col>${col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="952500" cy="952500"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${col + 1}" name="p"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill>${blip}</xdr:blipFill><xdr:spPr/></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>`
+    const drawing = `<xdr:wsDr ${DRAWING_NS}>${anchor(0, '<a:blip r:embed="gone"/>')}${anchor(2, '<a:blip r:embed="ext"/>')}${anchor(4, '<a:blip r:link="lnk"/>')}${anchor(6, '<a:blip r:embed="wmf"/>')}${anchor(8, '<a:blip/>')}</xdr:wsDr>`
+    const page = renderXlsxPage(
+      book([{ name: 's', body: sheet('', '', '<drawing r:id="d"/>'), rels: [['d', 'drawing', '../drawings/drawing1.xml']] }], {
+        extra: {
+          'xl/drawings/drawing1.xml': drawing,
+          'xl/drawings/_rels/drawing1.xml.rels': rels([['gone', 'image', '../media/gone.png'], ['ext', 'image', 'file:///C:/pics/a.png', 'External'], ['lnk', 'image', 'https://example.com/a.png', 'External'], ['wmf', 'image', '../media/a.wmf']]),
+          'xl/media/a.wmf': 'x'
+        }
+      }),
+      'b.xlsx',
+      'b'
+    )
+    const labels = [...page.matchAll(/class="xl-draw xl-missing"[^>]*>([^<]*)</g)].map((m) => m[1])
+    assert.deepEqual(labels, [
+      '圖片(檔案裡找不到這張圖片,可能已被移除或檔案不完整)',
+      '圖片(連結到檔案外的圖片,網頁版不會載入;請在 Excel 中開啟原始檔查看)',
+      '圖片(連結到檔案外的圖片,網頁版不會載入;請在 Excel 中開啟原始檔查看)',
+      '圖片(WMF 格式,網頁版未支援,請下載原始檔查看)',
+      '圖片(檔案裡找不到這張圖片,可能已被移除或檔案不完整)'
+    ])
+  })
+
+  test('a part too deep to walk fails alone with a message in Chinese', () => {
+    const deep = `<xdr:wsDr ${DRAWING_NS}><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/>${'<xdr:grpSp>'.repeat(1200)}${'</xdr:grpSp>'.repeat(1200)}<xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>`
+    const page = renderXlsxPage(
+      book([{ name: 's', body: sheet('<row r="1"><c r="A1" t="inlineStr"><is><t>格子還在</t></is></c></row>', '', '<drawing r:id="d"/>'), rels: [['d', 'drawing', '../drawings/drawing1.xml']] }], { extra: { 'xl/drawings/drawing1.xml': deep } }),
+      'b.xlsx',
+      'b'
+    )
+    assert.match(panel(page, 1), />格子還在</)
+    assert.match(panel(page, 1), /圖片與圖表無法顯示\(XML 巢狀超過 1000 層\)/)
+  })
+})
+
+describe('pictures placed in cells (Excel 365)', () => {
+  const META = `<metadata ${NS} xmlns:xlrd="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata"><metadataTypes count="1"><metadataType name="XLRICHVALUE"/></metadataTypes><futureMetadata name="XLRICHVALUE" count="3"><bk><extLst><ext uri="{3e2802c4-a4d2-4d8b-9148-e3be6c30e623}"><xlrd:rvb i="0"/></ext></extLst></bk><bk><extLst><ext uri="{3e2802c4-a4d2-4d8b-9148-e3be6c30e623}"><xlrd:rvb i="1"/></ext></extLst></bk><bk><extLst><ext uri="{3e2802c4-a4d2-4d8b-9148-e3be6c30e623}"><xlrd:rvb i="2"/></ext></extLst></bk></futureMetadata><valueMetadata count="3"><bk><rc t="1" v="0"/></bk><bk><rc t="1" v="1"/></bk><bk><rc t="1" v="2"/></bk></valueMetadata></metadata>`
+  const RV = '<rvData xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="3"><rv s="0"><v>1</v><v>5</v><v>商標 &lt;b&gt;</v></rv><rv s="1"><v>0</v><v>5</v></rv><rv s="0"><v>9</v><v>5</v><v>x</v></rv></rvData>'
+  const RVS = '<rvStructures xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="2"><s t="_localImage"><k n="_rvRel:LocalImageIdentifier" t="i"/><k n="CalcOrigin" t="i"/><k n="Text" t="s"/></s><s t="_webimage"><k n="_rvRel:WebImageIdentifier" t="i"/><k n="CalcOrigin" t="i"/></s></rvStructures>'
+  const RVR = `<richValueRels xmlns="http://schemas.microsoft.com/office/spreadsheetml/2022/richvaluerel" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><rel r:id="w"/><rel r:id="p"/></richValueRels>`
+  const page = () => {
+    const files = book(
+      [{ name: 's', body: sheet('<row r="1" ht="60" customHeight="1"><c r="A1" t="e" vm="1"><v>#VALUE!</v></c><c r="B1" t="e" vm="2"><v>#VALUE!</v></c><c r="C1" t="e" vm="3"><v>#VALUE!</v></c><c r="D1" t="e" vm="7"><v>#VALUE!</v></c></row>', '<cols><col min="1" max="1" width="20" customWidth="1"/></cols>') }],
+      {
+        extra: {
+          'xl/metadata.xml': META,
+          'xl/richData/rdrichvalue.xml': RV,
+          'xl/richData/rdrichvaluestructure.xml': RVS,
+          'xl/richData/richValueRel.xml': RVR,
+          'xl/richData/_rels/richValueRel.xml.rels': rels([['w', 'image', 'https://example.com/a.png', 'External'], ['p', 'image', '../media/image1.png']]),
+          'xl/media/image1.png': PNG
+        }
+      }
+    )
+    return panel(renderXlsxPage(files, 'b.xlsx', 'b'), 1)
+  }
+
+  test('the picture is drawn inside its cell, with its alt text; the #VALUE! placeholder is not shown', () => {
+    const html = page()
+    assert.doesNotMatch(html, /#VALUE!/)
+    // Column A is 20 characters wide (148px at Calibri 11) and the row 60pt (80px), less the padding.
+    assert.match(html, /<td><img class="xl-cellpic" src="~office\/b\.xlsx\/xl\/media\/image1\.png" alt="商標 &#60;b&#62;" loading="lazy" style="width:\d+px;height:78px"><\/td>/)
+  })
+
+  test('a web picture and a chain that leads nowhere become labels in the cell', () => {
+    const html = page()
+    assert.match(html, /<span class="xl-cellmiss">儲存格內的網路圖片\(網頁版不會載入\)<\/span>/)
+    assert.equal((html.match(/<span class="xl-cellmiss">儲存格內的圖片或資料類型\(網頁版未支援,請下載原始檔查看\)<\/span>/g) ?? []).length, 2)
+  })
+})
+
+describe('text that spreads past its cell', () => {
+  const spreadPage = () => {
+    const styles = `<styleSheet ${NS}><cellXfs count="4"><xf/><xf><alignment horizontal="right"/></xf><xf><alignment horizontal="center"/></xf><xf><alignment horizontal="centerContinuous"/></xf></cellXfs></styleSheet>`
+    const t = (ref: string, s: number, text: string) => `<c r="${ref}" s="${s}" t="inlineStr"><is><t>${text}</t></is></c>`
+    const body = sheet(
+      `<row r="1">${t('D1', 1, 'right aligned long text spills left')}</row>` +
+        `<row r="2">${t('C2', 2, 'centered long text spills both ways')}</row>` +
+        `<row r="3">${t('A3', 3, 'centre across')}<c r="B3" s="3"/><c r="C3" s="3"/></row>` +
+        `<row r="4"><c r="B4"><v>1</v></c>${t('C4', 1, 'right but blocked by B4')}</row>`,
+      '<cols><col min="1" max="6" width="12" customWidth="1"/></cols>'
+    )
+    return renderXlsxPage(book([{ name: 's', body }], { styles }), 'b.xlsx', 'b')
+  }
+
+  test('right-aligned text runs back over empty cells; centred text both ways; centre-across over its selection', () => {
+    const page = spreadPage()
+    assert.match(cellOf(page, 'right aligned long text spills left'), /class="x1 ov"[^>]*><span class="ovs ovr" style="width:\d+px;margin-inline-start:-\d+px"><span>/)
+    assert.match(cellOf(page, 'centered long text spills both ways'), /class="x2 ov"[^>]*><span class="ovs ovc" style="width:\d+px;margin-inline-start:-\d+px;clip-path:inset\(0 0px 0 \d+px\)"><span>/)
+    assert.match(cellOf(page, 'centre across'), /class="x3 ov"[^>]*><span class="ovs" style="width:\d+px">/)
+    assert.doesNotMatch(cellOf(page, 'right but blocked by B4'), /class="x1 ov"/)
+  })
+
+  test('in a browser, spread text shows whole, placed as Excel places it', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+    const browser = await chromium.launch({ executablePath: chromiumPath })
+    try {
+      const page = await browser.newPage()
+      await page.setContent(spreadPage())
+      const boxes = await page.evaluate(() => {
+        const out: Record<string, { text: [number, number]; cell: [number, number]; row: [number, number] }> = {}
+        for (const td of document.querySelectorAll('td')) {
+          if (!td.textContent) continue
+          const range = document.createRange()
+          range.selectNodeContents(td)
+          const text = range.getBoundingClientRect()
+          const cell = td.getBoundingClientRect()
+          const cells = [...td.parentElement!.querySelectorAll('td')]
+          const first = cells[0].getBoundingClientRect()
+          const third = cells[2].getBoundingClientRect()
+          out[td.textContent] = { text: [text.left, text.right], cell: [cell.left, cell.right], row: [first.left, third.right] }
+        }
+        return out
+      })
+      const right = boxes['right aligned long text spills left']
+      close(right.text[1], right.cell[1] - 2, 'right-aligned text ends at its cell’s right edge')
+      assert.ok(right.text[0] < right.cell[0] - 50, 'and reaches back over the empty cells')
+      const centred = boxes['centered long text spills both ways']
+      close((centred.text[0] + centred.text[1]) / 2, (centred.cell[0] + centred.cell[1]) / 2, 'centred text is centred on its cell')
+      assert.ok(centred.text[0] < centred.cell[0] && centred.text[1] > centred.cell[1], 'and spreads both ways')
+      const across = boxes['centre across']
+      close((across.text[0] + across.text[1]) / 2, (across.row[0] + across.row[1]) / 2, 'centre-across text is centred over A3:C3')
+      const visible = await page.evaluate(() => [...document.querySelectorAll('td.ov .ovs')].every((span) => span.scrollWidth <= span.clientWidth + 1))
+      assert.ok(visible, 'no spread text is cut inside its run')
+      // Right-aligned text with no room left keeps its end in view, as Excel does, and loses its start.
+      await page.setContent(renderXlsxPage(book([{ name: 's', body: sheet('<row r="1"><c r="B1" s="1" t="inlineStr"><is><t>START of a right aligned text far too long for A and B END</t></is></c></row>', '<cols><col min="1" max="2" width="8" customWidth="1"/></cols>') }], { styles: `<styleSheet ${NS}><cellXfs count="2"><xf/><xf><alignment horizontal="right"/></xf></cellXfs></styleSheet>` }), 'b.xlsx', 'b'))
+      const cut = await page.evaluate(() => {
+        const td = document.querySelector('td.ov')!
+        const range = document.createRange()
+        range.selectNodeContents(td)
+        return { text: range.getBoundingClientRect().right, cell: td.getBoundingClientRect().right }
+      })
+      close(cut.text, cut.cell - 2, 'the end of the text stays at the right edge')
+    } finally {
+      await browser.close()
+    }
+  })
+})
+
+describe('conditional formats beyond comparisons and scales', () => {
+  const STYLES_CF = `<styleSheet ${NS}><dxfs count="1"><dxf><font><b/><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>`
+  /** A sheet of the given rows (arrays of cell XML bodies by column) with the given rules; returns a cell picker. */
+  const cfPage = (rows: string[][], rules: string) => {
+    const xml = rows.map((cells, r) => `<row r="${r + 1}">${cells.map((cell, c) => (cell ? `<c r="${colName(c + 1)}${r + 1}"${cell}</c>` : '')).join('')}</row>`).join('')
+    const page = panel(renderXlsxPage(book([{ name: 's', body: sheet(xml, '', rules) }], { styles: STYLES_CF }), 'b.xlsx', 'b'), 1)
+    const cell = (ref: string) => {
+      const col = ref.charCodeAt(0) - 64
+      const row = Number(ref.slice(1))
+      const start = page.indexOf(`<th>${row}</th>`)
+      const tr = page.slice(start, page.indexOf('</tr>', start))
+      return [...tr.matchAll(/<td[^>]*>(?:(?!<\/td>).)*<\/td>/g)][col - 1][0]
+    }
+    return { page, cell, styled: (ref: string) => /background:#FFC7CE/.test(cell(ref)) }
+  }
+  const n = (v: number) => `><v>${v}</v>`
+  const t = (v: string) => ` t="inlineStr"><is><t>${v}</t></is>`
+  const rule = (sqref: string, body: string) => `<conditionalFormatting sqref="${sqref}">${body}</conditionalFormatting>`
+
+  test('top and bottom N, by count and percent; above and below the average', () => {
+    const rows = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((v) => [n(v), n(v), n(v), n(v)])
+    const { styled } = cfPage(rows,
+      rule('A1:A10', '<cfRule type="top10" dxfId="0" priority="1" rank="3"/>') +
+      rule('B1:B10', '<cfRule type="top10" dxfId="0" priority="2" rank="20" percent="1" bottom="1"/>') +
+      rule('C1:C10', '<cfRule type="aboveAverage" dxfId="0" priority="3"/>') +
+      rule('D1:D10', '<cfRule type="aboveAverage" dxfId="0" priority="4" aboveAverage="0" equalAverage="1"/>'))
+    assert.deepEqual([7, 8, 9, 10].map((r) => styled(`A${r}`)), [false, true, true, true])
+    assert.deepEqual([1, 2, 3].map((r) => styled(`B${r}`)), [true, true, false])
+    assert.deepEqual([5, 6].map((r) => styled(`C${r}`)), [false, true])
+    assert.deepEqual([5, 6].map((r) => styled(`D${r}`)), [true, false])
+  })
+
+  test('text, blank, error and duplicate rules', () => {
+    const rows = [[t('Apple pie'), t('x'), '', t('甲')], [t('banana'), t(' '), ' t="e"><v>#N/A</v>', t('乙')], [t('PINEAPPLE'), n(3), n(1), t('甲')]]
+    const { styled } = cfPage(rows,
+      rule('A1:A3', '<cfRule type="containsText" dxfId="0" priority="1" operator="containsText" text="apple"><formula>NOT(ISERROR(SEARCH("apple",A1)))</formula></cfRule>') +
+      rule('B1:B3', '<cfRule type="containsBlanks" dxfId="0" priority="2"><formula>LEN(TRIM(B1))=0</formula></cfRule>') +
+      rule('C1:C3', '<cfRule type="containsErrors" dxfId="0" priority="3"><formula>ISERROR(C1)</formula></cfRule>') +
+      rule('D1:D3', '<cfRule type="duplicateValues" dxfId="0" priority="4"/>'))
+    assert.deepEqual(['A1', 'A2', 'A3'].map(styled), [true, false, true])
+    assert.deepEqual(['B1', 'B2', 'B3'].map(styled), [false, true, false])
+    assert.deepEqual(['C2', 'C3'].map(styled), [true, false])
+    assert.deepEqual(['D1', 'D2', 'D3'].map(styled), [true, false, true])
+  })
+
+  test('formula rules run relative to the first cell of their range, and say so when they cannot', () => {
+    const rows = [[t('完成'), n(1)], [t('進行中'), n(2)], [t('完成'), n(3)], [t('取消'), n(4)]]
+    const { styled, page } = cfPage(rows,
+      rule('A1:B4', '<cfRule type="expression" dxfId="0" priority="1"><formula>$A1="完成"</formula></cfRule>') +
+      rule('B1:B4', '<cfRule type="expression" dxfId="0" priority="2"><formula>AND(MOD(ROW(),2)=0,B1&gt;=4)</formula></cfRule>'))
+    assert.deepEqual(['A1', 'B1', 'A2', 'B2', 'A3', 'B3', 'B4'].map(styled), [true, true, false, false, true, true, true])
+    assert.doesNotMatch(page, /條件式格式/)
+    const other = cfPage(rows, rule('A1:A4', '<cfRule type="expression" dxfId="0" priority="1"><formula>VLOOKUP(A1,Sheet2!A:B,2,0)&gt;1</formula></cfRule><cfRule type="timePeriod" dxfId="0" priority="2" timePeriod="today"><formula>FLOOR(A1,1)=TODAY()</formula></cfRule>'))
+    assert.match(other.page, /此工作表有部分條件式格式\(公式規則、日期期間規則\)網頁版沒有套用/)
+    assert.ok(!other.styled('A1'))
+  })
+
+  test('comparisons take text and formulas as operands, and treat a blank cell as Excel does', () => {
+    const rows = [[t('Done'), n(5), n(1)], [t('done'), n(12), n(9)], [t('進行中'), n(7), '']]
+    const { styled } = cfPage(rows,
+      rule('A1:A3', '<cfRule type="cellIs" dxfId="0" priority="1" operator="equal"><formula>"DONE"</formula></cfRule>') +
+      rule('B1:B3', '<cfRule type="cellIs" dxfId="0" priority="2" operator="between"><formula>$C$1*6</formula><formula>C1</formula></cfRule>') +
+      rule('C1:C3', '<cfRule type="cellIs" dxfId="0" priority="3" operator="lessThan"><formula>5</formula></cfRule>'))
+    assert.deepEqual(['A1', 'A2', 'A3'].map(styled), [true, true, false])
+    // Between $C$1*6 (6) and C of the same row, in either order: 5 in [1,6], 12 not in [6,9], 7 not in [0,6].
+    assert.deepEqual(['B1', 'B2', 'B3'].map(styled), [true, false, false])
+    // An empty cell counts as 0, so "less than 5" marks it, as in Excel.
+    assert.deepEqual(['C1', 'C2', 'C3'].map(styled), [true, false, true])
+  })
+
+  test('icon sets put their icon at the start of the cell; reversed sets and hidden values follow the file', () => {
+    const rows = [1, 5, 9].map((v) => [n(v), n(v), n(v)])
+    const { cell } = cfPage(rows,
+      rule('A1:A3', '<cfRule type="iconSet" priority="1"><iconSet iconSet="3Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule>') +
+      rule('B1:B3', '<cfRule type="iconSet" priority="2"><iconSet iconSet="3TrafficLights1" reverse="1" showValue="0"><cfvo type="percent" val="0"/><cfvo type="num" val="5"/><cfvo type="num" val="9" gte="0"/></iconSet></cfRule>'))
+    assert.match(cell('A1'), /<span class="xl-ico" style="color:#D9363E">↓<\/span>1</)
+    assert.match(cell('A2'), /<span class="xl-ico" style="color:#F2B705">→<\/span>5</)
+    assert.match(cell('A3'), /<span class="xl-ico" style="color:#1E9E4A">↑<\/span>9</)
+    // Reversed: the lowest value gets the green light; 9 is not above 9, so it stays in the middle band.
+    assert.match(cell('B1'), /<span class="xl-ico" style="color:#1E9E4A">●<\/span><\/td>/)
+    assert.match(cell('B3'), /<span class="xl-ico" style="color:#F2B705">●<\/span><\/td>/)
+    assert.doesNotMatch(cell('C1'), /xl-ico/)
+  })
+
+  test('Excel 2010 icon sets in the extension list are drawn, with custom icons', () => {
+    const rows = [1, 5, 9].map((v) => [n(v)])
+    const ext = `<extLst><ext uri="{78C0D931-6437-407d-A8EE-F0AAD7539E65}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:conditionalFormattings><x14:conditionalFormatting xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><x14:cfRule type="iconSet" priority="1" id="{1}"><x14:iconSet iconSet="3Triangles" custom="1"><x14:cfvo type="percent"><xm:f>0</xm:f></x14:cfvo><x14:cfvo type="percent"><xm:f>33</xm:f></x14:cfvo><x14:cfvo type="percent"><xm:f>67</xm:f></x14:cfvo><x14:cfIcon iconSet="3Flags" iconId="0"/><x14:cfIcon iconSet="NoIcons" iconId="0"/><x14:cfIcon iconSet="3Stars" iconId="2"/></x14:iconSet></x14:cfRule><xm:sqref>A1:A3</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>`
+    const { cell } = cfPage(rows, ext)
+    assert.match(cell('A1'), /<span class="xl-ico" style="color:#D9363E">⚑<\/span>1</)
+    assert.doesNotMatch(cell('A2'), /xl-ico/)
+    assert.match(cell('A3'), /<span class="xl-ico" style="color:#F2B705">★<\/span>9</)
+  })
+})

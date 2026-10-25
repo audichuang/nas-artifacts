@@ -6,6 +6,9 @@ export type XmlNode = { name: string; attrs: Record<string, string>; children: X
 
 export class XmlError extends Error {}
 
+/** How deep elements may nest. Office files stay far below it; a crafted one would overflow the stack. */
+export const MAX_DEPTH = 1000
+
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
 
 function decode(text: string): string {
@@ -19,10 +22,10 @@ function decode(text: string): string {
   })
 }
 
+/** Just past the next `token`, or -1 when the source ends first. */
 function skipPast(source: string, token: string, from: number): number {
   const found = source.indexOf(token, from)
-  if (found < 0) throw new XmlError('unterminated markup')
-  return found + token.length
+  return found < 0 ? -1 : found + token.length
 }
 
 const isSpace = (char: string) => char === ' ' || char === '\t' || char === '\n' || char === '\r'
@@ -63,7 +66,19 @@ function readAttrs(inner: string, from: number, into: Record<string, string>): v
   }
 }
 
-export function parseXml(source: string, maxNodes = 2_000_000): XmlNode {
+/** The attributes of one start tag given as raw text (`<row r='3' ht = "20">`), read by the same rules as parseXml. */
+export function tagAttrs(tag: string): Record<string, string> {
+  const attrs: Record<string, string> = {}
+  const nameEnd = tag.search(/[\s/>]/)
+  if (nameEnd > 0) readAttrs(tag, nameEnd, attrs)
+  return attrs
+}
+
+/**
+ * `cut` reads the first part of a document whose end was not read (a part too large to inflate whole):
+ * elements still open at the end are closed there instead of failing.
+ */
+export function parseXml(source: string, maxNodes = 2_000_000, cut = false): XmlNode {
   const root: XmlNode = { name: '#root', attrs: {}, children: [], text: '' }
   const stack: XmlNode[] = [root]
   let at = 0
@@ -72,21 +87,26 @@ export function parseXml(source: string, maxNodes = 2_000_000): XmlNode {
     const open = source.indexOf('<', at)
     if (open < 0) break
     if (open > at) stack[stack.length - 1].text += decode(source.slice(at, open))
-    if (source.startsWith('<?', open)) {
-      at = skipPast(source, '?>', open)
-    } else if (source.startsWith('<!--', open)) {
-      at = skipPast(source, '-->', open)
+    // Markup the source ends inside: an error, or in a document read only in part, where it stops.
+    if (source.startsWith('<?', open) || source.startsWith('<!--', open)) {
+      at = skipPast(source, source[open + 1] === '?' ? '?>' : '-->', open)
+      if (at < 0 && cut) break
+      if (at < 0) throw new XmlError('XML 標記沒有結束')
     } else if (source.startsWith('<![CDATA[', open)) {
       const close = source.indexOf(']]>', open)
-      if (close < 0) throw new XmlError('unclosed CDATA')
+      if (close < 0 && cut) break
+      if (close < 0) throw new XmlError('XML 的 CDATA 區段沒有結束')
       stack[stack.length - 1].text += source.slice(open + 9, close)
       at = close + 3
     } else if (source.startsWith('<!', open)) {
-      throw new XmlError('DTDs are not accepted')
+      throw new XmlError('不接受含 DTD 的 XML')
     } else if (source[open + 1] === '/') {
-      const close = skipPast(source, '>', open) - 1
+      const past = skipPast(source, '>', open)
+      if (past < 0 && cut) break
+      if (past < 0) throw new XmlError('XML 標記沒有結束')
+      const close = past - 1
       const name = source.slice(open + 2, close).trim()
-      if (stack.length < 2 || stack[stack.length - 1].name !== name) throw new XmlError(`unexpected </${name}>`)
+      if (stack.length < 2 || stack[stack.length - 1].name !== name) throw new XmlError(`XML 多出了 </${name}>`)
       stack.pop()
       at = close + 1
     } else {
@@ -100,21 +120,26 @@ export function parseXml(source: string, maxNodes = 2_000_000): XmlNode {
         } else if (char === '"' || char === "'") quote = char
         else if (char === '>') break
       }
-      if (close >= source.length) throw new XmlError('unclosed tag')
+      if (close >= source.length && cut) break
+      if (close >= source.length) throw new XmlError('XML 標籤沒有結束')
       const selfClosing = source[close - 1] === '/'
       const inner = source.slice(open + 1, selfClosing ? close - 1 : close)
       const nameEnd = inner.search(/[\s/]|$/)
       const node: XmlNode = { name: inner.slice(0, nameEnd), attrs: {}, children: [], text: '' }
       readAttrs(inner, nameEnd, node.attrs)
-      if (++nodes > maxNodes) throw new XmlError('document too large')
+      if (++nodes > maxNodes) throw new XmlError('XML 內容太多')
       stack[stack.length - 1].children.push(node)
-      if (!selfClosing) stack.push(node)
+      if (!selfClosing) {
+        // Renderers walk the tree recursively; past this depth they would run out of stack.
+        if (stack.length > MAX_DEPTH) throw new XmlError(`XML 巢狀超過 ${MAX_DEPTH} 層`)
+        stack.push(node)
+      }
       at = close + 1
     }
   }
-  if (stack.length > 1) throw new XmlError(`<${stack[stack.length - 1].name}> is not closed`)
+  if (stack.length > 1 && !cut) throw new XmlError(`XML 的 <${stack[stack.length - 1].name}> 沒有結束`)
   const element = root.children[0]
-  if (!element) throw new XmlError('empty document')
+  if (!element) throw new XmlError('XML 是空的')
   return element
 }
 

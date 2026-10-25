@@ -404,7 +404,26 @@ type Layer = { pPr: (XmlNode | null)[]; rPr: (XmlNode | null)[] }
 type Geometry = { w: number; h: number; top: number; right: number; bottom: number; left: number; header: number; footer: number; cols: number; colSpace: number; grid: number; vertical: boolean; type: string }
 type Scope = { story: Story; layer: Layer; depth: number; width: number; dark: boolean; grid: number; sheet: Geometry | null }
 type Link = { href?: string; title?: string } | null
-type Inline = { parts: string[]; text: string[]; visual: boolean }
+/** A paragraph's inline content; `pins` are drawings placed relative to the paragraph itself, drawn at its start. */
+type Inline = { parts: string[]; text: string[]; visual: boolean; pins: string[] }
+/** Where a floating drawing sits, in points: `relH`/`relV` are Word's relativeFrom values. */
+type Placement = { relH: string; relV: string; alignH?: string; alignV?: string; offH: number; offV: number; w: number; h: number; behind: boolean; rotate?: number }
+
+/** An offset along one side: an alignment inside [start, start + area], or start + offset. */
+const alignIn = (align: string | undefined, start: number, area: number, size: number, offset: number) => {
+  if (align === 'center') return start + (area - size) / 2
+  if (align === 'right' || align === 'bottom' || align === 'outside') return start + area - size
+  if (align === 'left' || align === 'top' || align === 'inside') return start
+  return start + offset
+}
+/** A VML length (CSS-like, unitless means pixels) in points. */
+const vmlLength = (value: string | undefined): number => {
+  const match = /^(-?[\d.]+)(pt|in|cm|mm|px|pc)?$/.exec((value ?? '').trim())
+  if (!match) return 0
+  const factor = { pt: 1, in: 72, cm: 72 / 2.54, mm: 72 / 25.4, px: 0.75, pc: 12 }[match[2] ?? 'px'] ?? 0.75
+  return clamp(Number(match[1]) * factor, -4000, 4000) || 0
+}
+const PAGE_BREAK = '<span class="dx-pgbr" role="separator" aria-label="分頁"></span>'
 type ParaInfo = { node: XmlNode; styleId: string; props: ParaProps; base: RunProps; mark: RunProps; num?: { numId: string; ilvl: number }; sig: string }
 
 const EMPTY_LAYER: Layer = { pPr: [], rPr: [] }
@@ -441,10 +460,25 @@ const cleanText = (text: string) => text.replace(/[\u0000-\u0008\u000B\u000C\u00
 /** Every string from the file reaches the page through here: control characters dropped (one is the tab marker), then escaped. */
 const esc = (text: string) => escapeHtml(cleanText(text))
 
-const unsupported = (label: string, w?: number, h?: number) => {
+const UNSUPPORTED_NOTE = '網頁版未支援,請下載原始檔查看'
+/** A labelled box for something the page does not draw; `note` says why (by default: the web view does not draw it). */
+const unsupported = (label: string, w?: number, h?: number, note = UNSUPPORTED_NOTE) => {
   const size = w && w > 0 ? `width:${pt(clamp(w, 40, 1000))};` : ''
   const height = h && h > 0 ? `min-height:${pt(clamp(h, 0, 160))};` : ''
-  return `<span class="dx-unsup" style="${size}${height}">${esc(label)}(網頁版未支援,請下載原始檔查看)</span>`
+  return `<span class="dx-unsup" style="${size}${height}">${esc(label)}(${esc(note)})</span>`
+}
+const MISSING_PICTURE = ['圖片遺失', '檔案裡找不到這張圖片'] as const
+const EXTERNAL_PICTURE = ['外部連結的圖片', '圖片在文件之外,網頁版不載入外部連結'] as const
+
+const hasHan = (text: string) => /[\u3400-\u9fff]/.test(text)
+/** Why something could not be read, in words for the reader: the parser's own message only when it is Chinese. */
+function reason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (hasHan(message)) return message
+  if (error instanceof XmlError) return 'XML 格式有誤'
+  if (error instanceof ZipError) return '壓縮檔內容損毀'
+  if (error instanceof RangeError) return '內容層次太深或太大'
+  return '內容無法解析'
 }
 
 const textOf = (node: XmlNode | null | undefined): string => {
@@ -468,6 +502,314 @@ function parseHyperlinkInstr(instr: string): Link {
   }
   if (anchor) return { href: `#${anchorId(anchor)}` }
   return url ? { title: url } : null
+}
+
+// ---------------------------------------------------------------------------------------------
+// Embedded HTML (w:altChunk): html-docx-js and other generators put the whole body in one HTML or
+// MHT part. It is untrusted markup, so it is rebuilt through a whitelist: text and structure only.
+
+const CHUNK_LIMITS = { bytes: 16 * 1024 * 1024, tags: 50_000, image: 8 * 1024 * 1024 }
+
+const ENTITIES: Record<string, string> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0', copy: '©', reg: '®', trade: '™', hellip: '…', mdash: '—', ndash: '–',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', sbquo: '‚', bdquo: '„', bull: '•', middot: '·', times: '×', divide: '÷', deg: '°',
+  plusmn: '±', euro: '€', pound: '£', yen: '¥', cent: '¢', sect: '§', para: '¶', laquo: '«', raquo: '»', shy: '\u00ad', ensp: '\u2002',
+  emsp: '\u2003', thinsp: '\u2009', zwnj: '\u200c', zwj: '\u200d', iexcl: '¡', iquest: '¿', frac12: '½', frac14: '¼', frac34: '¾',
+  sup1: '¹', sup2: '²', sup3: '³', micro: 'µ', larr: '←', rarr: '→', uarr: '↑', darr: '↓', harr: '↔', le: '≤', ge: '≥', ne: '≠',
+  infin: '∞', minus: '−', prime: '′', Prime: '″', dagger: '†', Dagger: '‡', permil: '‰', ordf: 'ª', ordm: 'º', not: '¬', macr: '¯',
+  acute: '´', cedil: '¸', uml: '¨', szlig: 'ß', agrave: 'à', aacute: 'á', acirc: 'â', atilde: 'ã', auml: 'ä', aring: 'å', aelig: 'æ',
+  ccedil: 'ç', egrave: 'è', eacute: 'é', ecirc: 'ê', euml: 'ë', igrave: 'ì', iacute: 'í', icirc: 'î', iuml: 'ï', ntilde: 'ñ', ograve: 'ò',
+  oacute: 'ó', ocirc: 'ô', otilde: 'õ', ouml: 'ö', oslash: 'ø', ugrave: 'ù', uacute: 'ú', ucirc: 'û', uuml: 'ü', yacute: 'ý', yuml: 'ÿ',
+  Agrave: 'À', Aacute: 'Á', Acirc: 'Â', Atilde: 'Ã', Auml: 'Ä', Aring: 'Å', AElig: 'Æ', Ccedil: 'Ç', Egrave: 'È', Eacute: 'É', Ecirc: 'Ê',
+  Euml: 'Ë', Ntilde: 'Ñ', Ograve: 'Ò', Oacute: 'Ó', Ocirc: 'Ô', Otilde: 'Õ', Ouml: 'Ö', Oslash: 'Ø', Ugrave: 'Ù', Uacute: 'Ú', Ucirc: 'Û', Uuml: 'Ü'
+}
+
+const decodeEntities = (text: string) =>
+  text.replace(/&(#[xX][0-9a-fA-F]{1,6}|#\d{1,7}|[A-Za-z][A-Za-z0-9]{1,31});?/g, (whole, body: string) => {
+    if (body[0] === '#') {
+      const code = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10)
+      return code > 0 && code < 0x110000 && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : '\ufffd'
+    }
+    return ENTITIES[body] ?? whole
+  })
+
+/** Tags kept as they are (attributes dropped, except colspan/rowspan); a few spellings map onto them. */
+const CHUNK_TAGS = new Set(['p', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'b', 'strong', 'i', 'em', 'u', 's', 'sub', 'sup', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'pre', 'code'])
+const CHUNK_ALIAS: Record<string, string> = { strike: 's', del: 's' }
+/** Raw-text elements: their content is not markup and is never shown. */
+const CHUNK_RAW = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext'])
+/** Elements dropped with everything inside them. */
+const CHUNK_DROP = new Set(['head', 'template', 'svg', 'math', 'select', 'object', 'video', 'audio', 'canvas', 'map', 'datalist'])
+/** Dropped block containers: their text stays, on lines of its own. */
+const CHUNK_BLOCKS = new Set(['div', 'section', 'article', 'header', 'footer', 'main', 'nav', 'aside', 'figure', 'figcaption', 'address', 'center', 'dl', 'dt', 'dd', 'hr', 'caption', 'form', 'fieldset', 'legend', 'details', 'summary', 'body', 'html', 'tfoot', 'colgroup', 'col', 'option', 'label'])
+const CHUNK_PARA_CLOSERS = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'table', 'blockquote', 'pre'])
+const CHUNK_IMAGE = /^data:image\/(png|jpe?g|gif|webp|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s]*$/i
+const CHUNK_LINK = /^(https?|mailto|ftp):/i
+
+/**
+ * HTML rebuilt from scratch through a whitelist: only CHUNK_TAGS, links as text with their address as
+ * a title, pictures only from data: URIs of image types (`resolve` turns an MHT part's address into
+ * one). Every other tag, attribute, script, style and handler is dropped; text is escaped; the result
+ * is balanced, so nothing in it can reach outside the box it is put in.
+ */
+function sanitizeChunk(source: string, resolve?: (src: string) => string | undefined): { html: string; text: string; cut: boolean } {
+  let out = ''
+  const text: string[] = []
+  const stack: { name: string; close: string }[] = []
+  let at = 0
+  let tags = 0
+  let drop: string | null = null
+  let dropDepth = 0
+  let lineHasContent = false
+  let pendingBreak = false
+  const has = (name: string, stopAt: string[]) => {
+    for (let i = stack.length - 1; i >= 0; i--) {
+      if (stack[i].name === name) return i
+      if (stopAt.includes(stack[i].name)) return -1
+    }
+    return -1
+  }
+  const closeTo = (index: number) => {
+    while (stack.length > index) out += stack.pop()!.close
+  }
+  const boundary = () => {
+    if (lineHasContent) pendingBreak = true
+  }
+  const block = () => {
+    pendingBreak = false
+    lineHasContent = false
+  }
+  const content = () => {
+    if (pendingBreak) out += '<br>'
+    pendingBreak = false
+    lineHasContent = true
+  }
+  const open = (name: string, html: string, close: string) => {
+    out += html
+    stack.push({ name, close })
+  }
+  while (at < source.length) {
+    const lt = source.indexOf('<', at)
+    const chunk = lt < 0 ? source.slice(at) : source.slice(at, lt)
+    if (chunk && !drop) {
+      const decoded = decodeEntities(chunk)
+      if (decoded.trim()) content()
+      out += esc(decoded)
+      text.push(decoded)
+    }
+    if (lt < 0) break
+    at = lt
+    if (source.startsWith('<!--', at)) {
+      const end = source.indexOf('-->', at + 4)
+      at = end < 0 ? source.length : end + 3
+      continue
+    }
+    const next = source[at + 1] ?? ''
+    if (next === '!' || next === '?') {
+      const end = source.indexOf('>', at)
+      at = end < 0 ? source.length : end + 1
+      continue
+    }
+    const closing = next === '/'
+    const tagMatch = /^[A-Za-z][^\s/>]*/.exec(source.slice(at + (closing ? 2 : 1), at + (closing ? 2 : 1) + 64))
+    if (!tagMatch) {
+      if (!drop) {
+        content()
+        out += '&lt;'
+        text.push('<')
+      }
+      at++
+      continue
+    }
+    // Attributes: name, then an optional value in double, single or no quotes.
+    let cursor = at + (closing ? 2 : 1) + tagMatch[0].length
+    const attrs: Record<string, string> = {}
+    const attrPattern = /\s*([^\s/>=][^\s/>=]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*)))?|\s*\/(?!>)|\s+/y
+    while (cursor < source.length && source[cursor] !== '>' && !source.startsWith('/>', cursor)) {
+      attrPattern.lastIndex = cursor
+      const m = attrPattern.exec(source)
+      if (!m || m[0] === '') {
+        cursor++
+        continue
+      }
+      if (m[1] && Object.keys(attrs).length < 100) attrs[m[1].toLowerCase()] ??= decodeEntities(m[2] ?? m[3] ?? m[4] ?? '')
+      cursor = attrPattern.lastIndex
+    }
+    if (cursor >= source.length) break
+    at = cursor + (source[cursor] === '>' ? 1 : 2)
+    if (++tags > CHUNK_LIMITS.tags) {
+      closeTo(0)
+      return { html: out, text: text.join(''), cut: true }
+    }
+    const raw = tagMatch[0].toLowerCase()
+    if (!closing && CHUNK_RAW.has(raw)) {
+      const end = new RegExp(`</${raw}`, 'ig')
+      end.lastIndex = at
+      const found = end.exec(source)
+      if (!found) break
+      const after = source.indexOf('>', found.index)
+      at = after < 0 ? source.length : after + 1
+      continue
+    }
+    if (drop) {
+      if (raw === drop) dropDepth += closing ? -1 : 1
+      if (dropDepth <= 0) drop = null
+      continue
+    }
+    if (!closing && CHUNK_DROP.has(raw)) {
+      drop = raw
+      dropDepth = 1
+      continue
+    }
+    if (CHUNK_BLOCKS.has(raw)) {
+      boundary()
+      continue
+    }
+    const name = CHUNK_ALIAS[raw] ?? raw
+    if (name === 'a') {
+      if (closing) {
+        const index = has('a', ['td', 'th', 'table'])
+        if (index >= 0) closeTo(index)
+      } else {
+        const href = (attrs.href ?? '').trim()
+        open('a', CHUNK_LINK.test(href) ? `<span class="dx-lnk" title="${esc(href.slice(0, 2000))}">` : '<span class="dx-lnk">', '</span>')
+      }
+      continue
+    }
+    if (name === 'img') {
+      if (closing) continue
+      const src = (attrs.src ?? '').trim()
+      const url = (CHUNK_IMAGE.test(src) ? src : resolve?.(src)) ?? ''
+      if (!CHUNK_IMAGE.test(url) || url.length > CHUNK_LIMITS.image * 1.4) continue
+      const size = (key: string) => (/^\d{1,5}$/.test(attrs[key] ?? '') ? ` ${key}="${clamp(Number(attrs[key]), 1, 4000)}"` : '')
+      content()
+      out += `<img class="dx-img" src="${esc(url.replace(/\s+/g, ''))}" alt="${esc((attrs.alt ?? '').slice(0, 500))}"${size('width')}${size('height')}>`
+      continue
+    }
+    if (!CHUNK_TAGS.has(name)) continue
+    if (name === 'br') {
+      out += '<br>'
+      pendingBreak = false
+      lineHasContent = false
+      continue
+    }
+    if (closing) {
+      // As in HTML, an end tag does not reach past a cell or table it is not inside of.
+      const index = has(name, name === 'table' ? [] : name === 'td' || name === 'th' || name === 'tr' || name === 'thead' || name === 'tbody' ? ['table'] : ['td', 'th', 'table'])
+      if (index >= 0) closeTo(index)
+      if (CHUNK_PARA_CLOSERS.has(name) || ['li', 'tr', 'td', 'th'].includes(name)) block()
+      continue
+    }
+    // Opening a block closes what HTML's own rules would close.
+    if (CHUNK_PARA_CLOSERS.has(name) || name === 'li') {
+      const p = has('p', ['li', 'td', 'th', 'blockquote', 'table'])
+      if (p >= 0) closeTo(p)
+    }
+    if (/^h[1-6]$/.test(name)) {
+      for (let i = stack.length - 1; i >= 0 && !['li', 'td', 'th', 'blockquote', 'table'].includes(stack[i].name); i--) {
+        if (/^h[1-6]$/.test(stack[i].name)) {
+          closeTo(i)
+          break
+        }
+      }
+    }
+    if (name === 'li') {
+      const li = has('li', ['ul', 'ol'])
+      if (li >= 0) closeTo(li)
+    } else if (name === 'tr') {
+      const tr = has('tr', ['table', 'thead', 'tbody'])
+      if (tr >= 0) closeTo(tr)
+    } else if (name === 'td' || name === 'th') {
+      const cell = Math.max(has('td', ['tr', 'table']), has('th', ['tr', 'table']))
+      if (cell >= 0) closeTo(cell)
+    } else if (name === 'thead' || name === 'tbody') {
+      const section = Math.max(has('thead', ['table']), has('tbody', ['table']))
+      if (section >= 0) closeTo(section)
+    }
+    let attributes = ''
+    if (name === 'td' || name === 'th') {
+      for (const key of ['colspan', 'rowspan']) {
+        const value = attrs[key]
+        if (value && /^\s*\d{1,4}\s*$/.test(value) && Number(value) > 1) attributes += ` ${key}="${clamp(Number(value), 1, 1000)}"`
+      }
+    }
+    if (CHUNK_PARA_CLOSERS.has(name) || ['li', 'tr', 'td', 'th', 'thead', 'tbody'].includes(name)) block()
+    open(name, `<${name}${attributes}>`, `</${name}>`)
+  }
+  closeTo(0)
+  return { html: out, text: text.join(''), cut: false }
+}
+
+/** Text from bytes: a BOM, else the declared charset, else a `<meta charset>`, else UTF-8. */
+function decodeChunk(bytes: Buffer, charset?: string): string {
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return bytes.subarray(3).toString('utf8')
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes.subarray(2))
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes.subarray(2))
+  const label = charset || /<meta[^>]+charset\s*=\s*["']?\s*([\w.:-]+)/i.exec(bytes.subarray(0, 4096).toString('latin1'))?.[1]
+  try {
+    return new TextDecoder(label || 'utf-8').decode(bytes)
+  } catch {
+    return bytes.toString('utf8')
+  }
+}
+
+type MimePart = { headers: Map<string, string>; body: string }
+
+function mimePart(block: string): MimePart {
+  const split = /\r?\n\r?\n/.exec(block)
+  const head = split ? block.slice(0, split.index) : block
+  const headers = new Map<string, string>()
+  for (const line of head.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/)) {
+    const colon = line.indexOf(':')
+    if (colon > 0) headers.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim())
+  }
+  return { headers, body: split ? block.slice(split.index + split[0].length) : '' }
+}
+
+const mimeParam = (value: string | undefined, name: string) => new RegExp(`(?:^|;)\\s*${name}\\s*=\\s*(?:"([^"]*)"|([^\\s;]+))`, 'i').exec(value ?? '')?.slice(1).find((v) => v !== undefined)
+
+function mimeBody(part: MimePart): Buffer {
+  const encoding = (part.headers.get('content-transfer-encoding') ?? '').toLowerCase()
+  if (encoding === 'base64') return Buffer.from(part.body.replace(/[^A-Za-z0-9+/=]/g, ''), 'base64')
+  if (encoding === 'quoted-printable') {
+    const bytes = part.body.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    return Buffer.from(bytes, 'latin1')
+  }
+  return Buffer.from(part.body, 'latin1')
+}
+
+/** An MHT (MIME web archive) part: its HTML, and its pictures as data: URIs looked up by address. */
+function readMht(bytes: Buffer): { html: string; resolve: (src: string) => string | undefined } | null {
+  const top = mimePart(bytes.toString('latin1'))
+  const boundary = mimeParam(top.headers.get('content-type'), 'boundary')
+  const parts: MimePart[] = []
+  if (!boundary) parts.push(top)
+  else {
+    for (const block of top.body.split(`--${boundary}`).slice(1)) {
+      if (block.startsWith('--')) break
+      parts.push(mimePart(block.replace(/^[ \t]*\r?\n/, '')))
+    }
+  }
+  const typeOf = (part: MimePart) => (part.headers.get('content-type') ?? 'text/plain').split(';')[0].trim().toLowerCase()
+  const page = parts.find((part) => typeOf(part) === 'text/html')
+  if (!page) return null
+  const images = new Map<string, string>()
+  for (const part of parts) {
+    const type = typeOf(part)
+    if (!/^image\/(png|jpe?g|gif|webp|bmp|svg\+xml)$/.test(type) || part.body.length > CHUNK_LIMITS.image * 1.4) continue
+    const url = `data:${type};base64,${mimeBody(part).toString('base64')}`
+    const location = part.headers.get('content-location')
+    const id = part.headers.get('content-id')?.replace(/^<|>$/g, '')
+    if (location) images.set(location, url)
+    if (id) images.set(`cid:${id}`, url)
+  }
+  const resolve = (src: string) => {
+    if (images.has(src)) return images.get(src)
+    const base = src.split(/[\\/]/).pop()
+    const matches = [...images.keys()].filter((key) => key.split(/[\\/]/).pop() === base)
+    return matches.length === 1 ? images.get(matches[0]) : undefined
+  }
+  return { html: decodeChunk(mimeBody(page), mimeParam(page.headers.get('content-type'), 'charset')), resolve }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -520,7 +862,7 @@ class DocxRenderer {
     try {
       return read()
     } catch (error) {
-      this.notices.push(`${label}無法讀取,已略過:${error instanceof Error ? error.message : String(error)}`)
+      this.notices.push(`${label}無法讀取,已略過:${reason(error)}`)
       return null
     }
   }
@@ -602,6 +944,8 @@ class DocxRenderer {
 
     const sheetHtml: string[] = []
     sheets.forEach((sheet, at) => {
+      this.page = { index: 0, anchored: false, bottom: 0 }
+      this.placedOnSheet = false
       let inner = ''
       if (at === 0) inner += this.headerFooter(firstWith('header'), 'header', firstGeometry, dark)
       for (const part of sheet.parts) {
@@ -626,8 +970,11 @@ class DocxRenderer {
       }
       const g = sheet.geometry
       const vars = `--pw:${pt(g.w)};--mt:${pt(g.top)};--mr:${pt(g.right)};--mb:${pt(g.bottom)};--ml:${pt(g.left)};--hd:${pt(Math.min(g.header, g.top))};--fd:${pt(Math.min(g.footer, g.bottom))};--paper:${cssColor(paper)}`
-      const style = `${vars};aspect-ratio:${round(g.w)}/${round(g.h)};background:${cssColor(paper)}${paperImage}`
-      sheetHtml.push(`<div class="dx-sheet${dark ? ' dx-dark' : ''}" style="${esc(style)}"><div class="dx-in">${inner}</div></div>`)
+      // A sheet with placed drawings keeps its margins in proportion on a phone, so text stays where the art expects it.
+      const share = (value: number) => `${round((value / g.w) * 100, 3)}cqw`
+      const placed = this.placedOnSheet ? `;--plt:${share(g.top)};--plr:${share(g.right)};--plb:${share(g.bottom)};--pll:${share(g.left)}` : ''
+      const style = `${vars}${placed};aspect-ratio:${round(g.w)}/${round(g.h)};background:${cssColor(paper)}${paperImage}`
+      sheetHtml.push(`<div class="dx-sheet${dark ? ' dx-dark' : ''}${placed ? ' dx-placed' : ''}" style="${esc(style)}"><div class="dx-in">${inner}</div></div>`)
     })
     if (this.cutBlocks) this.notices.push(`文件太長:只顯示前 ${LIMITS.blocks} 個段落與表格,其餘請下載原始檔查看。`)
     if (this.cutCells) this.notices.push(`表格太大:只顯示前 ${LIMITS.cells} 個儲存格,其餘請下載原始檔查看。`)
@@ -1342,6 +1689,18 @@ class DocxRenderer {
       }
     })
     let html = ''
+    // The body's top level is cut into page segments at its page breaks, so a drawing placed on a page lands on it.
+    const sheet = scope.story.kind === 'body' && scope.depth === 0 && !this.inCell ? scope.sheet : null
+    let segment = ''
+    const emit = (piece: string) => {
+      if (sheet) segment += piece
+      else html += piece
+    }
+    const nextPage = () => {
+      html += this.closePage(segment, sheet!)
+      segment = ''
+      this.page.index++
+    }
     let lastBlock = items.length - 1
     while (lastBlock >= 0 && local(items[lastBlock].name) === 'bookmarkStart') lastBlock--
     for (let at = 0; at < items.length; at++) {
@@ -1349,7 +1708,7 @@ class DocxRenderer {
       const name = local(node.name)
       if (name === 'bookmarkStart') {
         const bookmark = attr(node, 'name')
-        if (bookmark && bookmark !== '_GoBack') html += `<span id="${anchorId(bookmark)}"></span>`
+        if (bookmark && bookmark !== '_GoBack') emit(`<span id="${anchorId(bookmark)}"></span>`)
         continue
       }
       if (this.inCell) {
@@ -1381,18 +1740,82 @@ class DocxRenderer {
           const bottom = hasNext ? 0 : (info.props.after ?? 0)
           const groupTop = Boolean(info.sig && prev && prev.sig === info.sig)
           const groupBottom = Boolean(info.sig && next && next.sig === info.sig)
-          html += this.renderParagraph(info, scope, top, bottom, groupTop, groupBottom, at === 0)
+          const pageBreak = sheet ? this.pageBreak(info, at === 0) : null
+          if (pageBreak === 'start' && (segment || html)) nextPage()
+          let block = this.renderParagraph(info, scope, top, bottom, groupTop, groupBottom, at === 0)
+          if (pageBreak === 'start') {
+            // The divider belongs between the pages, not inside the new one.
+            const lead = /^(<div class="dx-p[^"]*"[^>]*>)?<span class="dx-pgbr" role="separator" aria-label="分頁"><\/span>/.exec(block)
+            if (lead) {
+              html += segment + PAGE_BREAK
+              segment = ''
+              block = (lead[1] ?? '') + block.slice(lead[0].length)
+            }
+          }
+          emit(block)
+          if (pageBreak === 'end') nextPage()
         } else if (name === 'tbl') {
           const prev = at > 0 ? infos[at - 1] : null
-          html += this.renderTable(node, scope, prev ? (prev.props.after ?? 0) : 0)
+          emit(this.renderTable(node, scope, prev ? (prev.props.after ?? 0) : 0))
         } else if (name === 'altChunk') {
-          html += `<div class="dx-p">${unsupported('嵌入的外部內容')}</div>`
+          emit(this.altChunk(node, scope))
         }
       } catch (error) {
-        html += `<div class="dx-p">${unsupported(`此${name === 'tbl' ? '表格' : '段落'}無法顯示:${error instanceof Error ? error.message : String(error)}`)}</div>`
+        emit(`<div class="dx-p">${unsupported(`此${name === 'tbl' ? '表格' : name === 'altChunk' ? '嵌入內容' : '段落'}無法顯示:${reason(error)}`)}</div>`)
       }
     }
+    if (sheet) html += this.closePage(segment, sheet)
     return html
+  }
+
+  /** A part's content type from [Content_Types].xml (an Override, else the Default for its extension). */
+  private contentType(part: string): string {
+    let types: XmlNode | null = null
+    try {
+      types = this.pkg.xml('[Content_Types].xml')
+    } catch {}
+    const name = `/${part}`.toLowerCase()
+    const override = children(types, 'Override').find((node) => (attr(node, 'PartName') ?? '').toLowerCase() === name)
+    if (override) return (attr(override, 'ContentType') ?? '').toLowerCase()
+    const ext = posix.extname(part).slice(1).toLowerCase()
+    return (attr(children(types, 'Default').find((node) => (attr(node, 'Extension') ?? '').toLowerCase() === ext), 'ContentType') ?? '').toLowerCase()
+  }
+
+  /** w:altChunk: an HTML, MHT or plain-text part drawn in place through the whitelist; anything else is a labelled box. */
+  private altChunk(node: XmlNode, scope: Scope): string {
+    const rel = this.pkg.rel(scope.story.part, relAttr(node, 'id'))
+    const label = '嵌入的外部內容'
+    if (!rel || rel.external || !this.pkg.zip.has(rel.target)) return `<div class="dx-p">${unsupported(label, undefined, undefined, '檔案裡找不到這段內容')}</div>`
+    const bytes = this.pkg.zip.read(rel.target)
+    if (!bytes || bytes.length > CHUNK_LIMITS.bytes) return `<div class="dx-p">${unsupported(label, undefined, undefined, '內容太大,請下載原始檔查看')}</div>`
+    const type = this.contentType(rel.target)
+    const ext = posix.extname(rel.target).toLowerCase()
+    const head = bytes.subarray(0, 1024).toString('latin1').replace(/^\u00ef\u00bb\u00bf/, '')
+    let source: string | null = null
+    let resolve: ((src: string) => string | undefined) | undefined
+    if (type === 'message/rfc822' || type === 'multipart/related' || ext === '.mht' || ext === '.mhtml' || /^\s*(MIME-Version|Content-Type)\s*:/i.test(head)) {
+      const mht = readMht(bytes)
+      if (mht) ({ html: source, resolve } = mht)
+    } else if (type === 'text/html' || type === 'application/xhtml+xml' || /^\.x?html?$/.test(ext) || /^\s*(<!doctype html|<html|<body|<\?xml[^>]*>\s*<html)/i.test(head)) {
+      source = decodeChunk(bytes)
+    } else if (type === 'text/plain' || ext === '.txt') {
+      const plain = decodeChunk(bytes).replace(/\r\n?/g, '\n').trim()
+      const paragraphs = plain.split(/\n{2,}/).map((block) => `<p>${block.split('\n').map(esc).join('<br>')}</p>`)
+      this.text.push(plain)
+      return `<div class="dx-html ${this.chunkClass(scope)}">${paragraphs.join('')}</div>`
+    }
+    if (source === null) return `<div class="dx-p">${unsupported(label)}</div>`
+    const chunk = sanitizeChunk(source, resolve)
+    const text = chunk.text.replace(/\s+/g, ' ').trim()
+    if (text) this.text.push(text)
+    if (chunk.cut) this.notices.push('嵌入的 HTML 內容太長:只顯示前段,其餘請下載原始檔查看。')
+    return `<div class="dx-html ${this.chunkClass(scope)}">${chunk.html}</div>`
+  }
+
+  /** The document's default paragraph look, for embedded HTML (whose own styles are not kept). */
+  private chunkClass(scope: Scope): string {
+    const info = this.paraInfo({ name: 'w:p', attrs: {}, children: [], text: '' }, scope)
+    return this.cls(`${this.runCss(info.mark, scope.dark)};font-size:${pt(info.mark.size ?? 10)}`)
   }
 
   private paraCss(info: ParaInfo, scope: Scope, top: number, bottom: number, groupTop: boolean, groupBottom: boolean): string {
@@ -1444,7 +1867,7 @@ class DocxRenderer {
   private renderParagraph(info: ParaInfo, scope: Scope, top: number, bottom: number, groupTop: boolean, groupBottom: boolean, first: boolean): string {
     const dark = info.props.shd ? isDark(info.props.shd) : scope.dark
     const local_scope = dark === scope.dark ? scope : { ...scope, dark }
-    const out: Inline = { parts: [], text: [], visual: false }
+    const out: Inline = { parts: [], text: [], visual: false, pins: [] }
     this.inline(info.node.children.filter((node) => local(node.name) !== 'pPr'), local_scope, info.base, null, out)
     const text = out.text.join('')
     if (info.mark.vanish && !text && !out.visual) return ''
@@ -1495,9 +1918,15 @@ class DocxRenderer {
       } else content = numHtml + segments.join(gap)
     } else content = numHtml + content
     if (!text && !out.visual && !numHtml) content += '<br>'
+    if (out.pins.length) {
+      // The pin sits at the paragraph's top left; the paragraph's indent is undone, as Word measures from the column.
+      const indent = lenCss(info.props.left)
+      const undo = indent && indent !== '0pt' ? ` style="margin-inline-start:calc(-1 * ${indent})"` : ''
+      content = `<span class="dx-pin"${undo}>${out.pins.join('')}</span>${content}`
+    }
     const outline = info.props.outline
     const role = outline !== undefined && outline >= 0 && outline < 9 ? ` role="heading" aria-level="${Math.min(outline + 1, 6)}"` : ''
-    const breakBefore = info.props.pageBreakBefore && !first && scope.story.kind === 'body' ? '<span class="dx-pgbr" role="separator" aria-label="分頁"></span>' : ''
+    const breakBefore = info.props.pageBreakBefore && !first && scope.story.kind === 'body' ? PAGE_BREAK : ''
     return `${breakBefore}<div class="dx-p${flex ? ' dx-flex' : ''} ${this.cls(css)}"${role}>${content}</div>`
   }
 
@@ -1660,7 +2089,7 @@ class DocxRenderer {
           break
         case 'br': {
           const type = attr(c, 'type')
-          if (type === 'page') push('<span class="dx-pgbr" role="separator" aria-label="分頁"></span>')
+          if (type === 'page') push(PAGE_BREAK)
           else if (type === 'column') push('<span class="dx-colbr"></span>')
           else push('<br>')
           break
@@ -1692,7 +2121,7 @@ class DocxRenderer {
           flush()
           let html: string
           try {
-            html = this.drawing(c, scope)
+            html = this.drawing(c, scope, out)
           } catch {
             html = unsupported('圖片')
           }
@@ -1704,7 +2133,7 @@ class DocxRenderer {
           flush()
           let html: string
           try {
-            html = this.vml(c, scope)
+            html = this.vml(c, scope, out)
           } catch {
             html = ''
           }
@@ -1747,8 +2176,8 @@ class DocxRenderer {
         }
         case 'ruby': {
           flush()
-          const baseOut: Inline = { parts: [], text: [], visual: false }
-          const rtOut: Inline = { parts: [], text: [], visual: false }
+          const baseOut: Inline = { parts: [], text: [], visual: false, pins: [] }
+          const rtOut: Inline = { parts: [], text: [], visual: false, pins: [] }
           this.inline(child(c, 'rubyBase')?.children ?? [], scope, props, null, baseOut, 1)
           this.inline(child(c, 'rt')?.children ?? [], scope, props, null, rtOut, 1)
           out.parts.push(`<ruby>${baseOut.parts.join('').split(TAB).join('')}<rt>${rtOut.parts.join('').split(TAB).join('')}</rt></ruby>`)
@@ -1847,7 +2276,7 @@ class DocxRenderer {
     return undefined
   }
 
-  private drawing(d: XmlNode, scope: Scope): string {
+  private drawing(d: XmlNode, scope: Scope, out: Inline): string {
     const holder = child(d, 'inline') ?? child(d, 'anchor')
     if (!holder) return ''
     const extent = child(holder, 'extent')
@@ -1859,13 +2288,92 @@ class DocxRenderer {
     const content = path(holder, 'graphic', 'graphicData')?.children[0] ?? null
     if (local(holder.name) !== 'anchor') return this.graphic(content, w, h, scope, alt, false)
     const placed = this.anchorBox(holder, w, h, scope)
-    if (placed?.absolute) return `${placed.open}${this.graphic(content, w, h, scope, alt, true)}</span>`
+    if (placed && placed.mode !== 'flow') {
+      // Placed drawings take no room in the text, so they do not count as the paragraph's content.
+      ;(placed.mode === 'pin' ? out.pins : out.parts).push(`${placed.open}${this.graphic(content, w, h, scope, alt, true)}</span>`)
+      return ''
+    }
     const inner = this.graphic(content, w, h, scope, alt, false)
     return placed && inner ? `${placed.open}${inner}</span>` : inner
   }
 
-  /** Where a floating drawing goes: absolutely on the page for header/footer art, floated for square wrapping, else inline. */
-  private anchorBox(anchor: XmlNode, w: number, h: number, scope: Scope): { open: string; absolute: boolean } | null {
+  /** Per sheet: which page segment (between page breaks) the body is on, and whether a drawing was placed on it. */
+  private page = { index: 0, anchored: false, bottom: 0 }
+  private placedOnSheet = false
+
+  /**
+   * An absolutely placed box for a drawing that floats free of the text (no wrapping, or behind it).
+   * Page, margin and column positions are measured on the sheet (cqw: share of the sheet's width,
+   * which scales with the page); on a later page of the same sheet, from that page's segment. Positions
+   * relative to the paragraph go into a pin at the paragraph's start. Null when the story has no page.
+   */
+  private place(o: Placement, scope: Scope): { open: string; pin: boolean } | null {
+    const g = scope.sheet
+    const story = scope.story.kind
+    if (!g || o.w <= 0 || story === 'note') return null
+    const cq = (value: number) => `${round((clamp(value, -8000, 8000) / g.w) * 100, 3)}cqw`
+    const fromPage = ['page', 'leftMargin', 'rightMargin', 'insideMargin', 'outsideMargin'].includes(o.relH)
+    const [hs, ha] =
+      o.relH === 'page' ? [0, g.w] : o.relH === 'leftMargin' || o.relH === 'insideMargin' ? [0, g.left] : o.relH === 'rightMargin' || o.relH === 'outsideMargin' ? [g.w - g.right, g.right] : [g.left, g.w - g.left - g.right]
+    const x = alignIn(o.alignH, hs, ha, o.w, o.offH)
+    const pin = !['page', 'margin', 'topMargin', 'bottomMargin', 'insideMargin', 'outsideMargin'].includes(o.relV)
+    // The first page of a sheet places on the sheet itself; later pages on their segment, whose left is the text column's.
+    const onSheet = !pin && (story !== 'body' || this.page.index === 0)
+    const left = onSheet ? (fromPage ? cq(x) : `calc(var(--il) + ${cq(x - g.left)})`) : fromPage ? `calc(${cq(x)} - var(--il))` : cq(x - g.left)
+    let vertical: string
+    if (pin) vertical = `top:${cq(o.alignV ? 0 : o.offV)}`
+    else {
+      const [vs, va] =
+        o.relV === 'page' ? [0, g.h] : o.relV === 'margin' ? [g.top, g.h - g.top - g.bottom] : o.relV === 'topMargin' || o.relV === 'insideMargin' ? [0, g.top] : [g.h - g.bottom, g.bottom]
+      const y = alignIn(o.alignV, vs, va, o.h, o.offV)
+      vertical = story === 'footer' ? `bottom:${cq(g.h - y - o.h)}` : `top:${cq(y)}`
+      if (story === 'body' && this.page.index > 0) {
+        this.page.anchored = true
+        this.page.bottom = Math.max(this.page.bottom, clamp(y + o.h, 0, g.h))
+      }
+    }
+    // Art behind the text or as wide as half the column (covers, frames, watermarks) needs the real margins; a corner logo does not.
+    if (o.behind || o.w >= (g.w - g.left - g.right) / 2) this.placedOnSheet = true
+    const rotate = o.rotate && Number.isFinite(o.rotate) ? `;transform:rotate(${round(o.rotate % 360)}deg)` : ''
+    const style = `left:${left};${vertical};width:${cq(o.w)};${o.h > 0 ? `height:${cq(o.h)};` : ''}z-index:${o.behind ? -1 : 1}${rotate}`
+    return { open: `<span class="dx-abs" style="${style}">`, pin }
+  }
+
+  /** Where a paragraph moves to a new page: at its start (page break before, or a break ahead of any content) or after it. */
+  private pageBreak(info: ParaInfo, first: boolean): 'start' | 'end' | null {
+    if (info.props.pageBreakBefore && !first) return 'start'
+    let seen = false
+    let found: 'start' | 'end' | null = null
+    let budget = 5000
+    const walk = (nodes: XmlNode[]) => {
+      for (const node of nodes) {
+        if (found || --budget < 0) return
+        const name = local(node.name)
+        if (name === 'br' && attr(node, 'type') === 'page') {
+          found = seen ? 'end' : 'start'
+          return
+        }
+        if (name === 'drawing' || name === 'pict' || name === 'object' || name === 'sym' || name === 'tab') seen = true
+        else if (name === 't') seen ||= node.text.trim() !== ''
+        else if (!['pPr', 'rPr', 'del', 'moveFrom', 'instrText', 'delText'].includes(name)) walk(node.children)
+      }
+    }
+    walk(info.node.children)
+    return found
+  }
+
+  /** A finished page segment: a later page that holds placed drawings gets its own box, a page tall and with its top margin. */
+  private closePage(html: string, g: Geometry): string {
+    const { index, anchored, bottom } = this.page
+    this.page.anchored = false
+    this.page.bottom = 0
+    if (!index || !anchored || !html) return html
+    const cq = (value: number) => `${round((value / g.w) * 100, 3)}cqw`
+    return `<div class="dx-pg" style="padding-top:${cq(g.top)};min-height:${cq(Math.max(bottom, g.top))}">${html}</div>`
+  }
+
+  /** Where a floating drawing goes: placed (see `place`) when the text does not wrap it or it is behind the text, floated for square wrapping, else inline. */
+  private anchorBox(anchor: XmlNode, w: number, h: number, scope: Scope): { open: string; mode: 'abs' | 'pin' | 'flow' } | null {
     const wrap = anchor.children.find((c) => local(c.name).startsWith('wrap'))
     const wrapName = wrap ? local(wrap.name) : 'wrapNone'
     const behind = attr(anchor, 'behindDoc') === '1' || attr(anchor, 'behindDoc') === 'true'
@@ -1882,22 +2390,16 @@ class DocxRenderer {
       if (!g) return null
       const [start, area] =
         relH === 'page' ? [0, g.w] : relH === 'leftMargin' ? [0, g.left] : relH === 'rightMargin' ? [g.w - g.right, g.right] : relH === 'margin' || relH === 'column' ? [g.left, g.w - g.left - g.right] : [null, 0]
-      if (start === null) return null
-      if (alignH === 'center') return start + (area - w) / 2
-      if (alignH === 'right' || alignH === 'outside') return start + area - w
-      if (alignH === 'left' || alignH === 'inside') return start
-      return start + offH
+      return start === null ? null : alignIn(alignH, start, area, w, offH)
     }
-    if ((wrapName === 'wrapNone' || behind) && g && (scope.story.kind === 'header' || scope.story.kind === 'footer') && w > 0) {
-      const x = horizontal()
-      const [start, area] = relV === 'page' ? [0, g.h] : relV === 'margin' ? [g.top, g.h - g.top - g.bottom] : relV === 'topMargin' ? [0, g.top] : relV === 'bottomMargin' ? [g.h - g.bottom, g.bottom] : [null, 0]
-      if (x !== null && start !== null) {
-        const y = alignV === 'center' ? start + (area - h) / 2 : alignV === 'bottom' || alignV === 'outside' ? start + area - h : alignV === 'top' || alignV === 'inside' ? start : start + offV
-        const cqw = (value: number) => `${round((value / g.w) * 100, 3)}cqw`
-        const vertical = scope.story.kind === 'footer' ? `bottom:${cqw(g.h - y - h)}` : `top:${cqw(y)}`
-        const style = `left:${round((x / g.w) * 100, 3)}%;${vertical};width:${round((w / g.w) * 100, 3)}%;${h ? `height:${cqw(h)};` : ''}z-index:${behind ? -1 : 1}`
-        return { open: `<span class="dx-abs" style="${style}">`, absolute: true }
-      }
+    if (wrapName === 'wrapNone' || behind) {
+      const simple = attr(anchor, 'simplePos') === '1' || attr(anchor, 'simplePos') === 'true'
+      const at = child(anchor, 'simplePos')
+      const placement: Placement = simple
+        ? { relH: 'page', relV: 'page', offH: (num(at, 'x') ?? 0) / EMU_PER_PT, offV: (num(at, 'y') ?? 0) / EMU_PER_PT, w, h, behind }
+        : { relH, relV, alignH, alignV, offH, offV, w, h, behind }
+      const placed = this.place(placement, scope)
+      if (placed) return { open: placed.open, mode: placed.pin ? 'pin' : 'abs' }
     }
     const dist = (name: string) => pt(clamp((num(anchor, name) ?? 0) / EMU_PER_PT, 0, 72))
     if (wrapName === 'wrapSquare' || wrapName === 'wrapTight' || wrapName === 'wrapThrough') {
@@ -1906,12 +2408,12 @@ class DocxRenderer {
         const x = horizontal()
         if (x !== null && x + w / 2 > g.w / 2) side = 'right'
       }
-      if (side) return { open: `<span class="dx-float" style="float:${side};margin:${dist('distT')} ${dist('distR')} ${dist('distB')} ${dist('distL')}">`, absolute: false }
-      return { open: '<span class="dx-figure" style="text-align:center">', absolute: false }
+      if (side) return { open: `<span class="dx-float" style="float:${side};margin:${dist('distT')} ${dist('distR')} ${dist('distB')} ${dist('distL')}">`, mode: 'flow' }
+      return { open: '<span class="dx-figure" style="text-align:center">', mode: 'flow' }
     }
     if (wrapName === 'wrapTopAndBottom') {
       const align = alignH === 'center' ? 'center' : alignH === 'right' || alignH === 'outside' ? 'right' : 'left'
-      return { open: `<span class="dx-figure" style="text-align:${align}">`, absolute: false }
+      return { open: `<span class="dx-figure" style="text-align:${align}">`, mode: 'flow' }
     }
     return null
   }
@@ -1938,13 +2440,20 @@ class DocxRenderer {
     }
   }
 
+  /** The box for a picture that cannot be shown (missing, linked from outside the file, or in a format browsers do not draw); null when it can. */
+  private missingPicture(rel: Rel | undefined, w: number, h: number): string | null {
+    if (rel?.external) return unsupported(EXTERNAL_PICTURE[0], w, h, EXTERNAL_PICTURE[1])
+    if (!rel || !this.pkg.zip.has(rel.target)) return unsupported(MISSING_PICTURE[0], w, h, MISSING_PICTURE[1])
+    if (isDrawablePart(rel.target)) return null
+    const ext = posix.extname(rel.target).slice(1).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
+    return unsupported(ext ? `${ext} 圖片` : '圖片', w, h)
+  }
+
   private picture(pic: XmlNode, scope: Scope, size: string, w: number, h: number, alt: string, fill: boolean): string {
     const blip = path(pic, 'blipFill', 'blip')
     const rel = this.pkg.rel(scope.story.part, relAttr(blip, 'embed'))
-    if (!rel || rel.external || !isDrawablePart(rel.target)) {
-      const ext = rel ? posix.extname(rel.target).slice(1).toUpperCase() : ''
-      return unsupported(rel?.external ? '外部連結的圖片' : ext ? `${ext} 圖片` : '圖片', w, h)
-    }
+    const missing = this.missingPicture(rel, w, h)
+    if (missing !== null) return missing
     const xfrm = path(pic, 'spPr', 'xfrm')
     const transforms: string[] = []
     const rot = num(xfrm, 'rot')
@@ -1953,7 +2462,7 @@ class DocxRenderer {
     if (attr(xfrm, 'flipV') === '1') transforms.push('scaleY(-1)')
     const ratio = !fill && w > 0 && h > 0 ? `;aspect-ratio:${round(w)}/${round(h)}` : ''
     const transform = transforms.length ? `;transform:${transforms.join(' ')}` : ''
-    return `<img class="dx-img" src="${esc(this.media(rel.target))}" alt="${esc(alt)}" style="${size}${ratio}${transform}">`
+    return `<img class="dx-img" src="${esc(this.media(rel!.target))}" alt="${esc(alt)}" style="${size}${ratio}${transform}">`
   }
 
   private shape(wsp: XmlNode, scope: Scope, size: string, w: number, h: number, fill: boolean): string {
@@ -2047,14 +2556,15 @@ class DocxRenderer {
     return `<span class="dx-grp" style="${size}${ratio}">${items}</span>`
   }
 
-  private vml(node: XmlNode, scope: Scope): string {
-    return node.children.map((c) => this.vmlShape(c, scope, 0)).join('')
+  private vml(node: XmlNode, scope: Scope, out: Inline): string {
+    return node.children.map((c) => this.vmlShape(c, scope, 0, out)).join('')
   }
 
-  private vmlShape(node: XmlNode, scope: Scope, depth: number): string {
+  /** A VML shape (older files, watermarks, fallbacks). One positioned absolutely on the page is placed like a DrawingML anchor. */
+  private vmlShape(node: XmlNode, scope: Scope, depth: number, out: Inline): string {
     if (depth > 10) return ''
     const name = local(node.name)
-    if (name === 'group') return node.children.map((c) => this.vmlShape(c, scope, depth + 1)).join('')
+    if (name === 'group') return node.children.map((c) => this.vmlShape(c, scope, depth + 1, out)).join('')
     if (!['shape', 'rect', 'roundrect', 'oval', 'line', 'image', 'polyline', 'arc', 'curve'].includes(name)) return ''
     const style: Record<string, string> = {}
     for (const declaration of (attr(node, 'style') ?? '').split(';')) {
@@ -2062,24 +2572,52 @@ class DocxRenderer {
       if (at > 0) style[declaration.slice(0, at).trim().toLowerCase()] = declaration.slice(at + 1).trim()
     }
     if (style.visibility === 'hidden') return ''
-    const length = (value: string | undefined): number => {
-      const match = /^(-?[\d.]+)(pt|in|cm|mm|px|pc)?$/.exec(value ?? '')
-      if (!match) return 0
-      const factor = { pt: 1, in: 72, cm: 72 / 2.54, mm: 72 / 25.4, px: 0.75, pc: 12 }[match[2] ?? 'px'] ?? 0.75
-      return clamp(Number(match[1]) * factor, 0, 4000)
-    }
+    const length = (value: string | undefined) => Math.max(0, vmlLength(value))
     const w = length(style.width)
     const h = length(style.height)
+    let placed: { open: string; pin: boolean } | null = null
+    const wrapType = attr(child(node, 'wrap'), 'type')
+    if (style.position === 'absolute' && depth === 0 && w > 0 && !['square', 'tight', 'through', 'topAndBottom'].includes(wrapType ?? '')) {
+      const H: Record<string, string> = { margin: 'margin', page: 'page', 'left-margin-area': 'leftMargin', 'right-margin-area': 'rightMargin', 'inner-margin-area': 'leftMargin', 'outer-margin-area': 'rightMargin' }
+      const V: Record<string, string> = { margin: 'margin', page: 'page', 'top-margin-area': 'topMargin', 'bottom-margin-area': 'bottomMargin', 'inner-margin-area': 'topMargin', 'outer-margin-area': 'bottomMargin' }
+      const align = (value: string | undefined) => (value && value !== 'absolute' ? value : undefined)
+      const rotation = /^(-?[\d.]+)(fd)?$/.exec(style.rotation ?? '')
+      placed = this.place(
+        {
+          relH: H[style['mso-position-horizontal-relative'] ?? ''] ?? 'column',
+          relV: V[style['mso-position-vertical-relative'] ?? ''] ?? 'paragraph',
+          alignH: align(style['mso-position-horizontal']),
+          alignV: align(style['mso-position-vertical']),
+          offH: vmlLength(style['margin-left']) + vmlLength(style.left),
+          offV: vmlLength(style['margin-top']) + vmlLength(style.top),
+          w,
+          h,
+          behind: Number.parseInt(style['z-index'] ?? '', 10) < 0,
+          rotate: rotation ? Number(rotation[1]) / (rotation[2] ? 65536 : 1) : undefined
+        },
+        scope
+      )
+    }
+    const html = this.vmlContent(node, name, scope, w, h, placed !== null)
+    if (!placed || !html) return html
+    ;(placed.pin ? out.pins : out.parts).push(`${placed.open}${html}</span>`)
+    return ''
+  }
+
+  /** What a VML shape shows; `fill` when it is placed in a box of its own size. */
+  private vmlContent(node: XmlNode, name: string, scope: Scope, w: number, h: number, fill: boolean): string {
     const vmlColor = (value: string | undefined) => {
       const token = (value ?? '').trim().split(/\s/)[0].replace(/^#/, '')
       return hexToRgba(token.length === 3 ? token.replace(/./g, '$&$&') : token) ?? hexToRgba(PRESET_COLORS[token.toLowerCase()])
     }
+    const width = fill ? 'width:100%;height:100%' : w ? `width:${pt(w)};max-width:100%` : ''
     const imagedata = child(node, 'imagedata')
     if (imagedata) {
       const rel = this.pkg.rel(scope.story.part, relAttr(imagedata, 'id') ?? relAttr(imagedata, 'relid'))
-      if (!rel || rel.external || !isDrawablePart(rel.target)) return unsupported('圖片', w, h)
-      const ratio = w > 0 && h > 0 ? `;aspect-ratio:${round(w)}/${round(h)}` : ''
-      return `<img class="dx-img" src="${esc(this.media(rel.target))}" alt="${esc(attr(imagedata, 'title') ?? '')}" style="${w ? `width:${pt(w)};max-width:100%` : 'max-width:100%'}${ratio}">`
+      const missing = this.missingPicture(rel, w, h)
+      if (missing !== null) return missing
+      const ratio = !fill && w > 0 && h > 0 ? `;aspect-ratio:${round(w)}/${round(h)}` : ''
+      return `<img class="dx-img" src="${esc(this.media(rel!.target))}" alt="${esc(attr(imagedata, 'title') ?? '')}" style="${width || 'max-width:100%'}${ratio}">`
     }
     const textpath = child(node, 'textpath')
     if (textpath) {
@@ -2089,22 +2627,30 @@ class DocxRenderer {
       const opacity = Number(attr(child(node, 'fill'), 'opacity')?.replace(/f$/, '') ?? '')
       const alpha = Number.isFinite(opacity) && opacity > 0 ? (opacity > 1 ? opacity / 65536 : opacity) : 0.5
       this.text.push(text)
-      return `<span class="dx-wordart" style="color:${cssColor({ ...color, a: clamp(alpha, 0.1, 1) })};font-size:${pt(clamp(h * 0.6 || 24, 8, 54))}">${esc(text)}</span>`
+      const ink = `color:${cssColor({ ...color, a: clamp(alpha, 0.1, 1) })}`
+      if (fill && scope.sheet) {
+        // Word stretches the text to its box: as large as fits the width (wide characters count whole), within the height.
+        const units = [...text].reduce((sum, char) => sum + (char.codePointAt(0)! > 0x2e80 ? 1 : 0.6), 0)
+        const size = clamp(Math.min(h * 0.85 || 54, w / Math.max(units, 1)), 4, 400)
+        return `<span class="dx-wordart dx-fit" style="${ink};font-size:${round((size / scope.sheet.w) * 100, 3)}cqw">${esc(text)}</span>`
+      }
+      return `<span class="dx-wordart" style="${ink};font-size:${pt(clamp(h * 0.6 || 24, 8, 54))}">${esc(text)}</span>`
     }
     const content = path(node, 'textbox', 'txbxContent')
     const filled = attr(node, 'filled') !== 'f' && attr(node, 'filled') !== 'false'
     const background = filled ? vmlColor(attr(node, 'fillcolor')) : null
     const stroked = attr(node, 'stroked') !== 'f' && attr(node, 'stroked') !== 'false'
     const strokeColor = vmlColor(attr(node, 'strokecolor')) ?? BLACK
-    const strokeWidth = length(attr(node, 'strokeweight') ?? '0.75pt') || 0.75
+    const strokeWidth = clamp(vmlLength(attr(node, 'strokeweight') ?? '0.75pt'), 0, 4000) || 0.75
     if (attr(node, 'hr') === 't' || name === 'line') {
-      return `<span class="dx-line" style="width:${w ? pt(w) : '100%'};max-width:100%;border-top:${pt(Math.max(h, strokeWidth, 0.75))} solid ${cssColor(background ?? strokeColor)}"></span>`
+      return `<span class="dx-line" style="width:${fill ? '100%' : w ? pt(w) : '100%'};max-width:100%;border-top:${pt(Math.max(fill ? 0 : h, strokeWidth, 0.75))} solid ${cssColor(background ?? strokeColor)}"></span>`
     }
     if (!content) {
-      return background && w && h ? `<span class="dx-txbx" style="width:${pt(w)};max-width:100%;min-height:${pt(h)};background:${cssColor(background)}"></span>` : ''
+      if (!background || !w || !h) return ''
+      return `<span class="dx-txbx" style="${fill ? width : `width:${pt(w)};max-width:100%;min-height:${pt(h)}`};background:${cssColor(background)}"></span>`
     }
-    const css = [w ? `width:${pt(w)};max-width:100%` : 'width:100%', 'box-sizing:border-box', 'padding:3.6pt 7.2pt']
-    if (h) css.push(`min-height:${pt(h)}`)
+    const css = [width || 'width:100%', 'box-sizing:border-box', 'padding:3.6pt 7.2pt']
+    if (h && !fill) css.push(`min-height:${pt(h)}`)
     if (background) css.push(`background:${cssColor(background)}`)
     if (stroked && name !== 'shape') css.push(`border:${pt(strokeWidth)} solid ${cssColor(strokeColor)}`)
     else if (stroked && attr(node, 'strokecolor')) css.push(`border:${pt(strokeWidth)} solid ${cssColor(strokeColor)}`)
@@ -2357,7 +2903,7 @@ class DocxRenderer {
         try {
           content = this.renderBlocks(cell.tc.children.filter((node) => local(node.name) !== 'tcPr'), cellScope)
         } catch (error) {
-          content = unsupported(`儲存格無法顯示:${error instanceof Error ? error.message : String(error)}`)
+          content = unsupported(`儲存格無法顯示:${reason(error)}`)
         } finally {
           this.inCell--
         }
@@ -2378,8 +2924,8 @@ const PAGE_CSS = `:root{color-scheme:light}
 html,body{margin:0;background:#e8eaed}
 body{padding:16px 10px 40px;font-family:Arial,'PingFang TC','Noto Sans TC','Microsoft JhengHei',sans-serif;-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .dx-doc{max-width:100%;margin:0 auto}
-.dx-sheet{position:relative;box-sizing:border-box;width:min(100%,var(--pw));margin:0 auto 20px;color:#000;box-shadow:0 1px 3px rgba(60,64,67,.3),0 4px 12px rgba(60,64,67,.12);container-type:inline-size;isolation:isolate;overflow-wrap:break-word}
-.dx-in{box-sizing:border-box;min-height:100%;display:flex;flex-direction:column;padding:var(--mt) var(--mr) var(--mb) var(--ml)}
+.dx-sheet{--il:var(--ml);position:relative;box-sizing:border-box;width:min(100%,var(--pw));margin:0 auto 20px;color:#000;box-shadow:0 1px 3px rgba(60,64,67,.3),0 4px 12px rgba(60,64,67,.12);container-type:inline-size;isolation:isolate;overflow-wrap:break-word;overflow:clip}
+.dx-in{box-sizing:border-box;min-height:100%;display:flex;flex-direction:column;padding:var(--mt) var(--mr) var(--mb) var(--il)}
 .dx-body{min-width:0}
 .dx-header{margin-top:calc(var(--hd) - var(--mt));min-height:calc(var(--mt) - var(--hd));margin-bottom:6pt}
 .dx-footer{margin-top:auto;padding-top:12pt;margin-bottom:calc(var(--fd) - var(--mb))}
@@ -2407,6 +2953,17 @@ td{vertical-align:top}
 .dx-figure{display:block}
 .dx-abs{position:absolute;display:block}
 .dx-abs>.dx-img{width:100%;height:100%}
+.dx-pg{position:relative;box-sizing:border-box}
+.dx-pin{display:block;position:absolute;width:0;height:0;text-indent:0}
+.dx-wordart.dx-fit{display:flex;width:100%;height:100%;align-items:center;justify-content:center;line-height:1;overflow:visible}
+.dx-html{white-space:normal;line-height:1.35;overflow-wrap:break-word}
+.dx-html p,.dx-html ul,.dx-html ol,.dx-html blockquote,.dx-html pre,.dx-html table{margin:0 0 .6em}
+.dx-html h1,.dx-html h2,.dx-html h3,.dx-html h4,.dx-html h5,.dx-html h6{margin:.6em 0 .4em;line-height:1.25}
+.dx-html table{border-collapse:collapse;max-width:100%}
+.dx-html th,.dx-html td{border:1px solid #9aa0a6;padding:2pt 5pt;vertical-align:top}
+.dx-html blockquote{margin-inline:1.5em}
+.dx-html pre{white-space:pre-wrap;font-family:Menlo,Consolas,'Courier New',monospace}
+.dx-html code{font-family:Menlo,Consolas,'Courier New',monospace}
 .dx-txbx{display:inline-flex;flex-direction:column;max-width:100%;vertical-align:top;text-indent:0;white-space:normal;overflow-wrap:break-word}
 .dx-txbx>.dx-p,.dx-txbx>.dx-tblw{flex:none}
 .dx-line{display:inline-block;height:0;vertical-align:middle}
@@ -2435,7 +2992,10 @@ span.dx-lnk{cursor:help}
 .dx-fail h1{font-size:18px;margin:0 0 8px}.dx-fail code{font-size:12px;color:#5f6368;word-break:break-all}
 @media (max-width:640px){
 body{padding:10px 6px 28px}
-.dx-in{padding:min(var(--mt),26px) min(var(--mr),16px) min(var(--mb),26px) min(var(--ml),16px)}
+.dx-sheet{--il:min(var(--ml),16px)}
+.dx-in{padding:min(var(--mt),26px) min(var(--mr),16px) min(var(--mb),26px) var(--il)}
+.dx-sheet.dx-placed{--il:var(--pll)}
+.dx-placed>.dx-in{padding:var(--plt) var(--plr) var(--plb) var(--il)}
 .dx-header{margin-top:0;min-height:0}
 .dx-footer{margin-bottom:0}
 .dx-cols{column-count:1!important}
@@ -2468,7 +3028,7 @@ export function renderDocxPage(data: Buffer, fileName: string, title: string): s
   } catch (error) {
     const message = `Word: ${error instanceof Error ? error.message : String(error)}`
     return injectBridge(
-      `${head('')}<body class="docx"><main class="dx-doc"><div class="dx-fail" role="alert"><h1>這份 Word 檔無法顯示</h1><p>${esc(failureReason(error, data))}</p><p><code>${esc(message)}</code></p><p>可以下載原始檔,用 Word 開啟查看。</p></div></main>${failureScript(message)}</body></html>`
+      `${head('')}<body class="docx"><main class="dx-doc"><div class="dx-fail" role="alert"><h1>這份 Word 檔無法顯示</h1><p>${esc(failureReason(error, data))}</p>${hasHan(message) ? `<p><code>${esc(message)}</code></p>` : ''}<p>可以下載原始檔,用 Word 開啟查看。</p></div></main>${failureScript(message)}</body></html>`
     )
   }
   return injectBridge(`${head(`:root{--tab:${round(doc.tab)}pt}${doc.css}`)}<body class="docx"><main class="dx-doc">${doc.html}</main></body></html>`)

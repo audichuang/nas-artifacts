@@ -301,7 +301,7 @@ describe('Word files that are partly or wholly broken', () => {
     const html = renderDocxPage(Buffer.from('this is not a word file'), 'x.docx', 'x')
     assert.match(html, /這份 Word 檔無法顯示/)
     assert.match(html, /檔案不是有效的 \.docx/)
-    assert.match(html, /<script>throw new Error\("Word: not a zip file"\)<\/script>/)
+    assert.match(html, /<script>throw new Error\("Word: [^"]+"\)<\/script>/)
     const ole = Buffer.alloc(64)
     ole.writeUInt32BE(0xd0cf11e0, 0)
     assert.match(renderDocxPage(ole, 'x.docx', 'x'), /舊版 Word \(\.doc\) 或受密碼保護/)
@@ -355,7 +355,7 @@ describe('serving Word files', () => {
     const { id } = store.publish({ title: 'Broken', files: { 'broken.docx': { content: Buffer.from('PK nope') } } })
     const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
     assert.match(html, /這份 Word 檔無法顯示/)
-    assert.match(html, /<script>throw new Error\("Word: not a zip file"\)<\/script>/)
+    assert.match(html, /<script>throw new Error\("Word: [^"]+"\)<\/script>/)
   })
 })
 
@@ -447,4 +447,165 @@ test('F3: a list override on a far-out level number does not spin through billio
     ''
   )
   assert.match(doc.html, />1\.<[\s\S]*>項目</)
+})
+
+describe('any Word file draws faithfully (stress round 2)', () => {
+  const docWith = (body: string, parts: Record<string, string> = {}, relList: [string, string, string, boolean?][] = []) =>
+    zip({
+      'word/document.xml': `<w:document ${W}><w:body>${body}</w:body></w:document>`,
+      'word/_rels/document.xml.rels': rels(relList),
+      ...parts
+    })
+  const EMU = 12700
+  type AnchorOptions = { behind?: boolean; relH: string; relV: string; offH?: number; offV?: number; alignH?: string; w: number; h: number; content: string; wrap?: string }
+  const anchor = (o: AnchorOptions) =>
+    `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2" behindDoc="${o.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>` +
+    `<wp:positionH relativeFrom="${o.relH}">${o.alignH ? `<wp:align>${o.alignH}</wp:align>` : `<wp:posOffset>${Math.round((o.offH ?? 0) * EMU)}</wp:posOffset>`}</wp:positionH>` +
+    `<wp:positionV relativeFrom="${o.relV}"><wp:posOffset>${Math.round((o.offV ?? 0) * EMU)}</wp:posOffset></wp:positionV>` +
+    `<wp:extent cx="${o.w * EMU}" cy="${o.h * EMU}"/>${o.wrap ?? '<wp:wrapNone/>'}<wp:docPr id="9" name="x"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">${o.content}</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`
+  const pic = (rid: string) => `<pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rid}"/></pic:blipFill><pic:spPr/></pic:pic>`
+  const box = (text: string) => `<wps:wsp><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>${p(r(text))}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>`
+  const media: [string, string, string][] = [['rBg', 'image', 'media/bg.png']]
+  const mediaParts = { 'word/media/bg.png': 'png-bytes' }
+  // A US Letter page (the default): 612 × 792 pt, one-inch margins. Positions are in cqw of the sheet's width.
+  const fullPage = (extra: Partial<AnchorOptions> = {}) => anchor({ behind: true, relH: 'page', relV: 'page', w: 612, h: 792, content: pic('rBg'), ...extra })
+
+  test('F30: a behind-text picture anchored to the page sits under the cover text, placed on the sheet', () => {
+    const body = p(fullPage() + r('CERTIFICATE OF COMPLETION', '<w:sz w:val="72"/>')) + p(r('Awarded to Jane Doe'), '<w:jc w:val="center"/>')
+    const html = readDocx(docWith(body, mediaParts, media), 'm/').html
+    assert.match(html, /<span class="dx-abs" style="left:0cqw;top:0cqw;width:100cqw;height:129\.412cqw;z-index:-1"><img class="dx-img" src="m\/word\/media\/bg\.png"[^>]*><\/span><span[^>]*>CERTIFICATE OF COMPLETION</)
+    assert.doesNotMatch(html, /class="dx-pg"/, 'the first page needs no segment of its own')
+  })
+
+  test('F30: a text box in front of text anchored to the margin and column lands where its offsets say', () => {
+    const body = p(anchor({ relH: 'column', relV: 'margin', offH: 72, offV: 144, w: 180, h: 72, content: box('浮動方塊') }) + r('正文'))
+    const html = readDocx(docWith(body), '').html
+    assert.match(html, /<span class="dx-abs" style="left:calc\(var\(--il\) \+ 11\.765cqw\);top:35\.294cqw;width:29\.412cqw;height:11\.765cqw;z-index:1"><span class="dx-txbx"[^>]*>[\s\S]*浮動方塊/)
+  })
+
+  test('F30: after a page break, page anchors are placed on that page, which keeps its margin and full height', () => {
+    const afterBreak = p(r('第一頁') + '<w:r><w:br w:type="page"/></w:r>') + p(fullPage() + r('第二頁封面'))
+    const html = readDocx(docWith(afterBreak, mediaParts, media), '').html
+    assert.match(html, /class="dx-pgbr"[\s\S]*?<\/div><div class="dx-pg" style="padding-top:11\.765cqw;min-height:129\.412cqw"><div class="dx-p[^"]*"><span class="dx-abs" style="left:calc\(0cqw - var\(--il\)\);top:0cqw;/)
+    assert.match(html, /第二頁封面<\/span><\/div><\/div>/)
+
+    const before = p(r('前一頁')) + p(fullPage() + r('新的一頁'), '<w:pageBreakBefore/>')
+    const html2 = readDocx(docWith(before, mediaParts, media), '').html
+    assert.match(html2, /<span class="dx-pgbr" role="separator" aria-label="分頁"><\/span><div class="dx-pg" style="padding-top:11\.765cqw;min-height:129\.412cqw"><div class="dx-p/)
+
+    const plain = p(r('甲')) + p(r('乙'), '<w:pageBreakBefore/>')
+    assert.doesNotMatch(readDocx(docWith(plain), '').html, /padding-top:11\.765cqw/, 'a page without page anchors keeps the plain layout')
+  })
+
+  test('F30: a paragraph-anchored picture is pinned to its paragraph; a paragraph holding only an anchor keeps its line', () => {
+    const body = p(anchor({ relH: 'column', relV: 'paragraph', offH: 36, offV: 18, w: 72, h: 36, content: box('旁註') }) + r('段落文字'), '<w:ind w:left="720"/>') + p(fullPage())
+    const html = readDocx(docWith(body, mediaParts, media), '').html
+    assert.match(html, /<div class="dx-p [^"]*"><span class="dx-pin" style="margin-inline-start:calc\(-1 \* 36pt\)"><span class="dx-abs" style="left:5\.882cqw;top:2\.941cqw;width:11\.765cqw;height:5\.882cqw;z-index:1">[\s\S]*旁註[\s\S]*<\/span><\/span><span[^>]*>段落文字</)
+    assert.match(html, /z-index:-1"><img[^>]*><\/span><br><\/div>/)
+  })
+
+  test('F30: a VML watermark in the header is centred on the margin box, rotated and behind the text', () => {
+    const shape = `<w:r><w:pict><v:shape id="PowerPlusWaterMarkObject" type="#_x0000_t136" style="position:absolute;margin-left:0;margin-top:0;width:412.4pt;height:247.45pt;rotation:315;z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin" fillcolor="silver" stroked="f"><v:fill opacity=".5"/><v:textpath style="font-family:&quot;Calibri&quot;;font-size:1pt" string="CONFIDENTIAL"/></v:shape></w:pict></w:r>`
+    const doc = docWith(p(r('內文')) + `<w:sectPr><w:headerReference w:type="default" r:id="rH"/></w:sectPr>`, { 'word/header1.xml': `<w:hdr ${W}>${p(shape + r('信頭'))}</w:hdr>` }, [['rH', 'header', 'header1.xml']])
+    const html = readDocx(doc, '').html
+    assert.match(html, /<span class="dx-abs" style="left:calc\(var\(--il\) \+ 4\.542cqw\);top:44\.489cqw;width:67\.386cqw;height:40\.433cqw;z-index:-1;transform:rotate\(315deg\)"><span class="dx-wordart[^"]*" style="[^"]*">CONFIDENTIAL<\/span><\/span>/)
+  })
+
+  const altChunkDoc = (target: string, data: string, contentType?: string) =>
+    zip({
+      '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">${contentType ? `<Override PartName="${target}" ContentType="${contentType}"/>` : ''}</Types>`,
+      'word/document.xml': `<w:document ${W}><w:body>${p(r('塊之前'))}<w:altChunk r:id="rA"/>${p(r('塊之後'))}</w:body></w:document>`,
+      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rA" Type="${REL}/aFChunk" Target="${target}"/></Relationships>`,
+      [target.replace(/^\//, '')]: data
+    })
+
+  test('F31: an HTML altChunk keeps its text and structure through a whitelist; everything active is dropped', () => {
+    const chunk = `<!DOCTYPE html><html><head><title>標題不該出現</title><style>p{color:red}</style><script>alert(1)</script></head><body onload="x()">
+<h1 style="color:red" onclick="evil()">報告 &amp; 摘要</h1><p class="x">第一段 <b>粗</b><i>斜</i><u>底</u><s>刪</s>H<sub>2</sub>O x<sup>2</sup> &lt;tag&gt; &#x4E2D;&#25991;</p>
+<div>區塊一</div><div>區塊二</div>
+<ul><li>甲<li>乙<ol><li>巢狀</ol></ul>
+<table border=1><thead><tr><th colspan="2">表頭</th></tr></thead><tbody><tr><td rowspan=2 onmouseover="x">左</td><td>右</td></tr></tbody></table>
+<blockquote>引言</blockquote><pre><code>code  here</code></pre><table><tr><td>格<b>粗</p>續</td></tr></table>
+<a href="javascript:alert(1)" onclick="y">腳本連結</a> <a href="https://example.com/x?a=1&amp;b=2">外部</a>
+<img src="javascript:alert(1)"><img src="https://evil.example/t.png"><img src="data:image/png;base64,iVBORw0KGgo=" alt="小圖" onerror="z()" width="120"><img src="data:text/html;base64,PHNjcmlwdD4=">
+<iframe src="https://x"></iframe><object data="x"></object><svg><script>alert(2)</script><text>svg文字</text></svg><img src=x onerror=alert(3)//
+<form><button>按鈕</button></form><noscript>請開啟</noscript><template><p>模板</p></template><!-- <script>alert(4)</script> -->
+<p>未閉合 <b>粗體
+</body></html>`
+    const data = altChunkDoc('/word/afchunk.htm', chunk)
+    const html = readDocx(data, '').html
+    assert.doesNotMatch(html, /<style|<script|<iframe|<object|<svg|<form|<input|<template|<button|\son\w+=|javascript:|evil\.example|data:text|alert/)
+    assert.doesNotMatch(html, /標題不該出現|svg文字|模板|請開啟|dx-unsup/)
+    assert.match(html, />塊之前<[\s\S]*<div class="dx-html[^"]*">[\s\S]*<\/div>[\s\S]*>塊之後</)
+    for (const piece of ['<h1>報告 &#38; 摘要</h1>', '<p>第一段 <b>粗</b><i>斜</i><u>底</u><s>刪</s>H<sub>2</sub>O x<sup>2</sup> &#60;tag&#62; 中文</p>', '<th colspan="2">表頭</th>', '<td rowspan="2">左</td>', '<blockquote>引言</blockquote>', '<pre><code>code  here</code></pre>', '<span class="dx-lnk">腳本連結</span>', '<span class="dx-lnk" title="https://example.com/x?a=1&#38;b=2">外部</span>', '<img class="dx-img" src="data:image/png;base64,iVBORw0KGgo=" alt="小圖" width="120">', '<li>甲</li><li>乙<ol><li>巢狀</li></ol></li>', '<td>格<b>粗續</b></td>', '按鈕']) {
+      assert.ok(html.includes(piece), `missing ${piece}`)
+    }
+    assert.doesNotMatch(html, /區塊一區塊二/)
+    assert.match(html, /粗體\s*<\/b><\/p><\/div>/)
+    assert.match(docxText(data), /報告 & 摘要[\s\S]*右/)
+  })
+
+  test('F31: an html-docx-js MHT chunk decodes quoted-printable UTF-8 and inlines its pictures as data URIs', () => {
+    const mht = [
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/related;',
+      '    type="text/html";',
+      '    boundary="----=mhtDocumentPart"',
+      '',
+      '',
+      '------=mhtDocumentPart',
+      'Content-Type: text/html;',
+      '    charset="utf-8"',
+      'Content-Transfer-Encoding: quoted-printable',
+      'Content-Location: file:///C:/fake/document.html',
+      '',
+      '<html><body><h1 style=3D"color:red">=E6=A8=99=E9=A1=8C</h1><p>long line that is soft=',
+      'ly wrapped</p><p><img src=3D"file:///C:/fake/image0.png" width=3D"200"><img src=3D"file:///C:/fake/none.png"></p></body></html>',
+      '',
+      '------=mhtDocumentPart',
+      'Content-Type: image/png',
+      'Content-Transfer-Encoding: base64',
+      'Content-Location: file:///C:/fake/image0.png',
+      '',
+      'iVBORw0KGgoAAAANSUhEUg==',
+      '',
+      '------=mhtDocumentPart--',
+      ''
+    ].join('\r\n')
+    const html = readDocx(altChunkDoc('/word/afchunk.mht', mht, 'message/rfc822'), '').html
+    assert.ok(html.includes('<h1>標題</h1>'), html)
+    assert.ok(html.includes('long line that is softly wrapped'))
+    assert.ok(html.includes('<img class="dx-img" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" alt="" width="200">'))
+    assert.doesNotMatch(html, /file:\/\/|none\.png/)
+  })
+
+  test('F31: a chunk that is neither HTML nor MHT stays a labelled box; plain text shows as text', () => {
+    assert.match(readDocx(altChunkDoc('/word/a.rtf', '{\\rtf1 hello}', 'application/rtf'), '').html, /dx-unsup[^>]*>嵌入的外部內容/)
+    assert.match(readDocx(altChunkDoc('/word/a.txt', '第一行\n<b>第二行</b>', 'text/plain'), '').html, /<div class="dx-html[^"]*"><p>第一行<br>&#60;b&#62;第二行&#60;\/b&#62;<\/p><\/div>/)
+  })
+
+  test('F44: a missing picture and an externally linked one are named apart; the box says why', () => {
+    const vml = (rid: string) => `<w:r><w:pict><v:shape style="width:72pt;height:72pt"><v:imagedata r:id="${rid}"/></v:shape></w:pict></w:r>`
+    const body = p(picture('nope', 10, 10)) + p(picture('rGone', 10, 10)) + p(picture('rExt', 10, 10)) + p(picture('rEmf', 10, 10)) + p(vml('nope')) + p(vml('rExt'))
+    const html = readDocx(docWith(body, { 'word/media/b.emf': 'emf' }, [['rGone', 'image', 'media/gone.png'], ['rExt', 'image', 'https://example.com/a.png', true], ['rEmf', 'image', 'media/b.emf']]), '').html
+    const boxes = [...html.matchAll(/class="dx-unsup"[^>]*>([^<]*)</g)].map((match) => match[1])
+    assert.equal(boxes.length, 6)
+    assert.match(boxes[0], /^圖片遺失/)
+    assert.match(boxes[1], /^圖片遺失/)
+    assert.match(boxes[2], /^外部連結的圖片/)
+    assert.match(boxes[3], /^EMF 圖片\(網頁版未支援/)
+    assert.match(boxes[4], /^圖片遺失/)
+    assert.match(boxes[5], /^外部連結的圖片/)
+    for (const label of [boxes[0], boxes[2]]) assert.doesNotMatch(label, /網頁版未支援/)
+  })
+
+  test('F44: notices and error boxes speak Traditional Chinese, never a parser\'s English', () => {
+    const doc = readDocx(sampleDocx({ 'word/styles.xml': '<w:styles><w:style>', 'word/numbering.xml': '<!DOCTYPE x><x/>' }), '')
+    const notices = [...doc.html.matchAll(/class="dx-notice">([^<]*)</g)].map((match) => match[1])
+    assert.ok(notices.length >= 2)
+    for (const notice of notices) assert.doesNotMatch(notice.replace(/\([^)]*\.xml\)/, '').replace(/&#60;[^&]*&#62;/g, ''), /[A-Za-z]{4,}/, notice)
+    const page = renderDocxPage(zip({ 'word/document.xml': `<w:document ${W}><w:body><w:p><w:r><w:t>x</w:r></w:p></w:body></w:document>` }), 'x.docx', 'x')
+    const visible = page.replace(/<script>[\s\S]*?<\/script>/g, '').replace(/<style>[\s\S]*?<\/style>/g, '').replace(/<[^>]+>/g, ' ')
+    assert.doesNotMatch(visible.replace(/Word|\.docx|x\.docx/g, ''), /[A-Za-z]{4,}/, visible)
+  })
 })

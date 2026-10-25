@@ -1,6 +1,6 @@
-import { inflateRawSync } from 'node:zlib'
+import { constants, inflateRawSync } from 'node:zlib'
 
-/** A .pptx is a zip of untrusted parts: bounded in count and inflated size, read only by name. */
+/** An Office file is a zip of untrusted parts: bounded in count and inflated size, read only by name. */
 export const ZIP_LIMITS = { entries: 5000, entryBytes: 64 * 1024 * 1024, totalBytes: 256 * 1024 * 1024 }
 
 export class ZipError extends Error {}
@@ -26,12 +26,12 @@ export class ZipReader {
         break
       }
     }
-    if (end < 0) throw new ZipError('not a zip file')
+    if (end < 0) throw new ZipError('不是 zip 檔')
     const count = data.readUInt16LE(end + 10)
     let at = data.readUInt32LE(end + 16)
-    if (count > ZIP_LIMITS.entries) throw new ZipError('too many zip entries')
+    if (count > ZIP_LIMITS.entries) throw new ZipError('zip 檔內的項目太多')
     for (let i = 0; i < count; i++) {
-      if (at + 46 > data.length || data.readUInt32LE(at) !== 0x02014b50) throw new ZipError('broken zip directory')
+      if (at + 46 > data.length || data.readUInt32LE(at) !== 0x02014b50) throw new ZipError('zip 檔的目錄已損壞')
       const method = data.readUInt16LE(at + 10)
       const compressedSize = data.readUInt32LE(at + 20)
       const size = data.readUInt32LE(at + 24)
@@ -60,26 +60,75 @@ export class ZipReader {
     return [...this.entries.keys()]
   }
 
+  /** The compressed bytes of an entry, found through its local header. */
+  private raw(name: string, entry: Entry): Buffer {
+    const at = entry.offset
+    if (at + 30 > this.data.length || this.data.readUInt32LE(at) !== 0x04034b50) throw new ZipError('zip 檔內的項目已損壞')
+    const start = at + 30 + this.data.readUInt16LE(at + 26) + this.data.readUInt16LE(at + 28)
+    if (entry.method !== 0 && entry.method !== 8) throw new ZipError(`${name} 使用不支援的壓縮方式`)
+    return this.data.subarray(start, start + entry.compressedSize)
+  }
+
+  private count(bytes: number): void {
+    this.inflated += bytes
+    if (this.inflated > ZIP_LIMITS.totalBytes) throw new ZipError('檔案解壓縮後超過大小上限')
+  }
+
   read(name: string): Buffer | null {
     const entry = this.entry(name)
     if (!entry) return null
-    if (entry.size > ZIP_LIMITS.entryBytes) throw new ZipError(`${name} is too large`)
-    const at = entry.offset
-    if (at + 30 > this.data.length || this.data.readUInt32LE(at) !== 0x04034b50) throw new ZipError('broken zip entry')
-    const start = at + 30 + this.data.readUInt16LE(at + 26) + this.data.readUInt16LE(at + 28)
-    const raw = this.data.subarray(start, start + entry.compressedSize)
+    if (entry.size > ZIP_LIMITS.entryBytes) throw new ZipError(`${name} 太大,超過單一項目的大小上限`)
+    const raw = this.raw(name, entry)
     let out: Buffer
     if (entry.method === 0) out = Buffer.from(raw)
-    else if (entry.method === 8) {
+    else {
       try {
         out = inflateRawSync(raw, { maxOutputLength: Math.max(1, entry.size) })
       } catch {
-        throw new ZipError(`${name} does not inflate`)
+        throw new ZipError(`${name} 無法解壓縮`)
       }
-    } else throw new ZipError(`${name} uses an unsupported compression method`)
-    this.inflated += out.length
-    if (this.inflated > ZIP_LIMITS.totalBytes) throw new ZipError('the zip inflates past its limit')
+    }
+    this.count(out.length)
     return out
+  }
+
+  /**
+   * The first `limit` bytes of an entry, for parts too large to read whole: `cut` says whether more
+   * followed. Deflate cannot start mid-stream, so ever longer slices of the compressed bytes are
+   * inflated (a cut stream flushes what it has) until the output is close to the limit; a slice that
+   * would pass the limit gives no output at all, so the search then narrows between the last two.
+   */
+  readPrefix(name: string, limit: number = ZIP_LIMITS.entryBytes): { data: Buffer; cut: boolean } | null {
+    const entry = this.entry(name)
+    if (!entry) return null
+    const max = Math.max(1, Math.min(limit, ZIP_LIMITS.entryBytes))
+    if (entry.size <= max) return { data: this.read(name)!, cut: false }
+    const raw = this.raw(name, entry)
+    if (entry.method === 0) {
+      const data = Buffer.from(raw.subarray(0, max))
+      this.count(data.length)
+      return { data, cut: raw.length > max }
+    }
+    let best = Buffer.alloc(0)
+    let good = 0
+    let bad = raw.length + 1
+    let take = Math.min(raw.length, Math.max(1024, Math.floor(max / 64)))
+    for (let tries = 0; tries < 60 && take > good && take < bad; tries++) {
+      try {
+        best = inflateRawSync(raw.subarray(0, take), { finishFlush: constants.Z_SYNC_FLUSH, maxOutputLength: max })
+        good = take
+        if (take >= raw.length || best.length >= max * 0.9) break
+        const grow = best.length ? Math.min(8, (max * 0.95) / best.length) : 8
+        take = Math.min(raw.length, bad - 1, Math.max(take + 64, Math.floor(take * grow)))
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw new ZipError(`${name} 無法解壓縮`)
+        bad = take
+        if (bad - good <= 64) break
+        take = Math.floor((good + bad) / 2)
+      }
+    }
+    this.count(best.length)
+    return { data: best, cut: good < raw.length }
   }
 
   text(name: string): string | null {
