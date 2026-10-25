@@ -194,6 +194,15 @@ describe('page checks', () => {
     assert.doesNotMatch(first.stderr, /photo|s\.css/)
     assert.match(first.stderr, /someoneElse1/)
 
+    // check alone judges a published path against the artifact it was published to.
+    const elsewhere = page()
+    const remembered = site({ 'index.html': '<!doctype html><title>x</title>' })
+    await cli(['publish', remembered, '--id', elsewhere.id])
+    writeFileSync(join(remembered, 'index.html'), html)
+    const recheck = await cli(['check', remembered])
+    assert.equal(recheck.code, 1)
+    assert.match(recheck.stdout, new RegExp(`asset of artifact ${id}`))
+
     // A new artifact has no assets yet, so any asset URL in it belongs to another one; so does a recorded id the server no longer has.
     const fresh = await cli(['publish', site({ 'index.html': html }), '--new'])
     assert.match(fresh.stderr, new RegExp(`asset of artifact ${id}`))

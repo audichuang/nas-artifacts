@@ -520,7 +520,9 @@ async function main() {
       if (!existsSync(source)) fail(`${args[0]} does not exist`)
       const assetRefs = []
       const warnings = checkFiles(collectFiles(source), assetRefs)
-      await checkAssets(assetRefs, undefined, warnings)
+      // The artifact a publish of this path would go to, as publish decides it; unknown for a path never published.
+      const target = values.new ? null : values.id ?? readJson(STATE_FILE, {})[source]?.id
+      await checkAssets(assetRefs, target, warnings)
       print({ warnings }, json, (d) => d.warnings.join('\n') || 'no problems found')
       return process.exit(warnings.length ? 1 : 0)
     }
