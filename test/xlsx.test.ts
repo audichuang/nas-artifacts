@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
+import { chromium } from 'playwright-core'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
 import { formatGeneral, formatNumber, formatText, renderXlsxPage, xlsxText, XLSX_LIMITS } from '../src/xlsx.ts'
@@ -267,7 +268,7 @@ describe('reading Excel workbooks', () => {
   })
 
   test('values: shared strings with rich runs, inline strings, booleans, errors, cached formula results, formulas without a value', () => {
-    assert.match(first, />一般<span style="font-weight:700;color:#FF0000;font-size:14pt;font-family:'Arial',[^"]*">紅粗<\/span><\/td>/)
+    assert.match(first, />一般<span style="font-weight:700;color:#FF0000;font-size:14pt;font-family:'Arial',[^"]*">紅粗<\/span><\/span><\/td>/)
     assert.doesNotMatch(first, /ふりがな/)
     // B3 is not empty, so A3's text does not run on into it.
     assert.doesNotMatch(cellOf(first, '行內 &#38; &#60;i&#62;'), /\bov\b/)
@@ -285,8 +286,8 @@ describe('reading Excel workbooks', () => {
     assert.match(first, />2024\/2\/29 12:00</)
     // Numbers align right by default, text left: an explicitly aligned cell keeps its own.
     assert.match(cellOf(first, '2025/1/1'), /class="x8 n /)
-    assert.match(first, /<span class="rot" style="transform:rotate\(-90deg\)">12<\/span>/)
-    assert.match(first, /class="x10"[^>]*><span class="vt">直排<\/span>/)
+    assert.match(first, /<td class="x9 n rc"><span class="rot" style="transform:translateX\(1\.2em\) rotate\(-90deg\)">12<\/span>/)
+    assert.match(first, /class="x10 rc"[^>]*><span class="vt">直排<\/span>/)
     // Shrink to fit: the page script scales the span down to the column once the sheet is shown.
     assert.match(first, /<td class="x12 sh"><span>縮小以適合欄寬<\/span><\/td>/)
     assert.match(html, /querySelectorAll\('td\.sh'\)/)
@@ -525,3 +526,180 @@ describe('serving Excel workbooks', () => {
     assert.ok(xlsxText(book([{ name: 'big', body: sheet(rows) }])).length <= XLSX_LIMITS.textChars)
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// Files from the stress round: what a crafted or tool-written workbook must still show truthfully.
+
+const chromiumPath = (() => {
+  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
+  return [
+    join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell'),
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser'
+  ].find((candidate) => existsSync(candidate))
+})()
+
+/** A sheet with one chart over it; returns the sheet panel. */
+function chartPanel(plot: string): string {
+  const drawing = `<xdr:wsDr ${DRAWING_NS}><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="4762500" cy="2857500"/><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="1" name="c"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="c"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>`
+  const page = renderXlsxPage(
+    book([{ name: 's', body: sheet('', '', '<drawing r:id="d"/>'), rels: [['d', 'drawing', '../drawings/drawing1.xml']] }], {
+      extra: {
+        'xl/drawings/drawing1.xml': drawing,
+        'xl/drawings/_rels/drawing1.xml.rels': rels([['c', 'chart', '../charts/chart1.xml']]),
+        'xl/charts/chart1.xml': `<c:chartSpace ${DRAWING_NS}><c:chart><c:plotArea>${plot}</c:plotArea></c:chart></c:chartSpace>`
+      }
+    }),
+    'b.xlsx',
+    'b'
+  )
+  return panel(page, 1)
+}
+
+const numbers = (values: number[]) => `<c:numRef><c:f>x</c:f><c:numCache><c:ptCount val="${values.length}"/>${values.map((v, at) => `<c:pt idx="${at}"><c:v>${v}</c:v></c:pt>`).join('')}</c:numCache></c:numRef>`
+const series = (color: string, values: number[], tag = 'val') => `<c:ser><c:spPr><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:ln></c:spPr><c:${tag}>${numbers(values)}</c:${tag}></c:ser>`
+
+/** Value-axis labels and the y of their gridline; `at(v)` is where value v sits. */
+function valueAxis(svg: string) {
+  const ticks = [...svg.matchAll(/<text x="[\d.]+" y="(-?[\d.]+)" text-anchor="end" font-size="10">([^<]*)<\/text>/g)].map((m) => ({ label: m[2], y: Number(m[1]) - 3 }))
+  const [a, b] = ticks
+  const value = (label: string) => Number(label.replace(/[,%]/g, ''))
+  const at = (v: number) => a.y + ((v - value(a.label)) / (value(b.label) - value(a.label))) * (b.y - a.y)
+  return { labels: ticks.map((t) => t.label), at }
+}
+const rectsOf = (svg: string, color: string) =>
+  [...svg.matchAll(new RegExp(`<rect x="(-?[\\d.]+)" y="(-?[\\d.]+)" width="(-?[\\d.]+)" height="(-?[\\d.]+)" fill="#${color}"`, 'g'))].map((m) => ({ top: Number(m[2]), bottom: Number(m[2]) + Number(m[4]) }))
+const close = (actual: number, expected: number, what: string) => assert.ok(Math.abs(actual - expected) < 0.6, `${what}: ${actual} vs ${expected}`)
+
+describe('charts tell the truth about their data', () => {
+  test('a 100% stacked chart fills each category to 100%, not to the sum of its values', () => {
+    const svg = chartPanel(`<c:barChart><c:barDir val="col"/><c:grouping val="percentStacked"/><c:overlap val="100"/>${series('111111', [1, 30])}${series('222222', [3, 10])}</c:barChart>`)
+    const axis = valueAxis(svg)
+    assert.equal(axis.labels.at(-1), '100%', axis.labels.join(' '))
+    const [a1, a2] = rectsOf(svg, '111111')
+    const [b1, b2] = rectsOf(svg, '222222')
+    close(a1.bottom, axis.at(0), 'first bar starts at 0')
+    close(a1.top, axis.at(25), 'first part is 25%')
+    close(b1.top, axis.at(100), 'second part ends at 100%')
+    close(a2.top, axis.at(75), 'second category first part is 75%')
+    close(b2.top, axis.at(100), 'second category ends at 100%')
+  })
+
+  test('a stacked bar keeps negatives below zero, apart from the positives', () => {
+    const svg = chartPanel(`<c:barChart><c:barDir val="col"/><c:grouping val="stacked"/>${series('111111', [5])}${series('222222', [-2])}</c:barChart>`)
+    const axis = valueAxis(svg)
+    const [p] = rectsOf(svg, '111111')
+    const [q] = rectsOf(svg, '222222')
+    close(p.bottom, axis.at(0), 'P from 0')
+    close(p.top, axis.at(5), 'P to 5')
+    close(q.top, axis.at(0), 'Q from 0')
+    close(q.bottom, axis.at(-2), 'Q down to -2')
+  })
+
+  test('stacked lines and areas stack; percent-stacked ones reach 100%', () => {
+    const line = chartPanel(`<c:lineChart><c:grouping val="stacked"/>${series('111111', [1, 2])}${series('222222', [1, 2])}</c:lineChart>`)
+    const axis = valueAxis(line)
+    const ys = (svg: string, color: string) => /<polyline points="([^"]+)"[^>]*stroke="#COLOR"/.exec(svg.replace('COLOR', color)) ?? new RegExp(`<polyline points="([^"]+)"[^>]*stroke="#${color}"`).exec(svg)
+    const second = ys(line, '222222')![1].split(' ').map((p) => Number(p.split(',')[1]))
+    close(second[0], axis.at(2), 'stacked line first point')
+    close(second[1], axis.at(4), 'stacked line second point')
+    const area = chartPanel(`<c:areaChart><c:grouping val="percentStacked"/>${series('111111', [1, 3])}${series('222222', [3, 1])}</c:areaChart>`)
+    const areaAxis = valueAxis(area)
+    assert.equal(areaAxis.labels.at(-1), '100%', areaAxis.labels.join(' '))
+    const path = new RegExp(`<path d="([^"]+)" fill="#111111"`).exec(area)![1]
+    const ysOf = (d: string) => [...d.matchAll(/(-?[\d.]+),(-?[\d.]+)/g)].map((m) => Number(m[2]))
+    assert.ok(ysOf(path).some((y) => Math.abs(y - areaAxis.at(25)) < 0.6), `first area reaches 25%: ${path}`)
+    const top = new RegExp(`<path d="([^"]+)" fill="#222222"`).exec(area)![1]
+    assert.ok(ysOf(top).filter((y) => Math.abs(y - areaAxis.at(100)) < 0.6).length >= 2, `second area tops out at 100%: ${top}`)
+    assert.ok(ysOf(top).some((y) => Math.abs(y - areaAxis.at(75)) < 0.6), `second area sits on the first: ${top}`)
+  })
+
+  test('scatter and radar charts are a labelled box, not a line through x values in file order', () => {
+    for (const kind of ['scatterChart', 'radarChart']) {
+      const tag = kind === 'scatterChart' ? 'yVal' : 'val'
+      const svg = chartPanel(`<c:${kind}><c:ser><c:xVal>${numbers([3, 1, 2])}</c:xVal><c:${tag}>${numbers([1, 2, 3])}</c:${tag}></c:ser></c:${kind}>`)
+      assert.doesNotMatch(svg, /<svg/, kind)
+      assert.match(svg, /class="xl-draw xl-missing"[^>]*>圖表\(此圖表類型網頁版未支援/, kind)
+    }
+  })
+})
+
+describe('cells show what Excel shows', () => {
+  test('serif and monospace font names keep their kind of fallback', () => {
+    const names = ['SimSun', 'NSimSun', 'Batang', 'Garamond', 'Palatino Linotype', 'Book Antiqua', 'MS Mincho', 'Microsoft Sans Serif', 'Century Gothic', 'Lucida Console', 'Fira Code', 'Source Code Pro', 'Inconsolata', 'Cascadia Code', 'Noto Sans Mono', 'Courier New']
+    const kinds = ['serif', 'serif', 'serif', 'serif', 'serif', 'serif', 'serif', 'sans-serif', 'sans-serif', 'monospace', 'monospace', 'monospace', 'monospace', 'monospace', 'monospace', 'monospace']
+    const styles = `<styleSheet ${NS}><fonts count="${names.length + 1}"><font><sz val="11"/><name val="Calibri"/></font>${names.map((n) => `<font><sz val="11"/><name val="${n}"/></font>`).join('')}</fonts><cellXfs count="${names.length + 1}"><xf/>${names.map((_, at) => `<xf fontId="${at + 1}"/>`).join('')}</cellXfs></styleSheet>`
+    const rows = names.map((n, at) => `<row r="${at + 1}"><c r="A${at + 1}" s="${at + 1}" t="inlineStr"><is><t>${n}</t></is></c></row>`).join('')
+    const page = renderXlsxPage(book([{ name: 's', body: sheet(rows) }], { styles }), 'b.xlsx', 'b')
+    names.forEach((name, at) => {
+      const rule = new RegExp(`td\\.x${at + 1}\\{[^}]*font-family:'${name}',([^;}]*)`).exec(page)
+      assert.ok(rule, name)
+      assert.equal(rule[1].split(',').at(-1), kinds[at], `${name}: ${rule[1]}`)
+    })
+  })
+
+  test('a workbook that asks to be recalculated on open shows its formulas, not the 0 placeholders saved for them', () => {
+    const body = sheet('<row r="2"><c r="B2"><v>3</v></c><c r="C2"><v>20</v></c><c r="D2"><f>B2*C2</f><v>0</v></c><c r="E2"><f>B2+1</f><v>4</v></c></row>')
+    const recalc = renderXlsxPage(book([{ name: 's', body }], { workbookPr: '<calcPr calcId="124519" fullCalcOnLoad="1"/>' }), 'b.xlsx', 'b')
+    assert.match(cellOf(recalc, '=B2*C2'), /class="f"/)
+    assert.doesNotMatch(panel(recalc, 1), /<td class="n">0<\/td>/)
+    assert.match(panel(recalc, 1), /<td class="n">4<\/td>/)
+    const saved = renderXlsxPage(book([{ name: 's', body }]), 'b.xlsx', 'b')
+    assert.match(panel(saved, 1), /<td class="n">0<\/td>/)
+  })
+
+  test('overflowing text stops at the next occupied cell', () => {
+    const body = sheet(
+      '<row r="1"><c r="A1" t="inlineStr"><is><t>This long title spills across B but must stop at C1</t></is></c><c r="C1" t="inlineStr"><is><t>C1 VALUE</t></is></c></row>',
+      '<cols><col min="1" max="3" width="10" customWidth="1"/></cols>'
+    )
+    const page = renderXlsxPage(book([{ name: 's', body }]), 'b.xlsx', 'b')
+    const cell = cellOf(page, 'This long title spills across B but must stop at C1')
+    assert.match(cell, /class="ov"/)
+    const width = Number(/<span class="ovs" style="width:([\d.]+)px">/.exec(cell)?.[1])
+    const colWidth = Number([...page.matchAll(/<col style="width:([\d.]+)px">/g)][1][1])
+    close(width, colWidth * 2 - 4, 'runs over A and B only')
+  })
+
+  test('rotated and stacked text: markup sits inside its own cell', () => {
+    const page = rotationPage()
+    assert.match(cellOf(page, 'Rotated 45 in narrow column'), /<td class="x1 rc"/)
+  })
+
+  test('rotated text stays visible in its cell and stacked text keeps the row height', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+    const browser = await chromium.launch({ executablePath: chromiumPath })
+    try {
+      const page = await browser.newPage()
+      await page.setContent(rotationPage())
+      const result = await page.evaluate(() =>
+        [...document.querySelectorAll('td')].filter((td) => td.textContent).map((td) => {
+          const text = (td.querySelector('.rot,.vt') ?? td).firstChild!
+          const deep = text.nodeType === 3 ? text : text.firstChild!
+          const range = document.createRange()
+          range.setStart(deep, 0)
+          range.setEnd(deep, 1)
+          const glyph = range.getBoundingClientRect()
+          const box = td.getBoundingClientRect()
+          const x = glyph.left + glyph.width / 2
+          const y = glyph.top + glyph.height / 2
+          return { text: td.textContent, inside: x >= box.left && x <= box.right && y >= box.top && y <= box.bottom, row: td.parentElement!.getBoundingClientRect().height }
+        })
+      )
+      for (const cell of result) {
+        assert.ok(cell.inside, `first letter of "${cell.text}" is inside its cell`)
+        close(cell.row, 120, `row of "${cell.text}" keeps its height`)
+      }
+    } finally {
+      await browser.close()
+    }
+  })
+})
+
+/** Row 1 at 90pt: 45°, 90° up, 90° down (180) and stacked (255) text in narrow columns. */
+function rotationPage(): string {
+  const styles = `<styleSheet ${NS}><cellXfs count="5"><xf/><xf><alignment textRotation="45"/></xf><xf><alignment textRotation="90"/></xf><xf><alignment textRotation="180"/></xf><xf><alignment textRotation="255"/></xf></cellXfs></styleSheet>`
+  const texts = ['Rotated 45 in narrow column', 'Rotated 90 upward', 'Rotated 90 downward', 'Stacked vertical text that is long']
+  const cells = texts.map((t, at) => `<c r="${'ABCD'[at]}1" s="${at + 1}" t="inlineStr"><is><t>${t}</t></is></c>`).join('')
+  const body = sheet(`<row r="1" ht="90" customHeight="1">${cells}</row>`, '<cols><col min="1" max="4" width="6" customWidth="1"/></cols>')
+  return renderXlsxPage(book([{ name: 's', body }], { styles }), 'b.xlsx', 'b')
+}

@@ -263,10 +263,16 @@ const cssDrawing = (color: { hex: string; alpha: number }) => {
 // Fonts
 
 const CJK_SANS = "'PingFang TC','Heiti TC','Noto Sans TC','Noto Sans CJK TC','Microsoft JhengHei'"
+// First match wins: monospace names before serif ones ('Noto Sans Mono'), and a name that says
+// 'Sans Serif' is sans.
 const FONT_FALLBACKS: [RegExp, string][] = [
-  [/細明|明體|MingLiU|PMingLiU|Song|宋|Serif|Times|Georgia|Cambria|Mincho|明朝/i, "'PMingLiU','Songti TC','Noto Serif TC','Noto Serif CJK TC',serif"],
+  [/Consolas|Courier|Mono|Menlo|Lucida Console|Typewriter|Inconsolata|Fira Code|Source Code|Cascadia|Code Pro|\bCode\b/i, 'ui-monospace,Menlo,Consolas,monospace'],
+  [/Sans Serif/i, `${CJK_SANS},sans-serif`],
   [/楷|Kai/i, "'DFKai-SB','BiauKai','Kaiti TC',serif"],
-  [/Consolas|Courier|Mono|Menlo/i, 'ui-monospace,Menlo,Consolas,monospace']
+  [
+    /細明|明體|明朝|宋|Ming|Song|Sun|Mincho|Myungjo|Batang|Gungsuh|Serif|Times|Georgia|Cambria|Garamond|Palatino|Antiqua|Bookman|Baskerville|Bodoni|Century(?! Gothic)|Constantia|Minion|Perpetua|Centaur|Rockwell/i,
+    "'PMingLiU','Songti TC','Noto Serif TC','Noto Serif CJK TC',serif"
+  ]
 ]
 
 /** Font names go into CSS: letters, digits, space and ._- only. */
@@ -274,7 +280,15 @@ const safeFont = (name: string | undefined) => (name ?? '').replace(/[^\p{L}\p{N
 
 function fontStack(...candidates: (string | undefined)[]): string {
   const names = [...new Set(candidates.map(safeFont).filter(Boolean))]
-  const fallback = FONT_FALLBACKS.find(([pattern]) => names.some((name) => pattern.test(name)))?.[1] ?? `${CJK_SANS},sans-serif`
+  // The cell's own font decides the kind; the theme's East Asian font only when it says nothing.
+  let fallback = `${CJK_SANS},sans-serif`
+  for (const name of names) {
+    const found = FONT_FALLBACKS.find(([pattern]) => pattern.test(name))
+    if (found) {
+      fallback = found[1]
+      break
+    }
+  }
   return [...names.map((name) => `'${name}'`), fallback].join(',')
 }
 
@@ -1229,6 +1243,8 @@ type Workbook = {
   part: string
   sheets: SheetEntry[]
   date1904: boolean
+  /** calcPr fullCalcOnLoad: the writer left formula results for Excel to work out on open. */
+  recalc: boolean
   activeTab: number
   theme: Theme
   styles: Styles
@@ -1250,6 +1266,9 @@ function scannedSheet(wb: Workbook, part: string): ScannedSheet {
   return sheet
 }
 
+/** XlsxWriter saves 0 for every formula and asks Excel to recalculate on open; that 0 was never computed. */
+const uncomputed = (wb: Workbook, cell: Cell) => wb.recalc && Boolean(cell.f) && cell.v === '0' && (cell.t === 'n' || !cell.t)
+
 /** The values of `'Sheet'!$A$1:$A$9` as a chart would plot them: numbers raw, text as shown. */
 function lookupRange(wb: Workbook, formula: string): (string | null)[] {
   const match = /^(?:'((?:[^']|'')+)'|([^'!(),]+))!(\$?[A-Za-z]{1,3}\$?\d+(?::\$?[A-Za-z]{1,3}\$?\d+)?)$/.exec(formula.trim())
@@ -1264,7 +1283,7 @@ function lookupRange(wb: Workbook, formula: string): (string | null)[] {
     for (let r = range.r1; r <= range.r2 && out.length < XLSX_LIMITS.chartPoints; r++) {
       for (let c = range.c1; c <= range.c2 && out.length < XLSX_LIMITS.chartPoints; c++) {
         const cell = sheet.rows.get(r)?.cells.get(c)
-        if (!cell) out.push(null)
+        if (!cell || uncomputed(wb, cell)) out.push(null)
         else if ((cell.t === 'n' || cell.t === 'str' || cell.t === 'b') && cell.v !== null) out.push(cell.v)
         else out.push(showCell(cell, cell.s ?? 0, wb, false).text || null)
       }
@@ -1292,6 +1311,7 @@ function openWorkbook(data: Buffer, mediaBase: string): Workbook {
   const warnings: string[] = []
   const pr = child(xml, 'workbookPr')
   const date1904 = ['1', 'true'].includes(attr(pr, 'date1904') ?? '')
+  const recalc = ['1', 'true'].includes(attr(child(xml, 'calcPr'), 'fullCalcOnLoad') ?? '')
   const sheets = children(child(xml, 'sheets'), 'sheet').map((node, tab): SheetEntry => {
     const sheetRel = pkg.rel(part, relAttr(node, 'id'))
     const kind = sheetRel?.type.split('/').pop() ?? ''
@@ -1308,7 +1328,7 @@ function openWorkbook(data: Buffer, mediaBase: string): Workbook {
   } catch (error) {
     warnings.push(`共用字串無法讀取,文字儲存格會是空白(${reason(error)})`)
   }
-  return { pkg, part, sheets, date1904, activeTab, theme, styles, strings, warnings, media: (target) => officeMediaUrl(mediaBase, target), scanned: new Map() }
+  return { pkg, part, sheets, date1904, recalc, activeTab, theme, styles, strings, warnings, media: (target) => officeMediaUrl(mediaBase, target), scanned: new Map() }
 }
 
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 300)
@@ -1389,6 +1409,7 @@ function showCell(cell: Cell, xfIndex: number, wb: Workbook, wantHtml: boolean):
     }
     default: {
       if (value === null || value === '') break
+      if (uncomputed(wb, cell)) break
       const number = Number(value)
       if (!Number.isFinite(number)) return plain(value, 'text')
       const formatted = formatNumber(code, number, wb.date1904, palette)
@@ -1948,8 +1969,10 @@ function renderChart(chart: XmlNode, W: number, H: number, theme: Theme, lookup:
   const kinds = ['barChart', 'bar3DChart', 'lineChart', 'line3DChart', 'areaChart', 'area3DChart', 'pieChart', 'pie3DChart', 'doughnutChart', 'scatterChart', 'radarChart']
   const group = plot.children.find((node) => kinds.includes(local(node.name)))
   if (!group) return null
-  let kind = local(group.name).replace('3D', '')
-  if (kind === 'scatterChart' || kind === 'radarChart') kind = 'lineChart'
+  const kind = local(group.name).replace('3D', '')
+  // Scatter and radar charts need their own axes; a category line through x values in file order
+  // would misstate them, so they stay a labelled box.
+  if (kind === 'scatterChart' || kind === 'radarChart') return null
   let categories: string[] = []
   const series = children(group, 'ser').slice(0, 50).map((ser, at) => {
     const name = seriesValues(child(ser, 'tx'), lookup)[0] ?? `數列 ${at + 1}`
@@ -2009,11 +2032,39 @@ function renderChart(chart: XmlNode, W: number, H: number, theme: Theme, lookup:
     svg += legend(lines, W, H - 6, fs)
   } else {
     if (varied) lines.forEach((line) => line.forEach((item) => (item.color = pointColor(series[0], categories.indexOf(item.name)))))
-    const all = series.flatMap((s) => s.values).filter((v): v is number => v !== null)
     const grouping = attr(child(group, 'grouping'), 'val') ?? ''
-    const stacked = grouping === 'stacked' || grouping === 'percentStacked'
-    const sums = categories.map((_, at) => series.reduce((sum, s) => sum + Math.max(0, s.values[at] ?? 0), 0))
-    let max = Math.max(0, ...(stacked ? sums : all))
+    const percent = grouping === 'percentStacked'
+    const stacked = grouping === 'stacked' || percent
+    // Each point's span on the value axis. Stacked bars pile positives up from 0 and negatives
+    // down from 0; stacked lines and areas add each series to the ones before it; 100% stacked
+    // ones divide by the category's total size, so every category ends at 100%.
+    const scale = categories.map((_, at) => {
+      if (!percent) return 1
+      const total = series.reduce((sum, s) => sum + Math.abs(s.values[at] ?? 0), 0)
+      return total ? 100 / total : 0
+    })
+    const up = categories.map(() => 0)
+    const down = categories.map(() => 0)
+    const spans = series.map((s) =>
+      s.values.slice(0, length).map((raw, at): { from: number; to: number } | null => {
+        // A gap in an area drops to the series below it; lines and bars just leave it out.
+        const gap = kind === 'areaChart' ? 0 : null
+        if (!stacked) return raw === null ? (gap === null ? null : { from: 0, to: 0 }) : { from: 0, to: raw }
+        const value = (raw ?? 0) * scale[at]
+        let from: number
+        if (kind === 'barChart') {
+          from = value < 0 ? down[at] : up[at]
+          if (value < 0) down[at] = from + value
+          else up[at] = from + value
+        } else {
+          from = up[at]
+          up[at] = from + value
+        }
+        return raw === null && gap === null ? null : { from, to: from + value }
+      })
+    )
+    const all = spans.flatMap((list) => list.flatMap((span) => (span ? [span.from, span.to] : [])))
+    let max = Math.max(0, ...all)
     const min = Math.min(0, ...all)
     if (max === min) max = min + 1
     const step = niceStep((max - min) / 5)
@@ -2022,7 +2073,8 @@ function renderChart(chart: XmlNode, W: number, H: number, theme: Theme, lookup:
     const horizontal = kind === 'barChart' && attr(child(group, 'barDir'), 'val') === 'bar'
     // Value labels in the chart's own number format when it names one.
     const valueCode = attr(path(plot, 'valAx', 'numFmt'), 'formatCode')
-    const valueLabel = (value: number) => (valueCode && valueCode !== 'General' ? formatNumber(valueCode, value).text.trim() : axisNumber(value))
+    const valueLabel = (value: number) =>
+      percent ? `${axisNumber(value)}%` : valueCode && valueCode !== 'General' ? formatNumber(valueCode, value).text.trim() : axisNumber(value)
     const valueTicks: number[] = []
     for (let i = 0; i <= 50 && bottom + i * step <= top2 + step / 2; i++) valueTicks.push(Number((bottom + i * step).toPrecision(12)))
     const widest = (labels: string[]) => Math.max(0, ...labels.map((label) => textWidth(label, fs)))
@@ -2055,27 +2107,29 @@ function renderChart(chart: XmlNode, W: number, H: number, theme: Theme, lookup:
     })
     if (kind === 'barChart') {
       const width = stacked ? slot * 0.6 : (slot * 0.7) / series.length
-      const base: number[] = categories.map(() => 0)
       series.forEach((s, si) => {
-        s.values.slice(0, length).forEach((value, at) => {
-          if (value === null) return
+        spans[si].forEach((span, at) => {
+          if (!span) return
           const c0 = slot * at + slot * (stacked ? 0.2 : 0.15) + (stacked ? 0 : width * si)
-          const from = stacked ? base[at] : 0
-          const to = from + value
-          if (stacked) base[at] = to
-          const [ax, ay] = point(c0, dist(from))
-          const [bx, by] = point(c0 + width, dist(to))
+          const [ax, ay] = point(c0, dist(span.from))
+          const [bx, by] = point(c0 + width, dist(span.to))
           svg += `<rect x="${round(Math.min(ax, bx))}" y="${round(Math.min(ay, by))}" width="${round(Math.abs(bx - ax))}" height="${round(Math.abs(by - ay))}" fill="${pointColor(s, at)}"/>`
         })
       })
     } else {
-      series.forEach((s) => {
-        const pts = s.values.slice(0, length).map((value, at) => (value === null ? null : point(slot * (at + 0.5), dist(value)).map((v) => round(v)).join(','))).filter(Boolean)
-        if (!pts.length) return
-        const [sx, sy] = point(slot * 0.5, dist(0))
-        const [ex] = point(slot * (Math.min(length, s.values.length) - 0.5), dist(0))
-        if (kind === 'areaChart') svg += `<path d="M${round(sx)},${round(sy)} L${pts.join(' L')} L${round(ex)},${round(sy)} Z" fill="${s.color}" opacity="0.7"/>`
-        else svg += `<polyline points="${pts.join(' ')}" fill="none" stroke="${s.color}" stroke-width="2"/>`
+      const at2 = (at: number, value: number) => point(slot * (at + 0.5), dist(value)).map((v) => round(v)).join(',')
+      series.forEach((s, si) => {
+        const list = spans[si]
+        if (!list.some(Boolean)) return
+        if (kind === 'areaChart') {
+          // An area runs over every category, a gap counted as 0, down to the series below it.
+          const tops = list.map((span, at) => at2(at, span ? span.to : 0))
+          const bottoms = list.map((span, at) => at2(at, span ? span.from : 0)).reverse()
+          svg += `<path d="M${tops.join(' L')} L${bottoms.join(' L')} Z" fill="${s.color}" opacity="0.7"/>`
+        } else {
+          const pts = list.flatMap((span, at) => (span ? [at2(at, span.to)] : []))
+          svg += `<polyline points="${pts.join(' ')}" fill="none" stroke="${s.color}" stroke-width="2"/>`
+        }
       })
     }
     if (legendH) svg += legend(lines, W, H - 6, fs)
@@ -2391,8 +2445,19 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       else if (tableFilled) style.push('border-bottom-color:transparent')
       if (ci === 0 && own.left) style.push(`border-inline-start:${sideCss(own.left)}`)
       if (r === visibleRows[0] && own.top) style.push(`border-top:${sideCss(own.top)}`)
-      // Text runs on into empty neighbours, as in Excel, unless it wraps or is centred.
-      if (shown && shown.kind === 'text' && !align?.wrap && !span && (h === 'general' || h === 'left') && nextC !== undefined && !hasValue(r, nextC) && !align?.shrink && !(align?.rot)) classes.push('ov')
+      // Text runs on into empty neighbours, as in Excel, unless it wraps or is centred, and stops at
+      // the first cell that holds something (a value or a merged area).
+      let runOn = 0
+      if (shown && shown.kind === 'text' && !align?.wrap && !span && (h === 'general' || h === 'left') && nextC !== undefined && !hasValue(r, nextC) && !align?.shrink && !(align?.rot)) {
+        classes.push('ov')
+        runOn = colPx(c)
+        for (let k = ci + 1; k < visibleCols.length && k <= ci + 64 && runOn < 4000; k++) {
+          const next = visibleCols[k]
+          const nextKey = r * 20000 + next
+          if (hasValue(r, next) || covered.has(nextKey) || spans.has(nextKey)) break
+          runOn += colPx(next)
+        }
+      }
       // Frozen panes stay put while the rest scrolls.
       const frozenRow = r <= freezeRows
       const frozenCol = c <= freezeCols
@@ -2413,9 +2478,19 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
       if (shown?.color) style.push(`color:#${shown.color}`)
       let inner = shown ? shown.html : ''
       if (align && inner) {
-        if (align.rot === 255) inner = `<span class="vt">${inner}</span>`
-        else if (align.rot > 0 && align.rot <= 180) inner = `<span class="rot" style="transform:rotate(${align.rot <= 90 ? -align.rot : align.rot - 90}deg)">${inner}</span>`
-        else if (align.shrink && !align.wrap) {
+        // Turned text is laid out of flow from the cell's corner, so it neither grows the row nor
+        // swings outside the cell to be clipped away: rising text starts bottom-left, falling text
+        // top-left, each moved over by its line height so the first letter stays inside.
+        if (align.rot === 255) {
+          classes.push('rc')
+          inner = `<span class="vt">${inner}</span>`
+        } else if (align.rot > 0 && align.rot <= 180) {
+          classes.push('rc')
+          const rising = align.rot <= 90
+          const angle = rising ? align.rot : align.rot - 90
+          const shift = round(1.2 * Math.sin((angle * Math.PI) / 180), 3)
+          inner = `<span class="rot${rising ? '' : ' dn'}" style="transform:translateX(${shift}em) rotate(${rising ? -angle : angle}deg)">${inner}</span>`
+        } else if (align.shrink && !align.wrap) {
           classes.push('sh')
           inner = `<span>${inner}</span>`
         }
@@ -2425,6 +2500,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
           ? `<a class="xl-link" href="${escapeHtml(link.href)}" title="${escapeHtml(link.title)}">${inner}</a>`
           : `<span class="xl-link" title="${escapeHtml(link.title)}">${inner}</span>`
       }
+      if (runOn && inner) inner = `<span class="ovs" style="width:${px(Math.max(0, runOn - 4))}">${inner}</span>`
       const attrs = [
         span && span.cols > 1 ? ` colspan="${span.cols}"` : '',
         span && span.rows > 1 ? ` rowspan="${span.rows}"` : '',
@@ -2558,9 +2634,13 @@ body{display:flex;flex-direction:column;font:14px/1.4 -apple-system,BlinkMacSyst
 .xl-grid td.cm{position:relative}
 .xl-grid td.cm::after{content:'';position:absolute;top:0;inset-inline-end:0;border-style:solid;border-width:0 6px 6px 0;border-color:transparent #d32f2f transparent transparent}
 .xl-grid td.fr.cm,.xl-grid td.fc.cm{position:sticky}
+.xl-grid td.rc{position:relative}
+.xl-grid td.fr.rc,.xl-grid td.fc.rc{position:sticky}
 .xl-grid td.ov{overflow:visible}
-.xl-grid td .vt{writing-mode:vertical-rl;text-orientation:upright;display:inline-block;white-space:pre}
-.xl-grid td .rot{display:inline-block;transform-origin:center}
+.xl-grid td.ov>.ovs{display:inline-block;overflow:hidden;vertical-align:bottom}
+.xl-grid td .vt{position:absolute;top:0;left:50%;transform:translateX(-50%);writing-mode:vertical-rl;text-orientation:upright;white-space:pre}
+.xl-grid td .rot{position:absolute;left:2px;bottom:0;transform-origin:left bottom;white-space:pre}
+.xl-grid td .rot.dn{top:0;bottom:auto;transform-origin:left top}
 .xl-grid td.sh>span{display:inline-block}
 .xl-link{text-decoration:underline;cursor:help}
 a.xl-link{color:inherit;cursor:pointer}

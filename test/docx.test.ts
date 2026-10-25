@@ -358,3 +358,93 @@ describe('serving Word files', () => {
     assert.match(html, /<script>throw new Error\("Word: not a zip file"\)<\/script>/)
   })
 })
+
+describe('crafted or very large Word files (stress round 1)', () => {
+  const docWith = (body: string, parts: Record<string, string> = {}, relList: [string, string, string][] = []) =>
+    zip({
+      'word/document.xml': `<w:document ${W}><w:body>${body}</w:body></w:document>`,
+      'word/_rels/document.xml.rels': rels(relList),
+      ...parts
+    })
+
+  test('F3: a huge list start stays a short label, not megabytes of letters', () => {
+    const lvl = (fmt: string) => `<w:lvl w:ilvl="0"><w:start w:val="300000000"/><w:numFmt w:val="${fmt}"/><w:lvlText w:val="%1."/></w:lvl>`
+    const xml = `<w:numbering ${W}><w:abstractNum w:abstractNumId="0">${lvl('upperLetter')}</w:abstractNum><w:abstractNum w:abstractNumId="1">${lvl('lowerLetter')}</w:abstractNum>
+<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="10000000000"/></w:lvlOverride></w:num></w:numbering>`
+    const body = Array.from({ length: 20 }, (_, at) => numbered(at % 2 ? 2 : 1, 0, `項${at}`)).join('')
+    const started = Date.now()
+    const doc = readDocx(docWith(body, { 'word/numbering.xml': xml }, [['rNum', 'numbering', 'numbering.xml']]), '')
+    assert.ok(doc.html.length < 200_000, `html is ${doc.html.length} bytes`)
+    assert.ok(Date.now() - started < 2000)
+    assert.match(doc.html, />項19</)
+    assert.match(doc.html, />32767\.</, 'the start is clamped to Word\'s largest, drawn as a number')
+  })
+
+  test('F19: a table style row region keeps its own bottom rule when insideH is nil', () => {
+    const style = `<w:styles ${W}><w:style w:type="table" w:styleId="ML2"><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="8" w:color="000000"/><w:bottom w:val="single" w:sz="8" w:color="000000"/></w:tblBorders></w:tblPr>
+<w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="single" w:sz="24" w:color="4F81BD"/><w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tcBorders></w:tcPr></w:tblStylePr>
+<w:tblStylePr w:type="firstCol"><w:tcPr><w:tcBorders><w:left w:val="single" w:sz="12" w:color="00FF00"/><w:right w:val="single" w:sz="12" w:color="00FF00"/><w:insideV w:val="nil"/></w:tcBorders></w:tcPr></w:tblStylePr></w:style></w:styles>`
+    const table = `<w:tbl><w:tblPr><w:tblStyle w:val="ML2"/><w:tblLook w:firstRow="1" w:firstColumn="1" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+<w:tr>${tc('表頭一')}${tc('表頭二')}</w:tr><w:tr>${tc('首欄')}${tc('內容')}</w:tr><w:tr>${tc('末首欄')}${tc('末列')}</w:tr></w:tbl>`
+    const doc = readDocx(docWith(table, { 'word/styles.xml': style }, [['rSt', 'styles', 'styles.xml']]), '')
+    const css = doc.html + `<style>${doc.css}</style>`
+    const cell = (text: string) => {
+      const at = css.lastIndexOf('<td', css.indexOf(`>${text}<`))
+      const name = /class="([^"]*)"/.exec(css.slice(at))![1]
+      return new RegExp(`\\.${name}\\{([^}]*)\\}`).exec(css)![1]
+    }
+    assert.match(cell('表頭二'), /border-bottom:(?!none)[^;]*3pt/)
+    assert.match(cell('首欄'), /border-right:(?!none)[^;]*1\.5pt/)
+  })
+
+  test('F20: a table past the paragraph limit draws whole rows, says how many rows it left out, and the text after it still shows', () => {
+    const row = (n: number) => `<w:tr>${Array.from({ length: 10 }, (_, c) => tc(`r${n}c${c}`)).join('')}</w:tr>`
+    const grid = `<w:tblGrid>${'<w:gridCol w:w="900"/>'.repeat(10)}</w:tblGrid>`
+    const big = (rows: number) => `<w:tbl>${grid}${Array.from({ length: rows }, (_, n) => row(n)).join('')}</w:tbl>${p(r('表格之後'))}`
+    const html2000 = readDocx(docWith(big(2000)), '').html
+    assert.match(html2000, />r1999c9</)
+    assert.match(html2000, />表格之後</)
+    assert.doesNotMatch(html2000, /文件太長/)
+
+    const html8000 = readDocx(docWith(big(8000)), '').html
+    const rows = html8000.match(/<tr[^>]*>[\s\S]*?<\/tr>/g) ?? []
+    const drawn = rows.filter((tr) => !tr.includes('dx-cut'))
+    for (const tr of drawn) assert.match(tr, /r\d+c9</, 'a drawn row lost its cells')
+    const left = Number(/其餘 (\d+) 列未顯示/.exec(html8000)?.[1])
+    assert.equal(drawn.length + left, 8000)
+  })
+
+  test('F22: Ming, Mincho and Song fonts draw serif even when the font table calls them modern', () => {
+    const fontTable = `<w:fonts ${W}><w:font w:name="細明體"><w:family w:val="modern"/></w:font><w:font w:name="MS Mincho"><w:family w:val="modern"/></w:font><w:font w:name="SimSun"><w:family w:val="auto"/></w:font><w:font w:name="MS Gothic"><w:family w:val="modern"/></w:font></w:fonts>`
+    const run = (font: string, text: string) => p(r(text, `<w:rFonts w:ascii="${font}" w:eastAsia="${font}" w:hAnsi="${font}"/>`))
+    const body = run('細明體', '明體字') + run('MS Mincho', '明朝字') + run('SimSun', '宋體字') + run('NSimSun', '新宋體字') + run('MS Gothic', '黑體字')
+    const doc = readDocx(docWith(body, { 'word/fontTable.xml': fontTable }, [['rF', 'fontTable', 'fontTable.xml']]), '')
+    const page = doc.html + `<style>${doc.css}</style>`
+    for (const text of ['明體字', '明朝字', '宋體字', '新宋體字']) assert.match(styleBefore(page, text), /font-family:[^;]*,serif(;|$)/, text)
+    assert.doesNotMatch(styleBefore(page, '黑體字'), /monospace/)
+  })
+
+  test('F23: a list number wider than its hanging indent keeps a gap before the text', () => {
+    const xml = `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="Chapter %1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`
+    const body = p(r('正文'), '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:left="720" w:hanging="360"/>')
+    const doc = readDocx(docWith(body, { 'word/numbering.xml': xml }, [['rNum', 'numbering', 'numbering.xml']]), '')
+    const css = styleBefore(doc.html + `<style>${doc.css}</style>`, 'Chapter 1.')
+    assert.match(css, /min-width:18pt/)
+    assert.match(css, /box-sizing:border-box/)
+    assert.match(css, /padding-inline-end:/)
+  })
+})
+
+test('F3: a list override on a far-out level number does not spin through billions of levels', { timeout: 5000 }, () => {
+  const xml = `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+<w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="-3000000000"><w:startOverride w:val="5"/></w:lvlOverride></w:num></w:numbering>`
+  const doc = readDocx(
+    zip({
+      'word/document.xml': `<w:document ${W}><w:body>${numbered(1, 0, '項目')}</w:body></w:document>`,
+      'word/_rels/document.xml.rels': rels([['rNum', 'numbering', 'numbering.xml']]),
+      'word/numbering.xml': xml
+    }),
+    ''
+  )
+  assert.match(doc.html, />1\.<[\s\S]*>項目</)
+})

@@ -12,7 +12,13 @@ import { ZipReader, ZipError } from './zip.ts'
  * (charts, SmartArt, OLE objects) shows as a labelled box; the original file is one download away.
  */
 const EMU_PER_PT = 12700
-const LIMITS = { blocks: 20_000, cells: 50_000, notes: 2_000, depth: 12, chain: 20 }
+const LIMITS = { blocks: 20_000, cells: 50_000, cellBlocks: 100_000, notes: 2_000, depth: 12, chain: 20 }
+/** The largest list start Word accepts; a file's bigger number is clamped to it. */
+const MAX_LIST_START = 32_767
+/** Table-style regions that are one row tall, one column wide, or one cell. */
+const ROW_REGIONS = new Set(['firstRow', 'lastRow', 'band1Horz', 'band2Horz'])
+const COL_REGIONS = new Set(['firstCol', 'lastCol', 'band1Vert', 'band2Vert'])
+const CORNER_REGIONS = new Set(['nwCell', 'neCell', 'swCell', 'seCell'])
 const TAB = '\u0001'
 
 // ---------------------------------------------------------------------------------------------
@@ -199,6 +205,8 @@ const CJK_FALLBACK: Record<FontKind, string> = {
   mono: "'PingFang TC','Noto Sans TC','Noto Sans CJK TC','Microsoft JhengHei'",
   kai: "'BiauKai','Kaiti TC','DFKai-SB','STKaiti'"
 }
+const CJK_SERIF_FONT = /細明|明體|明朝|宋|ming|song|sun\b|simsun|mincho|batang|gungsuh|바탕|궁서/i
+const CJK_SANS_FONT = /黑|ゴシック|gothic|heiti|jhenghei|yahei|simhei|meiryo|メイリオ|gulim|dotum|malgun|굴림|돋움/i
 const GENERIC: Record<FontKind, string> = { sans: 'sans-serif', serif: 'serif', mono: 'monospace', kai: 'serif' }
 
 const SYMBOL_FONT = /^(symbol|wingdings( [23])?|webdings)$/i
@@ -240,7 +248,10 @@ function roman(n: number): string {
   return out
 }
 
-const letters = (n: number) => (n <= 0 ? String(n) : String.fromCharCode(65 + ((n - 1) % 26)).repeat(Math.floor((n - 1) / 26) + 1))
+// Word repeats the letter (AA, AAA, ...); past a few dozen repeats the label is drawn as a number.
+const letters = (n: number) => (n <= 0 || n > 26 * 40 ? String(n) : String.fromCharCode(65 + ((n - 1) % 26)).repeat(Math.floor((n - 1) / 26) + 1))
+
+const listStart = (n: number | undefined) => (n === undefined || !Number.isFinite(n) ? undefined : clamp(Math.trunc(n), 0, MAX_LIST_START))
 
 function chineseCount(n: number, digits: string, units: string[], big: string, lowTen: boolean): string {
   if (n === 0) return digits[0]
@@ -493,6 +504,11 @@ class DocxRenderer {
   private cells = 0
   private cutBlocks = false
   private cutCells = false
+  /** Paragraphs and tables inside table cells: they have their own budget, so a long table cannot
+   *  use up the document's and hide what follows it, and a table is only ever cut between rows. */
+  private cellBlocks = 0
+  private cutCellBlocks = false
+  private inCell = 0
 
   constructor(data: Buffer, mediaBase: string) {
     this.pkg = new Package(data)
@@ -615,6 +631,7 @@ class DocxRenderer {
     })
     if (this.cutBlocks) this.notices.push(`文件太長:只顯示前 ${LIMITS.blocks} 個段落與表格,其餘請下載原始檔查看。`)
     if (this.cutCells) this.notices.push(`表格太大:只顯示前 ${LIMITS.cells} 個儲存格,其餘請下載原始檔查看。`)
+    if (this.cutCellBlocks) this.notices.push(`表格內容太多:只顯示表格裡前 ${LIMITS.cellBlocks} 個段落,其餘請下載原始檔查看。`)
     const notices = this.notices.map((notice) => `<p class="dx-notice">${esc(notice)}</p>`).join('')
     return { html: notices + sheetHtml.join(''), title }
   }
@@ -716,7 +733,7 @@ class DocxRenderer {
     const xml = rel ? this.pkg.xml(rel.target) : null
     if (!xml) return
     const levelOf = (lvl: XmlNode): Level => ({
-      start: num(child(lvl, 'start'), 'val') ?? 0,
+      start: listStart(num(child(lvl, 'start'), 'val')) ?? 0,
       fmt: attr(child(lvl, 'numFmt'), 'val') ?? 'decimal',
       text: attr(child(lvl, 'lvlText'), 'val') ?? '',
       pPr: child(lvl, 'pPr'),
@@ -744,8 +761,9 @@ class DocxRenderer {
       const overrides = new Map<number, { start?: number; level?: Level }>()
       for (const override of children(numNode, 'lvlOverride')) {
         const ilvl = num(override, 'ilvl') ?? 0
+        if (!(ilvl >= 0 && ilvl < 9)) continue
         const lvl = child(override, 'lvl')
-        overrides.set(ilvl, { start: num(child(override, 'startOverride'), 'val'), level: lvl ? levelOf(lvl) : undefined })
+        overrides.set(ilvl, { start: listStart(num(child(override, 'startOverride'), 'val')), level: lvl ? levelOf(lvl) : undefined })
       }
       this.nums.set(id, { abstractId, overrides })
     }
@@ -1170,9 +1188,13 @@ class DocxRenderer {
     const kindOf = (name: string | undefined): FontKind => {
       if (!name) return 'sans'
       if (/楷|kai/i.test(name)) return 'kai'
+      // East Asian names say what the face looks like better than the font table's family, which
+      // calls fixed-pitch Ming and Mincho faces (細明體, MS Mincho) "modern".
+      if (CJK_SERIF_FONT.test(name)) return 'serif'
+      if (CJK_SANS_FONT.test(name)) return 'sans'
       const known = this.fonts.get(name)?.kind
       if (known) return known
-      if (/細明|明體|ming|song|宋|serif|times|georgia|cambria|garamond|mincho|明朝|book antiqua|palatino/i.test(name)) return 'serif'
+      if (/serif|times|georgia|cambria|garamond|book antiqua|palatino/i.test(name) && !/sans/i.test(name)) return 'serif'
       if (/consolas|courier|mono|menlo/i.test(name)) return 'mono'
       return 'sans'
     }
@@ -1330,11 +1352,20 @@ class DocxRenderer {
         if (bookmark && bookmark !== '_GoBack') html += `<span id="${anchorId(bookmark)}"></span>`
         continue
       }
-      if (this.blocks >= LIMITS.blocks) {
-        this.cutBlocks = true
-        break
+      if (this.inCell) {
+        // Rows are cut whole before this budget runs out; this stops only one row that alone holds too much.
+        if (this.cellBlocks >= LIMITS.cellBlocks + LIMITS.blocks) {
+          this.cutCellBlocks = true
+          break
+        }
+        this.cellBlocks++
+      } else {
+        if (this.blocks >= LIMITS.blocks) {
+          this.cutBlocks = true
+          break
+        }
+        this.blocks++
       }
-      this.blocks++
       try {
         if (name === 'p') {
           const info = infos[at]
@@ -1434,7 +1465,7 @@ class DocxRenderer {
         } else shown = [...label].map((char) => (char.codePointAt(0)! >= 0xf000 && char.codePointAt(0)! <= 0xf0ff ? '•' : char)).join('')
         const hanging = info.props.hanging ? lenCss(info.props.hanging) : null
         let layout = ''
-        if (level.suff === 'tab') layout = hanging ? `;display:inline-block;min-width:${hanging};text-indent:0` : ';display:inline-block;min-width:1.5em;text-indent:0;padding-inline-end:.5em'
+        if (level.suff === 'tab') layout = hanging ? `;display:inline-block;box-sizing:border-box;min-width:${hanging};padding-inline-end:.4em;text-indent:0` : ';display:inline-block;min-width:1.5em;text-indent:0;padding-inline-end:.5em'
         const space = level.suff === 'space' ? ' ' : ''
         numHtml = `<span class="dx-num ${this.cls(this.runCss(props, dark, skipSymbol) + layout)}">${esc(cleanText(shown))}${space}</span>`
       }
@@ -2223,8 +2254,9 @@ class DocxRenderer {
     let cutRows = 0
     for (let r = 0; r < rows.length; r++) {
       const row = rows[r]
-      if (this.cells >= LIMITS.cells) {
-        this.cutCells = true
+      if (this.cells >= LIMITS.cells || this.cellBlocks >= LIMITS.cellBlocks) {
+        if (this.cells >= LIMITS.cells) this.cutCells = true
+        else this.cutCellBlocks = true
         cutRows = rows.length - r
         break
       }
@@ -2255,7 +2287,8 @@ class DocxRenderer {
         if (headerRow && finalCol) types.push('neCell')
         if (footerRow && firstCol) types.push('swCell')
         if (footerRow && finalCol) types.push('seCell')
-        const conds = types.flatMap((type) => (type === 'wholeTable' ? [...chain.map((style) => ({ pPr: style.pPr, rPr: style.rPr, tblPr: null, tcPr: style.tcPr })), ...condOf('wholeTable')] : condOf(type)))
+        const typed = types.flatMap((type) => (type === 'wholeTable' ? [...chain.map((style) => ({ pPr: style.pPr, rPr: style.rPr, tblPr: null, tcPr: style.tcPr })), ...condOf('wholeTable')] : condOf(type)).map((cond) => ({ cond, type })))
+        const conds = typed.map((entry) => entry.cond)
         const tcPr = child(cell.tc, 'tcPr')
         // Borders: the table's edges or inside lines, then each conditional format's, then the cell's own.
         const bottomRow = r + cell.rowspan - 1 >= lastRow
@@ -2265,23 +2298,30 @@ class DocxRenderer {
           left: c === 0 ? tableBorders.left : tableBorders.insideV,
           right: lastCol ? tableBorders.right : tableBorders.insideV
         }
-        const applyBorders = (holder: XmlNode | null, inside: boolean) => {
+        // A conditional format's inside lines run only between the rows (insideH) or columns (insideV)
+        // of its own region: a row region (header, footer, a row band) has no inside horizontal edge,
+        // so its insideH must not replace its own top or bottom rule; a column region likewise for insideV.
+        const applyBorders = (holder: XmlNode | null, region: string | null) => {
+          const rowRegion = region !== null && (ROW_REGIONS.has(region) || CORNER_REGIONS.has(region))
+          const colRegion = region !== null && (COL_REGIONS.has(region) || CORNER_REGIONS.has(region))
           for (const side of holder?.children ?? []) {
             const key = { start: 'left', end: 'right' }[local(side.name)] ?? local(side.name)
-            if (key === 'insideH' && inside) {
+            if (key === 'insideH' && region !== null) {
+              if (rowRegion) continue
               if (r > 0) sides.top = side
               if (!bottomRow) sides.bottom = side
-            } else if (key === 'insideV' && inside) {
+            } else if (key === 'insideV' && region !== null) {
+              if (colRegion) continue
               if (c > 0) sides.left = side
               if (!lastCol) sides.right = side
             } else if (key in sides) sides[key] = side
           }
         }
-        for (const cond of conds) {
-          applyBorders(child(cond.tblPr, 'tblBorders'), true)
-          applyBorders(child(cond.tcPr, 'tcBorders'), true)
+        for (const { cond, type } of typed) {
+          applyBorders(child(cond.tblPr, 'tblBorders'), type)
+          applyBorders(child(cond.tcPr, 'tcBorders'), type)
         }
-        applyBorders(child(tcPr, 'tcBorders'), false)
+        applyBorders(child(tcPr, 'tcBorders'), null)
         let shading: Rgba | null | undefined = tableShading
         for (const cond of conds) {
           const shd = this.shading(child(cond.tcPr, 'shd'))
@@ -2313,10 +2353,13 @@ class DocxRenderer {
         const cellWidth = gridTotal > 0 ? (grid.slice(cell.col, cell.col + cell.span).reduce((sum, width) => sum + width, 0) / gridTotal) * scope.width : scope.width / columns
         const cellScope: Scope = { ...scope, layer, depth: scope.depth + 1, width: Math.max(18, cellWidth - margin.left - margin.right), dark: shading ? isDark(shading) : scope.dark, sheet: null }
         let content: string
+        this.inCell++
         try {
           content = this.renderBlocks(cell.tc.children.filter((node) => local(node.name) !== 'tcPr'), cellScope)
         } catch (error) {
           content = unsupported(`儲存格無法顯示:${error instanceof Error ? error.message : String(error)}`)
+        } finally {
+          this.inCell--
         }
         cellsHtml += `<td${span}${rowspan} class="${this.cls(css.join(';'))}"><div class="dx-cell"${vertical ? ` style="${vertical}"` : ''}>${content}</div></td>`
       }

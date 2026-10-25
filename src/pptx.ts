@@ -2,8 +2,8 @@ import { posix } from 'node:path'
 import { escapeHtml } from './content-render.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { deckPage, type DeckAssets } from './slides.ts'
-import { attr, child, children, local, num, parseXml, path, relAttr, type XmlNode } from './xml.ts'
-import { ZipReader } from './zip.ts'
+import { attr, child, children, local, num, parseXml, path, relAttr, XmlError, type XmlNode } from './xml.ts'
+import { ZipError, ZipReader } from './zip.ts'
 
 /**
  * A PowerPoint file published as is (`*.pptx`), drawn on the server as slides the deck runtime pages
@@ -33,6 +33,15 @@ class Package {
       this.parts.set(name, text === null ? null : parseXml(text))
     }
     return this.parts.get(name) ?? null
+  }
+
+  /** A part the deck can draw without (theme, table styles, notes, properties): null when it cannot be read. */
+  optional(name: string): XmlNode | null {
+    try {
+      return this.xml(name)
+    } catch {
+      return null
+    }
   }
 
   rels(part: string): Map<string, Rel> {
@@ -182,6 +191,26 @@ type Ctx = {
   phColor?: Rgba
   presentationStyle: XmlNode | null
   tableStyles: XmlNode | null
+  /** How much HTML the slide may still add; shared by every copy of the context. */
+  budget: Budget
+  /** Inside a SmartArt drawing: another SmartArt there is a box, never a second drawing (they can lead back to themselves). */
+  inDiagram?: boolean
+  /** The flips of the groups around a shape, which its text undoes so it stays readable. */
+  flipH?: boolean
+  flipV?: boolean
+}
+
+type Budget = { left: number; noticed: boolean }
+
+/** HTML characters one slide, and the whole deck, may produce: a small crafted file must not grow into a page that stalls the server. */
+const SLIDE_BUDGET = 4_000_000
+const DECK_BUDGET = 24_000_000
+
+/** The labelled box a slide shows once where it stopped drawing. */
+function budgetNotice(ctx: Ctx): string {
+  if (ctx.budget.noticed) return ''
+  ctx.budget.noticed = true
+  return '<div class="pp-missing" style="top:auto;height:auto">這頁內容太多,其餘部分請下載 PPTX 查看</div>'
 }
 
 type Master = { part: string; xml: XmlNode; clrMap: Record<string, string>; theme: Theme }
@@ -284,13 +313,14 @@ const emuPt = (emu: number) => pt(emu / EMU_PER_PT)
 // ---------------------------------------------------------------------------------------------
 // Styles referenced from the theme (p:style)
 
-function styleRefFill(style: XmlNode | null, ctx: Ctx): string {
+/** The theme fill a shape's style refers to (fillRef), with the context that colours its phClr. */
+function styleRefFill(style: XmlNode | null, ctx: Ctx): { fill: XmlNode; ctx: Ctx } | null {
   const ref = child(style, 'fillRef')
   const idx = num(ref, 'idx') ?? 0
-  if (!ref || idx === 0) return ''
+  if (!ref || idx === 0) return null
   const list = idx >= 1000 ? ctx.theme.bgFills : ctx.theme.fills
   const fill = list[(idx >= 1000 ? idx - 1000 : idx) - 1]
-  return fill ? fillCss(fill, { ...ctx, phColor: colorIn(ref, ctx) ?? undefined }) : ''
+  return fill ? { fill, ctx: { ...ctx, phColor: colorIn(ref, ctx) ?? undefined } } : null
 }
 
 type Line = { width: number; color: string; dash: string; head?: string; tail?: string } | null
@@ -603,7 +633,13 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
   const paragraphs = children(txBody, 'p')
   const out: Paragraph[] = []
   const counters: Counter[] = []
-  paragraphs.forEach((p, index) => {
+  let used = 0
+  let stopped = false
+  for (const [index, p] of paragraphs.entries()) {
+    if (stopped || used > ctx.budget.left) {
+      stopped = true
+      break
+    }
     const pPr = child(p, 'pPr')
     const level = Math.min(9, Math.max(1, (num(pPr, 'lvl') ?? 0) + 1))
     const levelNodes = lists.map((list) => child(list, `lvl${level}pPr`)).filter((n): n is XmlNode => n !== null)
@@ -643,6 +679,10 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
       if (fillNode && local(fillNode.name) === 'solidFill') color = colorIn(fillNode, ctx)
       else if (fillNode && local(fillNode.name) === 'gradFill') color = colorIn(child(child(fillNode, 'gsLst'), 'gs'), ctx)
       if (fillNode && local(fillNode.name) === 'noFill') style.push('color:transparent')
+      // Outlined text (a:ln on the run): the outline is drawn whether or not the letters are filled.
+      const outline = firstChild(nodes, ['ln'])
+      const stroke = outline ? lineOf(outline, null, ctx) : null
+      if (stroke) style.push(`-webkit-text-stroke:${pt(stroke.width)} ${stroke.color}`)
       const link = child(rPr, 'hlinkClick')
       let href: string | null = null
       if (link) {
@@ -676,6 +716,11 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
       const title = link && !href ? ctx.pkg.rel(ctx.part, relAttr(link, 'id')) : undefined
       const titleAttr = title?.external ? ` title="${escapeHtml(title.target)}"` : ''
       html += `<${tag}${hrefAttr}${titleAttr} style="${style.join(';')}">${escapeHtml(value)}</${tag}>`
+      // One paragraph may hold any number of runs: the budget is checked per run, not only per paragraph.
+      if (used + html.length > ctx.budget.left) {
+        stopped = true
+        break
+      }
     }
 
     // Paragraph box
@@ -738,7 +783,8 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
         if (top && top.level === level && top.type === type) counter = top
         else {
           if (top && top.level === level) counters.pop()
-          counter = { level, type, value: (num(kind, 'startAt') ?? 1) - 1 }
+          // PowerPoint's own range for a list start; a crafted one would make the label (and the page) huge.
+          counter = { level, type, value: Math.min(32767, Math.max(1, Math.trunc(num(kind, 'startAt') ?? 1))) - 1 }
           counters.push(counter)
         }
         counter.value++
@@ -749,8 +795,14 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
       // A paragraph without a numbered bullet ends the numbering at its level.
       if (counters.length && counters[counters.length - 1].level === level && !(kind && local(kind.name) === 'buAutoNum')) counters.pop()
     }
-    out.push({ html: `<p class="pp-p" style="${pStyle.join(';')}">${bullet}${html || '<br>'}</p>`, text })
-  })
+    const paragraph = `<p class="pp-p" style="${pStyle.join(';')}">${bullet}${html || '<br>'}</p>`
+    used += paragraph.length
+    out.push({ html: paragraph, text })
+  }
+  if (stopped) {
+    const notice = budgetNotice(ctx)
+    if (notice) out.push({ html: notice, text: '' })
+  }
 
   // Body box: insets, anchor, wrapping, columns
   const insets = ['lIns', 'tIns', 'rIns', 'bIns'].map((name, at) => Number(firstAttr(bodyPrs, name) ?? (at % 2 === 0 ? 91440 : 45720)) / EMU_PER_PT)
@@ -771,6 +823,7 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
 
 function autoNumber(type: string, n: number): string {
   const roman = (value: number) => {
+    if (value < 1 || value > 3999) return String(value)
     const table: [number, string][] = [[1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'], [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i']]
     let out = ''
     for (const [size, letters] of table) while (value >= size) { out += letters; value -= size }
@@ -886,7 +939,12 @@ type Rendered = { html: string; text: string[] }
 
 function renderTree(tree: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'layout' | 'master', out: Rendered): void {
   for (const node of tree.children) {
+    if (ctx.budget.left <= 0) {
+      out.html += budgetNotice(ctx)
+      return
+    }
     const name = local(node.name)
+    const before = out.html.length
     if (name === 'AlternateContent') {
       const pick = child(node, 'Fallback') ?? child(node, 'Choice')
       if (pick) renderTree(pick, frame, ctx, level, out)
@@ -900,7 +958,17 @@ function renderTree(tree: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'lay
     } catch (error) {
       out.html += `<div class="pp-missing" style="left:0;top:0;width:100%;height:100%">${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`
     }
+    // A group's children were counted as they were drawn.
+    if (name !== 'grpSp') ctx.budget.left -= out.html.length - before
   }
+}
+
+/** The transform that undoes the flips of the groups around a shape, for what must stay readable. */
+const counterFlip = (ctx: Ctx): string => [ctx.flipH ? 'scaleX(-1)' : '', ctx.flipV ? 'scaleY(-1)' : ''].filter(Boolean).join(' ')
+
+const unflipped = (html: string, ctx: Ctx): string => {
+  const flip = counterFlip(ctx)
+  return flip ? `<div class="pp-grp" style="left:0;top:0;width:100%;height:100%;transform:${flip}">${html}</div>` : html
 }
 
 function renderGroup(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'layout' | 'master', out: Rendered): void {
@@ -913,7 +981,8 @@ function renderGroup(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
   const flips = [x.flipH ? 'scaleX(-1)' : '', x.flipV ? 'scaleY(-1)' : ''].filter(Boolean)
   if (flips.length) style.push(`transform:${x.rot ? `rotate(${round(x.rot)}deg) ` : ''}${flips.join(' ')}`)
   const inner: Rendered = { html: '', text: [] }
-  renderTree(node, { x: x.chX, y: x.chY, cx: x.chCx || x.cx, cy: x.chCy || x.cy }, ctx, level, inner)
+  const flipped = { ...ctx, flipH: Boolean(ctx.flipH) !== x.flipH, flipV: Boolean(ctx.flipV) !== x.flipV }
+  renderTree(node, { x: x.chX, y: x.chY, cx: x.chCx || x.cx, cy: x.chCy || x.cy }, flipped, level, inner)
   out.html += `<div class="pp-grp" style="${style.join(';')}">${inner.html}</div>`
   out.text.push(...inner.text)
 }
@@ -932,7 +1001,8 @@ function renderShape(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
   const spPrs = [spPr, ...inherit.nodes.map((n) => child(n, 'spPr'))].filter((n): n is XmlNode => n !== null)
   const geomNode = firstChild(spPrs, ['prstGeom', 'custGeom'])
   const fillNode = firstChild(spPrs, [...FILL_TAGS])
-  let background = fillNode ? fillCss(fillNode, ctx) : styleRefFill(style, ctx)
+  const themed = fillNode ? null : styleRefFill(style, ctx)
+  const background = fillNode ? fillCss(fillNode, ctx) : themed ? fillCss(themed.fill, themed.ctx) : ''
   const ln = firstChild(spPrs, ['ln'])
   const line = lineOf(ln, style, ctx)
   if (!background && !line && !hasText) return
@@ -948,13 +1018,21 @@ function renderShape(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
   if (background || line) {
     if (svgPath) {
       const open = custom ? custom.open : OPEN_PATHS.has(prst ?? '')
-      const fill = open ? 'none' : svgFill(fillNode, background, ctx)
+      const fill = open ? 'none' : svgFill(fillNode ?? themed?.fill ?? null, background, themed?.ctx ?? ctx)
       const strokeAttrs = line
         ? ` stroke="${line.color}" stroke-width="${round(line.width)}"${dashArray(line.dash, line.width) ? ` stroke-dasharray="${dashArray(line.dash, line.width)}"` : ''} stroke-linejoin="round"`
         : ''
       const markers = line && open ? arrowMarkers(line, out) : ''
-      const svgStyle = [flip ? `transform:${flip}` : '', shadow ? `filter:${shadow}` : ''].filter(Boolean).join(';')
-      geometry = `<svg class="pp-geom" viewBox="0 0 ${round(Math.max(w, 0.01))} ${round(Math.max(h, 0.01))}" preserveAspectRatio="none"${svgStyle ? ` style="${svgStyle}"` : ''}>${markers.split('|')[0]}<path d="${svgPath}" fill="${fill}"${strokeAttrs}${markers.split('|')[1] ?? ''}/></svg>`
+      // A line with no height (or no width) gets a box as thick as its stroke, centred on it, so both axes keep one scale.
+      const thick = line ? Math.max(line.width, 0.75) : 1
+      const flatH = h < 0.01
+      const flatW = w < 0.01
+      const viewBox = [flatW ? -thick / 2 : 0, flatH ? -thick / 2 : 0, flatW ? thick : w, flatH ? thick : h].map((v) => round(v)).join(' ')
+      const svgStyle = [
+        flatH ? `top:${pt(-thick / 2)};height:${pt(thick)}` : '', flatW ? `left:${pt(-thick / 2)};width:${pt(thick)}` : '',
+        flip ? `transform:${flip}` : '', shadow ? `filter:${shadow}` : ''
+      ].filter(Boolean).join(';')
+      geometry = `<svg class="pp-geom" viewBox="${viewBox}" preserveAspectRatio="none"${svgStyle ? ` style="${svgStyle}"` : ''}>${markers.split('|')[0]}<path d="${svgPath}" fill="${fill}"${strokeAttrs}${markers.split('|')[1] ?? ''}/></svg>`
     } else {
       const geom: string[] = []
       if (background) geom.push(`background:${background}`)
@@ -974,7 +1052,7 @@ function renderShape(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
     const fontRef = colorListStyle(colorElement(child(style, 'fontRef')))
     const lists = [...inherit.lists, fontRef, masterTextStyle(ph, ctx), ctx.presentationStyle].filter((n): n is XmlNode => n !== null)
     const rendered = renderTextBody(txBody, { lists, bodyPrs: inherit.bodyPrs }, ctx, { bodyPr: inherit.bodyPrs })
-    text = rendered.html
+    text = unflipped(rendered.html, ctx)
     out.text.push(rendered.text)
     // Text in a shape PowerPoint flips stays readable: only a vertical flip turns it over.
     const txXfrm = xfrmOf(child(node, 'txXfrm'))
@@ -1046,7 +1124,9 @@ function renderPicture(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | '
   if (shadow) clip.push(`filter:${shadow}`)
   const line = lineOf(child(spPr, 'ln'), child(node, 'style'), ctx)
   const border = line ? `<div class="pp-geom" style="inset:calc(-1*${pt(line.width / 2)});border:${pt(line.width)} solid ${line.color}${clip[0]?.startsWith('border-radius') ? `;${clip[0]}` : ''}"></div>` : ''
-  out.html += `<div class="pp-sp" style="${box.join(';')}"><div class="pp-pic" style="${clip.join(';')}"><img src="${escapeHtml(url)}" alt="${escapeHtml(name)}" style="${imgStyle.join(';')}" decoding="async" draggable="false"></div>${border}</div>`
+  // A video or sound shows its poster frame, labelled so it does not pass for a still picture.
+  const label = isMovie ? '<div class="pp-missing" style="top:auto;height:auto">影音(網頁版無法播放,請下載 PPTX 查看)</div>' : ''
+  out.html += `<div class="pp-sp" style="${box.join(';')}"><div class="pp-pic" style="${clip.join(';')}"><img src="${escapeHtml(url)}" alt="${escapeHtml(name)}" style="${imgStyle.join(';')}" decoding="async" draggable="false"></div>${border}${label}</div>`
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1062,12 +1142,16 @@ function renderGraphicFrame(node: XmlNode, frame: Frame, ctx: Ctx, out: Rendered
     const table = child(data, 'tbl')
     if (table) {
       const rendered = renderTable(table, ctx)
-      out.html += `<div class="pp-sp" style="${box.join(';')}">${rendered.html}</div>`
+      out.html += `<div class="pp-sp" style="${box.join(';')}">${unflipped(rendered.html, ctx)}</div>`
       out.text.push(rendered.text)
     }
     return
   }
   if (uri.endsWith('/diagram')) {
+    if (ctx.inDiagram) {
+      out.html += missing(box, 'SmartArt 圖形')
+      return
+    }
     const ids = child(data, 'relIds')
     const dataPart = ctx.pkg.rel(ctx.part, relAttr(ids, 'dm'))
     const dataXml = dataPart ? ctx.pkg.xml(dataPart.target) : null
@@ -1077,7 +1161,7 @@ function renderGraphicFrame(node: XmlNode, frame: Frame, ctx: Ctx, out: Rendered
     const tree = path(drawingXml, 'drawing', 'spTree') ?? (drawingXml ? findDeep(drawingXml, 'spTree') : null)
     if (tree && drawing) {
       const inner: Rendered = { html: '', text: [] }
-      renderTree(tree, { x: 0, y: 0, cx: x.cx, cy: x.cy }, { ...ctx, part: drawing.target }, 'slide', inner)
+      renderTree(tree, { x: 0, y: 0, cx: x.cx, cy: x.cy }, { ...ctx, part: drawing.target, inDiagram: true }, 'slide', inner)
       out.html += `<div class="pp-grp" style="${box.join(';')}">${inner.html}</div>`
       out.text.push(...inner.text)
       return
@@ -1090,7 +1174,7 @@ function renderGraphicFrame(node: XmlNode, frame: Frame, ctx: Ctx, out: Rendered
     const chart = rel ? ctx.pkg.xml(rel.target) : null
     const rendered = chart ? renderChart(chart, x, { ...ctx, part: rel!.target }) : null
     if (rendered) {
-      out.html += `<div class="pp-sp" style="${box.join(';')}">${rendered.html}</div>`
+      out.html += `<div class="pp-sp" style="${box.join(';')}">${unflipped(rendered.html, ctx)}</div>`
       out.text.push(rendered.text)
     } else out.html += missing(box, '圖表')
     return
@@ -1134,10 +1218,17 @@ function tablePart(styleNode: XmlNode | null, ctx: Ctx): CellStyle | null {
   return out
 }
 
+/** PowerPoint's own table limit; a crafted file with more cells draws these and says the rest is in the file. */
+const TABLE_MAX = 75
+
 function renderTable(table: XmlNode, ctx: Ctx): { html: string; text: string } {
   const tblPr = child(table, 'tblPr')
-  const grid = children(child(table, 'tblGrid'), 'gridCol').map((col) => (num(col, 'w') ?? 0) / EMU_PER_PT)
-  const rows = children(table, 'tr')
+  const allGrid = children(child(table, 'tblGrid'), 'gridCol')
+  const allRows = children(table, 'tr')
+  const grid = allGrid.slice(0, TABLE_MAX).map((col) => (num(col, 'w') ?? 0) / EMU_PER_PT)
+  const rows = allRows.slice(0, TABLE_MAX)
+  let cut = allGrid.length > TABLE_MAX || allRows.length > TABLE_MAX
+  let used = 0
   const styleId = child(tblPr, 'tableStyleId')?.text.trim() ?? ''
   const styleDef = children(ctx.tableStyles, 'tblStyle').find((style) => attr(style, 'styleId') === styleId) ?? null
   const flag = (name: string) => truthy(attr(tblPr, name))
@@ -1151,11 +1242,19 @@ function renderTable(table: XmlNode, ctx: Ctx): { html: string; text: string } {
   }
   const texts: string[] = []
   let html = `<table class="pp-tbl"><colgroup>${grid.map((w) => `<col style="width:${pt(w)}">`).join('')}</colgroup>`
-  rows.forEach((row, r) => {
+  for (const [r, row] of rows.entries()) {
+    if (used > ctx.budget.left) {
+      html += `<tr><td>${budgetNotice(ctx)}</td></tr>`
+      break
+    }
     html += `<tr style="height:${emuPt(num(row, 'h') ?? 0)}">`
     let c = 0
     for (const cell of children(row, 'tc')) {
       const col = c
+      if (col >= TABLE_MAX) {
+        cut = true
+        break
+      }
       c += Math.max(1, Number(attr(cell, 'gridSpan') ?? 1))
       if (truthy(attr(cell, 'hMerge')) || truthy(attr(cell, 'vMerge'))) continue
       const isFirstRow = r === 0 && parts.firstRow !== null
@@ -1214,10 +1313,13 @@ function renderTable(table: XmlNode, ctx: Ctx): { html: string; text: string } {
       }
       const span = Number(attr(cell, 'gridSpan') ?? 1)
       const rowSpan = Number(attr(cell, 'rowSpan') ?? 1)
-      html += `<td${span > 1 ? ` colspan="${span}"` : ''}${rowSpan > 1 ? ` rowspan="${rowSpan}"` : ''} style="${style.join(';')}">${content}</td>`
+      const td = `<td${span > 1 ? ` colspan="${Math.min(span, TABLE_MAX)}"` : ''}${rowSpan > 1 ? ` rowspan="${Math.min(rowSpan, TABLE_MAX)}"` : ''} style="${style.join(';')}">${content}</td>`
+      used += td.length
+      html += td
     }
     html += '</tr>'
-  })
+  }
+  if (cut) html += `<tr><td colspan="${grid.length || 1}" style="padding:${pt(4)};font-size:${pt(12)};color:#59636e">表格太大,只顯示前 ${TABLE_MAX} 列、${TABLE_MAX} 欄,完整內容請下載 PPTX 查看</td></tr>`
   return { html: `${html}</table>`, text: texts.join('\n') }
 }
 
@@ -1272,8 +1374,10 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
     const fallback = hexToRgba(ctx.theme.colors[SERIES_DEFAULTS[at % 6]] ?? '4472C4')!
     return { name, values, color: cssColor(fill ?? fallback) }
   })
-  if (!series.length) return null
+  // Excel's own limit on series; with at most 2000 points each (cachedValues) the drawing stays bounded.
+  if (!series.length || series.length > 255) return null
   const length = Math.max(categories.length, ...series.map((s) => s.values.length))
+  if (length * series.length > 50_000) return null
   categories = Array.from({ length }, (_, at) => categories[at] ?? String(at + 1))
   const title = chartTitle(chart)
   const W = x.cx / EMU_PER_PT
@@ -1288,6 +1392,7 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
   if (kind === 'pieChart' || kind === 'doughnutChart') {
     const values = series[0].values.map((v) => Math.max(0, v ?? 0))
     const total = values.reduce((a, b) => a + b, 0) || 1
+    if (!Number.isFinite(total)) return null
     const r = Math.max(4, Math.min(W, H - top - legendH) / 2 - 6)
     const cx = W / 2
     const cy = top + (H - top - legendH) / 2
@@ -1311,15 +1416,34 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
     if (kind === 'doughnutChart') svg += `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(r * 0.5)}" fill="#fff"/>`
     svg += legend(categories.map((name, at) => ({ name, color: colors[at] })), W, H - 6, fs, textColor)
   } else {
-    const all = series.flatMap((s) => s.values).filter((v): v is number => v !== null)
-    const stacked = ['stacked', 'percentStacked'].includes(attr(child(group, 'grouping'), 'val') ?? '')
-    const sums = categories.map((_, at) => series.reduce((sum, s) => sum + Math.max(0, s.values[at] ?? 0), 0))
-    let max = Math.max(0, ...(stacked ? sums : all))
-    const min = Math.min(0, ...all)
+    // Each value as the span it covers: from 0, or stacked on the series before it in its category. Bars stack
+    // positives up and negatives down; stacked lines and areas add up as they go; 100% stacked is a share of the category.
+    const grouping = attr(child(group, 'grouping'), 'val') ?? ''
+    const percent = grouping === 'percentStacked'
+    const stacked = percent || grouping === 'stacked'
+    const totals = categories.map((_, at) => series.reduce((sum, s) => sum + Math.abs(s.values[at] ?? 0), 0))
+    const up = categories.map(() => 0)
+    const down = categories.map(() => 0)
+    const spans = series.map((s) =>
+      s.values.map((raw, at): [number, number] | null => {
+        if (raw === null) return null
+        const value = percent ? (totals[at] ? (raw / totals[at]) * 100 : 0) : raw
+        if (!stacked) return [0, value]
+        const base = kind === 'barChart' && value < 0 ? down : up
+        const from = base[at]
+        base[at] = from + value
+        return [from, base[at]]
+      })
+    )
+    let max = 0
+    let min = 0
+    for (const list of spans) for (const span of list) if (span) for (const v of span) (max = Math.max(max, v)), (min = Math.min(min, v))
     if (max === min) max = min + 1
     const step = niceStep((max - min) / 5)
     const top2 = Math.ceil(max / step) * step
     const bottom = Math.floor(min / step) * step
+    // A value near the largest number overflows the axis to Infinity: such a chart shows as a labelled box.
+    if (![max, min, step, top2, bottom, top2 - bottom].every(Number.isFinite)) return null
     // Bar charts may run sideways (barDir="bar"): the same drawing with the axes swapped, first category at the bottom.
     const horizontal = kind === 'barChart' && attr(child(group, 'barDir'), 'val') === 'bar'
     const left = horizontal ? Math.min(W * 0.3, 70) : 36
@@ -1333,13 +1457,16 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
     const point = (c: number, d: number): [number, number] => (horizontal ? [left + d, plotBottom - c] : [left + c, plotBottom - d])
     const n = Math.max(1, categories.length || series[0].values.length)
     const slot = catLength / n
-    for (let v = bottom; v <= top2 + step / 2; v += step) {
+    for (let tick = 0; tick <= 100; tick++) {
+      const v = bottom + tick * step
+      if (v > top2 + step / 2) break
+      const label = `${formatNumber(v)}${percent ? '%' : ''}`
       const [x1, y1] = point(0, dist(v))
       const [x2, y2] = point(catLength, dist(v))
       svg += `<line x1="${round(x1)}" x2="${round(x2)}" y1="${round(y1)}" y2="${round(y2)}" stroke="#d9d9d9" stroke-width="0.5"/>`
       svg += horizontal
-        ? `<text x="${round(x1)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}" fill="${textColor}">${escapeHtml(formatNumber(v))}</text>`
-        : `<text x="${left - 4}" y="${round(y1 + 3)}" text-anchor="end" font-size="${fs}" fill="${textColor}">${escapeHtml(formatNumber(v))}</text>`
+        ? `<text x="${round(x1)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}" fill="${textColor}">${escapeHtml(label)}</text>`
+        : `<text x="${left - 4}" y="${round(y1 + 3)}" text-anchor="end" font-size="${fs}" fill="${textColor}">${escapeHtml(label)}</text>`
     }
     categories.forEach((name, at) => {
       const [x, y] = point(slot * (at + 0.5), 0)
@@ -1349,26 +1476,26 @@ function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: s
     })
     if (kind === 'barChart') {
       const width = stacked ? slot * 0.6 : (slot * 0.7) / series.length
-      const base: number[] = categories.map(() => 0)
       series.forEach((s, si) => {
-        s.values.forEach((value, at) => {
-          if (value === null) return
+        spans[si].forEach((span, at) => {
+          if (span === null) return
           const c0 = slot * at + slot * (stacked ? 0.2 : 0.15) + (stacked ? 0 : width * si)
-          const from = stacked ? base[at] : 0
-          const to = from + value
-          if (stacked) base[at] = to
+          const [from, to] = span
           const [ax, ay] = point(c0, dist(from))
           const [bx, by] = point(c0 + width, dist(to))
           svg += `<rect x="${round(Math.min(ax, bx))}" y="${round(Math.min(ay, by))}" width="${round(Math.abs(bx - ax))}" height="${round(Math.abs(by - ay))}" fill="${s.color}"/>`
         })
       })
     } else {
-      series.forEach((s) => {
-        const pts = s.values.map((value, at) => (value === null ? null : point(slot * (at + 0.5), dist(value)).map((v) => round(v)).join(','))).filter(Boolean)
-        const [sx, sy] = point(slot * 0.5, dist(0))
-        const [ex] = point(slot * (s.values.length - 0.5), dist(0))
-        if (kind === 'areaChart') svg += `<path d="M${round(sx)},${round(sy)} L${pts.join(' L')} L${round(ex)},${round(sy)} Z" fill="${s.color}" opacity="0.7"/>`
-        else svg += `<polyline points="${pts.join(' ')}" fill="none" stroke="${s.color}" stroke-width="2"/>`
+      series.forEach((s, si) => {
+        const at = (c: number, v: number) => point(slot * (c + 0.5), dist(v)).map((n) => round(n)).join(',')
+        const shown = spans[si].map((span, c) => (span ? { c, span } : null)).filter((item) => item !== null)
+        const upper = shown.map(({ c, span }) => at(c, span[1]))
+        if (!upper.length) return
+        // An area runs along its values and back along what it stands on (0, or the series below it).
+        const lower = shown.map(({ c, span }) => at(c, span[0])).reverse()
+        if (kind === 'areaChart') svg += `<path d="M${upper.join(' L')} L${lower.join(' L')} Z" fill="${s.color}" opacity="0.7"/>`
+        else svg += `<polyline points="${upper.join(' ')}" fill="none" stroke="${s.color}" stroke-width="2"/>`
       })
     }
     if (legendH) svg += legend(series.map((s) => ({ name: s.name, color: s.color })), W, H - 6, fs, textColor)
@@ -1422,7 +1549,7 @@ function backgroundOf(xml: XmlNode | null, ctx: Ctx): string | null {
 
 function notesHtml(pkg: Package, slidePart: string): { html: string; text: string } {
   const rel = pkg.relOfType(slidePart, 'notesSlide')
-  const notes = rel ? pkg.xml(rel.target) : null
+  const notes = rel ? pkg.optional(rel.target) : null
   const tree = path(notes, 'cSld', 'spTree')
   if (!tree) return { html: '', text: '' }
   const bodies = children(tree, 'sp').filter((sp) => placeholderOf(sp)?.type === 'body')
@@ -1461,7 +1588,7 @@ function notesHtml(pkg: Package, slidePart: string): { html: string; text: strin
 
 function themeOf(pkg: Package, masterPart: string): Theme {
   const rel = pkg.relOfType(masterPart, 'theme')
-  const xml = rel ? pkg.xml(rel.target) : null
+  const xml = rel ? pkg.optional(rel.target) : null
   const elements = path(xml, 'themeElements')
   const colors: Record<string, string> = {}
   for (const node of child(elements, 'clrScheme')?.children ?? []) {
@@ -1492,6 +1619,8 @@ export type PptxDeck = { width: number; height: number; slides: PptxSlide[]; tit
 
 /** Reads a deck: its slide size and every shown slide as HTML. `mediaBase` prefixes picture URLs. */
 export function readPptx(data: Buffer, mediaBase: string): PptxDeck {
+  // Password-protected decks and the old binary .ppt are compound files, not zips.
+  if (data.length >= 8 && data.readUInt32BE(0) === 0xd0cf11e0) throw new Error('這是舊版 PowerPoint (.ppt) 或受密碼保護的檔案,網頁版無法開啟。')
   const pkg = new Package(data)
   const presentationPart = pkg.relOfType('', 'officeDocument')?.target ?? 'ppt/presentation.xml'
   const presentation = pkg.xml(presentationPart)
@@ -1501,12 +1630,13 @@ export function readPptx(data: Buffer, mediaBase: string): PptxDeck {
   const height = num(size, 'cy') ?? 6858000
   const presentationStyle = child(presentation, 'defaultTextStyle')
   const tableStylesRel = pkg.relOfType(presentationPart, 'tableStyles')
-  const tableStyles = tableStylesRel ? pkg.xml(tableStylesRel.target) : null
+  const tableStyles = tableStylesRel ? pkg.optional(tableStylesRel.target) : null
   const slideParts = children(child(presentation, 'sldIdLst'), 'sldId')
     .map((sld) => pkg.rel(presentationPart, relAttr(sld, 'id')))
     .filter((rel): rel is Rel => Boolean(rel && !rel.external))
     .map((rel) => rel.target)
-  const shown = slideParts.filter((part) => attr(pkg.xml(part), 'show') !== '0')
+  // A slide that cannot be read counts as shown, so it keeps its number and says why on its own face.
+  const shown = slideParts.filter((part) => attr(pkg.optional(part), 'show') !== '0')
   const numberOf = new Map(shown.map((part, at) => [part, at + 1]))
   const masters = new Map<string, Master>()
   const masterOf = (part: string): Master => {
@@ -1520,13 +1650,17 @@ export function readPptx(data: Buffer, mediaBase: string): PptxDeck {
     return master
   }
   const media = (part: string) => officeMediaUrl(mediaBase, part)
-  const docTitle = pkg.xml('docProps/core.xml')
+  const docTitle = pkg.optional('docProps/core.xml')
+  const deckBudget = { left: DECK_BUDGET }
   const title = docTitle ? (findDeep(docTitle, 'title')?.text.trim() ?? '') : ''
 
   // One slide that cannot be read shows why on its own face; the rest of the deck still draws.
   const slides = shown.map((part, at): PptxSlide => {
+    const budget: Budget = { left: Math.min(SLIDE_BUDGET, deckBudget.left), noticed: false }
     try {
-      return drawSlide(part, at)
+      const slide = drawSlide(part, at, budget)
+      deckBudget.left -= slide.html.length
+      return slide
     } catch (error) {
       const number = at + 1
       const message = `第 ${number} 頁無法顯示:${error instanceof Error ? error.message : String(error)}`
@@ -1539,7 +1673,7 @@ export function readPptx(data: Buffer, mediaBase: string): PptxDeck {
   })
   return { width, height, slides, title }
 
-  function drawSlide(part: string, at: number): PptxSlide {
+  function drawSlide(part: string, at: number, budget: Budget): PptxSlide {
     const xml = pkg.xml(part)
     if (!xml) throw new Error(`缺少 ${part}`)
     const layoutPart = pkg.relOfType(part, 'slideLayout')?.target
@@ -1550,7 +1684,7 @@ export function readPptx(data: Buffer, mediaBase: string): PptxDeck {
     const layout: Layout = { part: layoutPart, xml: layoutXml, master }
     const override = (node: XmlNode | null) => clrMapOf(child(child(node, 'clrMapOvr'), 'overrideClrMapping'))
     const base: Omit<Ctx, 'part' | 'clrMap'> = {
-      pkg, theme: master.theme, slideNumber: at + 1, slideOf: (target) => numberOf.get(target), media, master, layout, presentationStyle, tableStyles
+      pkg, theme: master.theme, slideNumber: at + 1, slideOf: (target) => numberOf.get(target), media, master, layout, presentationStyle, tableStyles, budget
     }
     const masterCtx: Ctx = { ...base, part: master.part, clrMap: master.clrMap }
     const layoutCtx: Ctx = { ...base, part: layoutPart, clrMap: override(layoutXml) ?? master.clrMap }
@@ -1586,6 +1720,14 @@ export function pptxText(data: Buffer): string {
   return [deck.title, ...deck.slides.flatMap((slide) => [slide.text, slide.notes])].filter(Boolean).join('\n')
 }
 
+/** Why a deck cannot be read, in words for the reader. */
+function failureReason(error: unknown): string {
+  if (error instanceof ZipError) return '檔案不是有效的 .pptx(zip 格式),可能已損毀,或副檔名不符。'
+  if (error instanceof XmlError) return '簡報內容的 XML 無法解析,檔案可能已損毀。'
+  if (error instanceof Error && /[一-鿿]/.test(error.message)) return error.message
+  return '讀取這份簡報時發生錯誤。'
+}
+
 /**
  * The deck page for a PowerPoint file. Pictures are addressed relative to the page through the
  * Office media route, which resolves inside the version's own path. A file that cannot be read
@@ -1598,7 +1740,8 @@ export function renderPptxDeck(data: Buffer, fileName: string, title: string, as
     deck = readPptx(data, mediaBase)
   } catch (error) {
     const message = `PowerPoint: ${error instanceof Error ? error.message : String(error)}`
-    const slide = `<section class="slide layout-pptx" id="slide-1" data-number="1" aria-label="第 1 頁"><div class="pp-canvas"><div class="pp-missing">${escapeHtml(message)}</div></div></section>`
+    const box = `<div class="pp-missing" role="alert" style="flex-direction:column;gap:calc(6*var(--pt))"><strong style="font-size:calc(20*var(--pt))">這份 PowerPoint 檔無法顯示</strong><span>${escapeHtml(failureReason(error))}</span><code>${escapeHtml(message)}</code><span>可以下載原始檔,用 PowerPoint 開啟查看。</span></div>`
+    const slide = `<section class="slide layout-pptx" id="slide-1" data-number="1" aria-label="第 1 頁"><div class="pp-canvas">${box}</div></section>`
     return deckPage(slide, title, assets, failureScript(message))
   }
   const widthPt = round(deck.width / EMU_PER_PT, 3)

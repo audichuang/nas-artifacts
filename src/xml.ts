@@ -25,7 +25,43 @@ function skipPast(source: string, token: string, from: number): number {
   return found + token.length
 }
 
-const ATTR = /([^\s=/>]+)\s*=\s*("([^"]*)"|'([^']*)')/g
+const isSpace = (char: string) => char === ' ' || char === '\t' || char === '\n' || char === '\r'
+
+/**
+ * The attributes inside a tag, scanned once from left to right: `name = "value"` or `'value'`. A token
+ * with no `=` is skipped. (A regex retried from every position took quadratic time on a long run of them.)
+ */
+function readAttrs(inner: string, from: number, into: Record<string, string>): void {
+  let at = from
+  const end = inner.length
+  while (at < end) {
+    const char = inner[at]
+    if (isSpace(char) || char === '=' || char === '/' || char === '>' || char === '"' || char === "'") {
+      if (char === '"' || char === "'") {
+        const close = inner.indexOf(char, at + 1)
+        at = close < 0 ? end : close + 1
+      } else at++
+      continue
+    }
+    const nameStart = at
+    while (at < end && !isSpace(inner[at]) && inner[at] !== '=' && inner[at] !== '/' && inner[at] !== '>' && inner[at] !== '"' && inner[at] !== "'") at++
+    const name = inner.slice(nameStart, at)
+    let next = at
+    while (next < end && isSpace(inner[next])) next++
+    if (inner[next] !== '=') continue
+    next++
+    while (next < end && isSpace(inner[next])) next++
+    const quote = inner[next]
+    if (quote !== '"' && quote !== "'") {
+      at = next
+      continue
+    }
+    const close = inner.indexOf(quote, next + 1)
+    if (close < 0) return
+    into[name] = decode(inner.slice(next + 1, close))
+    at = close + 1
+  }
+}
 
 export function parseXml(source: string, maxNodes = 2_000_000): XmlNode {
   const root: XmlNode = { name: '#root', attrs: {}, children: [], text: '' }
@@ -69,7 +105,7 @@ export function parseXml(source: string, maxNodes = 2_000_000): XmlNode {
       const inner = source.slice(open + 1, selfClosing ? close - 1 : close)
       const nameEnd = inner.search(/[\s/]|$/)
       const node: XmlNode = { name: inner.slice(0, nameEnd), attrs: {}, children: [], text: '' }
-      for (const match of inner.slice(nameEnd).matchAll(ATTR)) node.attrs[match[1]] = decode(match[3] ?? match[4] ?? '')
+      readAttrs(inner, nameEnd, node.attrs)
       if (++nodes > maxNodes) throw new XmlError('document too large')
       stack[stack.length - 1].children.push(node)
       if (!selfClosing) stack.push(node)
