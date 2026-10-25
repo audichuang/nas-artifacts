@@ -1,6 +1,6 @@
 # Page design rules
 
-For agents writing pages to publish here. Start from `templates/report`, `templates/dashboard` or `templates/checklist` (`cp -r` into a scratch folder, edit, publish); they already follow everything below. Rules first, reason after the dash.
+For agents writing pages to publish here. Start from `templates/report`, `templates/dashboard`, `templates/deck` or `templates/checklist` (`cp -r` into a scratch folder, edit, publish); they already follow everything below. Rules first, reason after the dash.
 
 ## Basics
 
@@ -23,7 +23,7 @@ Copy the full token set from any template instead of inventing one. Do not hard-
 
 ## Type and spacing
 
-- Font stack: `system-ui,-apple-system,"Segoe UI","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif`. No web fonts unless asked (Google Fonts is the only allowed source) -- system fonts render instantly and CJK web fonts are huge.
+- Font stack: `system-ui,-apple-system,"Segoe UI","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif`. No web fonts unless asked (Google Fonts or the script CDNs) -- system fonts render instantly and CJK web fonts are huge.
 - Scale: 13 (captions) / 15-16 (body) / 18 (lead) / 22 (h2) / 26-36 (h1, use `clamp`). Body line-height 1.6-1.7 for Chinese text.
 - Spacing only from the 4/8/12/16/24/40 scale. Body column <= 760px for prose, <= 1080px for dashboards.
 
@@ -57,7 +57,7 @@ Copy the full token set from any template instead of inventing one. Do not hard-
 | `<a target=_blank>`, `window.open`, navigation away | No popups, frame cannot navigate. Show the URL as text. Same-page `#anchors` and relative links to published files work. |
 | `localStorage`, `sessionStorage`, cookies, IndexedDB | Opaque origin throws. Wrap in try/catch if used for a convenience; shared state goes in `db` (`--cap db`). |
 | Remote images (`<img src="https://...">`) | Blocked. Use a published file, a `data:` URI, or `artifact asset upload`; draw simple graphics as inline SVG. |
-| Script/style from other hosts, unpinned versions | Only cdnjs, jsdelivr, unpkg, cdn.tailwindcss.com, code.jquery.com with an exact version; fonts only from Google Fonts. Inline everything else. |
+| Script/style from other hosts, unpinned versions | Only cdnjs, jsdelivr, unpkg, cdn.tailwindcss.com, code.jquery.com with an exact version; fonts from Google Fonts or those CDNs. Inline everything else. |
 | `window.artifact` calls outside the viewer (opening the content URL directly) | They reject. Catch and show a short message telling the reader to open the page from the Artifacts viewer. |
 | Remembering state between visits without `db` | Not possible; do not fake it. Declare `--cap db` and re-render from `db` on load and on every `subscribe` event (including `{type:'db',resync:true}`, which has no collection). |
 

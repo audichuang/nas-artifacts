@@ -173,8 +173,48 @@ describe('page checks', () => {
     assert.equal(out.match(/fetch/g)?.length, 1)
   })
 
+  test('asset URLs pass the check only on the content origin and for this artifact', async () => {
+    const { id } = page()
+    const own = `http://content.test/a/${id}/assets/as1/photo%20one.png`
+    const html = `<!doctype html><title>x</title><img src="${own}"><link rel="stylesheet" href="http://content.test/a/${id}/assets/as2/s.css">`
+    const alone = await cli(['check', site({ 'index.html': html })])
+    assert.equal(alone.code, 0, alone.stdout)
+
+    // The CSP names the content origin with its scheme and port, so the same path anywhere else is blocked.
+    for (const origin of ['https://wrong.example', 'https://content.test', 'http://content.test:8080']) {
+      const run = await cli(['check', site({ 'index.html': `<img src="${origin}/a/${id}/assets/as1/p.png">` })])
+      assert.equal(run.code, 1, origin)
+      assert.match(run.stdout, /not on the content origin http:\/\/content\.test/, origin)
+    }
+    const missing = await cli(['check', site({ 'index.html': '<img src="http://content.test/a/noSuchOne123/assets/as1/p.png">' })])
+    assert.match(missing.stdout, /artifact noSuchOne123 does not exist/)
+
+    const other = 'http://content.test/a/someoneElse1/assets/as2/b.png'
+    const first = await cli(['publish', site({ 'index.html': `${html}<img src="${other}">` }), '--id', id])
+    assert.doesNotMatch(first.stderr, /photo|s\.css/)
+    assert.match(first.stderr, /someoneElse1/)
+
+    // check alone judges a published path against the artifact it was published to.
+    const elsewhere = page()
+    const remembered = site({ 'index.html': '<!doctype html><title>x</title>' })
+    await cli(['publish', remembered, '--id', elsewhere.id])
+    writeFileSync(join(remembered, 'index.html'), html)
+    const recheck = await cli(['check', remembered])
+    assert.equal(recheck.code, 1)
+    assert.match(recheck.stdout, new RegExp(`asset of artifact ${id}`))
+
+    // A new artifact has no assets yet, so any asset URL in it belongs to another one; so does a recorded id the server no longer has.
+    const fresh = await cli(['publish', site({ 'index.html': html }), '--new'])
+    assert.match(fresh.stderr, new RegExp(`asset of artifact ${id}`))
+    const gone = await cli(['publish', site({ 'index.html': html }), '--id', 'deletedOne12'])
+    assert.match(gone.stderr, new RegExp(`asset of artifact ${id}`))
+    const framed = await cli(['check', site({ 'index.html': `<iframe src="${own}"></iframe>` })])
+    assert.equal(framed.code, 1)
+    assert.match(framed.stdout, /<iframe> of an asset is blocked/)
+  })
+
   test('the bundled templates pass the check', async () => {
-    for (const name of ['report', 'dashboard', 'checklist']) {
+    for (const name of ['report', 'dashboard', 'checklist', 'deck']) {
       const run = await cli(['check', new URL(`../skill/nas-artifacts/templates/${name}`, import.meta.url).pathname])
       assert.equal(run.code, 0, `${name}: ${run.stdout}`)
     }
