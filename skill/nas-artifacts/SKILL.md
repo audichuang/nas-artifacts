@@ -58,6 +58,15 @@ For a presentation, write a Markdown file named `*.slides.md` (`index.slides.md`
 - The user can edit a deck in the viewer (「編輯」, saved as a new version labelled 瀏覽器編輯) when it declares no capabilities. Before revising a deck, `checkout` it so you work from their edits, not your local copy.
 - `node "$A" export <id> [--out file.pptx]` saves the deck as PowerPoint (text stays editable; layout close to the web deck, not identical; diagrams are SVG, which PowerPoint 2019 and Microsoft 365 show; Keynote, macOS preview and Google Slides show a broken-picture placeholder instead). Readers get the same from the 「PPTX」 button and print to PDF from the deck's 「PDF」 button.
 
+### PowerPoint files
+
+When the user already has a deck as a `.pptx` (a company template, slides someone sent), publish the file itself: `node "$A" publish deck.pptx`. The server draws every slide from the file's own masters, layouts, theme, placeholders, text, pictures, tables and charts, so any template keeps its look, at the file's own slide size, and the text stays selectable and searchable. Paging, overview, speaker notes, full screen and PDF work as for Markdown decks; 「PPTX」 downloads the published file unchanged. Do not convert it to Markdown, images or PDF first.
+
+- Something the browser cannot draw (EMF/WMF pictures, video, OLE objects, chart types other than bar, line, area, pie and doughnut) shows as a labelled box on the slide; a file that is not a deck at all shows the reason and lands in `artifact errors`.
+- Fonts come from the reader's device: a font it lacks (Calibri, 微軟正黑體 on a Mac) is replaced by a similar one, so line breaks can differ slightly from PowerPoint.
+- To change it, edit in PowerPoint and publish the file again (same URL, new version). The viewer has no 「編輯」 for `.pptx`.
+- A `.pptx` may be up to 64 MB (other files 16 MB).
+
 ## Page capabilities
 
 Declare what the page uses with `--cap` (republishing without `--cap` keeps the previous set). Inside the page, `window.artifact` is available from the first script:

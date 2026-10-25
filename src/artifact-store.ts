@@ -3,7 +3,8 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { BlobStore } from './blob-store.ts'
-import { contentTypeFor, isHtmlPath, isMarkdownPath, normalizeFilePath } from './file-paths.ts'
+import { contentTypeFor, isMarkdownPath, isPagePath, isPptxPath, normalizeFilePath } from './file-paths.ts'
+import { pptxText } from './pptx.ts'
 import { diffLines, hunks, type ShownLine } from './text-diff.ts'
 
 export const CAPABILITIES = ['db', 'uploads'] as const
@@ -220,6 +221,15 @@ const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"'
 const SEARCH_CHARS = 500_000
 
 /** The words a reader sees: markup, scripts, styles and link targets dropped, entities decoded. */
+/** A PowerPoint file that cannot be read is still published; it is just not searchable by its text. */
+function deckText(content: Buffer): string {
+  try {
+    return pptxText(content).replace(/\s+/g, ' ')
+  } catch {
+    return ''
+  }
+}
+
 function pageText(path: string, content: string): string {
   // Markdown: line-leading markers and emphasis go, but - and _ inside words stay (nas-artifacts, search_text).
   const text = isMarkdownPath(path)
@@ -265,8 +275,8 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
     if (!entry || !files[entry]) {
       throw new ArtifactError(400, 'invalid_entry', `Entry "${requested}" is not one of the published files.`)
     }
-    if (!isHtmlPath(entry) && !isMarkdownPath(entry)) {
-      throw new ArtifactError(400, 'invalid_entry', 'The entry must be an .html or .md file.')
+    if (!isPagePath(entry)) {
+      throw new ArtifactError(400, 'invalid_entry', 'The entry must be an .html, .md or .pptx file.')
     }
     return entry
   }
@@ -275,7 +285,7 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
       return candidate
     }
   }
-  const pages = Object.keys(files).filter((path) => isHtmlPath(path) || isMarkdownPath(path))
+  const pages = Object.keys(files).filter(isPagePath)
   if (pages.length === 1) {
     return pages[0]
   }
@@ -396,12 +406,13 @@ export class ArtifactStore {
   private indexText(id: string, version: number): void {
     const row = this.requireVersion(id, version)
     const pages = Object.keys(row.files)
-      .filter((path) => isHtmlPath(path) || isMarkdownPath(path))
+      .filter(isPagePath)
       .sort((a, b) => Number(b === row.entry) - Number(a === row.entry) || a.localeCompare(b))
     let text = ''
     for (const path of pages) {
       if (text.length >= SEARCH_CHARS) break
-      text += ` ${pageText(path, this.blobs.read(row.files[path].sha256).toString('utf8'))}`
+      const content = this.blobs.read(row.files[path].sha256)
+      text += ` ${isPptxPath(path) ? deckText(content) : pageText(path, content.toString('utf8'))}`
     }
     this.db
       .prepare('INSERT INTO search_text (artifact_id, version, text) VALUES (?, ?, ?) ON CONFLICT(artifact_id) DO UPDATE SET version = excluded.version, text = excluded.text')
@@ -469,8 +480,10 @@ export class ArtifactStore {
         delete files[path]
         continue
       }
-      if (file.content.byteLength > LIMITS.fileBytes) {
-        throw new ArtifactError(413, 'file_too_large', `${path} is larger than ${LIMITS.fileBytes} bytes.`)
+      // A PowerPoint file carries all its pictures, so it may fill a whole publish.
+      const limit = isPptxPath(path) ? LIMITS.publishBytes : LIMITS.fileBytes
+      if (file.content.byteLength > limit) {
+        throw new ArtifactError(413, 'file_too_large', `${path} is larger than ${limit} bytes.`)
       }
       total += file.content.byteLength
       if (total > LIMITS.publishBytes) {

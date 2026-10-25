@@ -6,9 +6,12 @@ import { createServer, type Server } from 'node:http'
 import { after, before, test } from 'node:test'
 import { serve, type ServerType } from '@hono/node-server'
 import { chromium, type Browser } from 'playwright-core'
+import pptxgen from 'pptxgenjs'
 import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
+
+const PptxGenJS = ((pptxgen as unknown as { default?: typeof pptxgen.default }).default ?? pptxgen) as typeof pptxgen.default
 
 // Set CHROMIUM_PATH, or keep a Playwright headless shell in its default cache.
 function findChromium(): string | undefined {
@@ -730,4 +733,36 @@ test('the editor never pairs old text with a newer base: typing during a reload,
     gate.release()
     await viewer.waitForTimeout(500)
   })
+})
+
+test('a PowerPoint file shows as a deck at its own size: pictures load inside the sandbox, notes, no edit button', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const pptx = new PptxGenJS()
+  pptx.layout = 'LAYOUT_4x3'
+  let slide = pptx.addSlide()
+  slide.background = { color: '0B3D2E' }
+  slide.addText('第一頁', { x: 1, y: 1, w: 6, h: 1, color: 'FFFFFF', fontSize: 32 })
+  slide.addNotes('講稿一')
+  slide = pptx.addSlide()
+  slide.addImage({ data: 'image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', x: 1, y: 1, w: 2, h: 2 })
+  const bytes = (await pptx.write({ outputType: 'nodebuffer' })) as Buffer
+  const { id } = store.publish({ title: 'PowerPoint', files: { '季報 (v2).pptx': { content: bytes } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active#slide-1', { hasText: '第一頁' }).waitFor()
+  assert.equal(await frame.locator('#deck-counter').textContent(), '1 / 2')
+  const box = await frame.locator('.slide.active').boundingBox()
+  assert.ok(box && Math.abs(box.width / box.height - 4 / 3) < 0.01, JSON.stringify(box))
+  await frame.locator('[data-deck="notes"]').click()
+  assert.equal(await frame.locator('#deck-notes').textContent(), '講稿一')
+  await viewer.keyboard.press('ArrowRight')
+  await frame.locator('.slide.active#slide-2').waitFor()
+  // The picture comes from inside the file, through the version's own path the CSP allows.
+  await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => (img.complete ? null : new Promise((done) => img.addEventListener('load', done, { once: true }))))
+  assert.ok((await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => img.naturalWidth)) > 0)
+  assert.equal(await viewer.locator('#edit').isHidden(), true)
+  assert.equal(await viewer.locator('#export-pptx').isVisible(), true)
+  assert.deepEqual(store.listErrors(id, 1), [])
+  await viewer.close()
 })

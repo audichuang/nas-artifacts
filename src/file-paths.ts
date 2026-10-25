@@ -27,7 +27,8 @@ const CONTENT_TYPES: Record<string, string> = {
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
   '.pdf': 'application/pdf',
-  '.wasm': 'application/wasm'
+  '.wasm': 'application/wasm',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
 }
 
 export function contentTypeFor(path: string): string {
@@ -55,6 +56,15 @@ export function normalizeFilePath(input: string): string | null {
 
 export function isMarkdownPath(path: string): boolean {
   return extname(path).toLowerCase() === '.md'
+}
+
+export function isPptxPath(path: string): boolean {
+  return extname(path).toLowerCase() === '.pptx'
+}
+
+/** A file the content origin renders into a page: HTML as is, Markdown and PowerPoint drawn on the server. */
+export function isPagePath(path: string): boolean {
+  return isHtmlPath(path) || isMarkdownPath(path) || isPptxPath(path)
 }
 
 export function isHtmlPath(path: string): boolean {

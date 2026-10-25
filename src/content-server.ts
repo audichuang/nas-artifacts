@@ -5,7 +5,8 @@ import type { ArtifactStore, FileEntry } from './artifact-store.ts'
 import { ArtifactError } from './artifact-store.ts'
 import type { Config } from './config.ts'
 import { BRIDGE_PATH, MARKDOWN_CSS_PATH, RENDER_VERSION, injectBridge, renderMarkdown } from './content-render.ts'
-import { decodeRequestPath, isHtmlPath, isMarkdownPath, isServableType } from './file-paths.ts'
+import { decodeRequestPath, isHtmlPath, isMarkdownPath, isPagePath, isPptxPath, isServableType } from './file-paths.ts'
+import { PPTX_MEDIA_SEGMENT, pptxMedia, renderPptxDeck } from './pptx.ts'
 import { isSlidesPath, renderDeck, type DeckAssets } from './slides.ts'
 
 // Same CDN allowlist as Claude's artifacts; everything else must be inline or published with the page.
@@ -74,8 +75,19 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     return c.body(markdownCss, 200, { 'Content-Type': 'text/css; charset=utf-8' })
   })
 
+  // Every picture of a deck is read from the deck file: keep the last few files in memory, not one read per picture.
+  const decks = new Map<string, Buffer>()
+  const deckBytes = (sha256: string): Buffer => {
+    let bytes = decks.get(sha256)
+    if (bytes) decks.delete(sha256)
+    else bytes = store.blobs.read(sha256)
+    decks.set(sha256, bytes)
+    while (decks.size > 4) decks.delete(decks.keys().next().value!)
+    return bytes
+  }
+
   const etagFor = (entry: FileEntry, path: string, title: string): string => {
-    if (isMarkdownPath(path)) {
+    if (isMarkdownPath(path) || isPptxPath(path)) {
       return `"${entry.sha256}-${renderTag}-${createHash('sha256').update(title).digest('hex').slice(0, 16)}"`
     }
     return isHtmlPath(path) ? `"${entry.sha256}-${renderTag}"` : `"${entry.sha256}"`
@@ -87,7 +99,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
   const serveFile = (read: () => Buffer, entry: FileEntry, path: string, title: string, immutable: boolean, ifNoneMatch: string | undefined) => {
     const etag = etagFor(entry, path, title)
     // Rendered pages embed the bridge, which changes across releases, so they revalidate (a cheap 304).
-    const rendered = isMarkdownPath(path) || isHtmlPath(path)
+    const rendered = isPagePath(path)
     const headers: Record<string, string> = {
       'Cache-Control': immutable && !rendered ? 'public, max-age=31536000, immutable' : 'no-cache',
       ETag: etag
@@ -95,7 +107,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     if (rendered) {
       headers.Vary = 'Sec-Fetch-Dest'
     }
-    if (!isMarkdownPath(path) && !isHtmlPath(path) && !isServableType(entry.type)) {
+    if (!rendered && !isServableType(entry.type)) {
       throw new ArtifactError(404, 'not_servable', `${path} is not a web media type.`)
     }
     if (matchesEtag(ifNoneMatch, etag)) {
@@ -105,6 +117,11 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     if (isMarkdownPath(path)) {
       const source = body.toString('utf8')
       return new Response(isSlidesPath(path) ? renderDeck(source, title, deck) : renderMarkdown(source, title), {
+        headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' }
+      })
+    }
+    if (isPptxPath(path)) {
+      return new Response(renderPptxDeck(body, path.slice(path.lastIndexOf('/') + 1), title, deck), {
         headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' }
       })
     }
@@ -151,11 +168,15 @@ export function createContentServer(store: ArtifactStore, config: Config, option
 
     function serveEntry(path: string | null) {
       const entry = path ? row.files[path] : undefined
+      if (path && !entry) {
+        const media = pptxPicture(path)
+        if (media) return media
+      }
       if (!path || !entry) {
         return c.text('Not found', 404)
       }
       // A rendered page opened as its own document has no frame-src to confine it, so it goes back into the viewer.
-      if ((isHtmlPath(path) || isMarkdownPath(path)) && c.req.header('sec-fetch-dest') === 'document') {
+      if (isPagePath(path) && c.req.header('sec-fetch-dest') === 'document') {
         const query = new URLSearchParams({ v: String(version) })
         if (path !== row.entry) {
           query.set('path', path)
@@ -164,6 +185,24 @@ export function createContentServer(store: ArtifactStore, config: Config, option
         return c.redirect(`${config.appOrigin}/a/${id}?${query}`, 302)
       }
       return serveFile(() => store.blobs.read(entry.sha256), entry, path, row.title, true, c.req.header('if-none-match'))
+    }
+
+    // A picture inside one of this version's PowerPoint files: <dir>/~pptx/<file name>/<part>.
+    function pptxPicture(path: string): Response | null {
+      const marker = `${PPTX_MEDIA_SEGMENT}/`
+      const at = path.startsWith(marker) ? 0 : path.indexOf(`/${marker}`) + 1
+      if (at < 0 || (at === 0 && !path.startsWith(marker))) return null
+      const rest = path.slice(at + marker.length)
+      const slash = rest.indexOf('/')
+      if (slash <= 0) return null
+      const deckPath = path.slice(0, at) + rest.slice(0, slash)
+      const deckEntry = row.files[deckPath]
+      if (!deckEntry || !isPptxPath(deckPath)) return null
+      const picture = pptxMedia(deckBytes(deckEntry.sha256), rest.slice(slash + 1))
+      if (!picture) return null
+      return new Response(new Uint8Array(picture.bytes), {
+        headers: { 'Content-Type': picture.type, 'Cache-Control': 'public, max-age=31536000, immutable' }
+      })
     }
   })
 

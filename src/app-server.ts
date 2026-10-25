@@ -12,7 +12,7 @@ import {
   type IncomingFile
 } from './artifact-store.ts'
 import type { Config } from './config.ts'
-import { decodeRequestPath, normalizeFilePath } from './file-paths.ts'
+import { decodeRequestPath, isPptxPath, normalizeFilePath } from './file-paths.ts'
 import { galleryPage, viewerPage } from './pages.ts'
 import { isSlidesPath, renderSlides } from './slides.ts'
 import { deckToPptx } from './slides-pptx.ts'
@@ -296,11 +296,13 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     const id = c.req.param('id')
     const summary = store.requireSummary(id)
     const row = store.requireVersion(id, Number(c.req.query('v') ?? summary.currentVersion))
-    if (!isSlidesPath(row.entry)) {
-      throw new ArtifactError(409, 'not_a_deck', 'Only slide decks (*.slides.md) export to .pptx.')
+    if (!isSlidesPath(row.entry) && !isPptxPath(row.entry)) {
+      throw new ArtifactError(409, 'not_a_deck', 'Only slide decks (*.slides.md, *.pptx) export to .pptx.')
     }
     const read = (path: string) => (row.files[path] ? store.blobs.read(row.files[path].sha256) : null)
-    const pptx = await deckToPptx(store.blobs.read(row.files[row.entry].sha256).toString('utf8'), row.title, row.entry, read)
+    // A published PowerPoint file goes back exactly as it came.
+    const source = store.blobs.read(row.files[row.entry].sha256)
+    const pptx = isPptxPath(row.entry) ? source : await deckToPptx(source.toString('utf8'), row.title, row.entry, read)
     const name = `${row.title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 100) || 'deck'}.pptx`
     return c.body(new Uint8Array(pptx), 200, {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',

@@ -93,12 +93,16 @@ export function renderSlides(source: string): { html: string; count: number } {
 export type DeckAssets = { css: string; js: string }
 
 export function renderDeck(source: string, title: string, assets: DeckAssets): string {
-  const { html } = renderSlides(source)
+  return deckPage(renderSlides(source).html, title, assets)
+}
+
+/** The deck page around a set of slides; `head` adds what a kind of deck needs on top (a PowerPoint file's slide size). */
+export function deckPage(html: string, title: string, assets: DeckAssets, head = ''): string {
   return injectBridge(`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <link rel="stylesheet" href="${MARKDOWN_CSS_PATH}">
-<style>${assets.css}</style>
+<style>${assets.css}</style>${head}
 </head><body class="deck">
 <main class="deck-stage" id="deck">${html}</main>
 <aside class="deck-notes" id="deck-notes" aria-label="講稿" hidden></aside>

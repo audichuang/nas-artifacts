@@ -182,7 +182,9 @@ function onPlaceReport(report) {
 
 // Slide decks: arrow keys pressed outside the frame still turn the page.
 // The editor and the export work on the entry, so they count only while the entry is on show.
-const isDeck = () => place.path === null && /\.slides\.md$/i.test(currentEntry())
+const isDeck = () => place.path === null && /\.(slides\.md|pptx)$/i.test(currentEntry())
+// Only a Markdown deck has a source to edit here; a PowerPoint file is changed in PowerPoint and published again.
+const isMarkdownDeck = () => isDeck() && /\.slides\.md$/i.test(currentEntry())
 const DECK_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 document.addEventListener('keydown', (event) => {
   if (!isDeck() || !DECK_KEYS.has(event.key) || event.metaKey || event.ctrlKey || event.altKey) return
@@ -590,7 +592,7 @@ let cursorSlide = -1
 let previewSeq = 0
 let previewTimer
 
-const canEdit = () => isDeck() && artifact.capabilities.length === 0
+const canEdit = () => isMarkdownDeck() && artifact.capabilities.length === 0
 const exportLink = document.getElementById('export-pptx')
 function syncEditButton() {
   editButton.hidden = !canEdit()
