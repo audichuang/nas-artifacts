@@ -169,21 +169,23 @@ const CODE_RULES = [
   [/\bwindow\.open\s*\(/, () => 'window.open does nothing: the sandbox has no popups; show the URL as text']
 ]
 
-// An uploaded asset: <content>/a/<id>/assets/<assetId>/<name>. The CLI does not know the content host, so the path and id decide.
+// An uploaded asset: <content>/a/<id>/assets/<assetId>/<name>. checkAssets asks the server which origin and artifact it must be.
 const ASSET_PATH = /^\/a\/([^/]+)\/assets\//
 // Own-path sources cover scripts, styles, fonts, images and media; frames and plugins fall to default-src 'none'.
 const FRAME_TAGS = new Set(['iframe', 'embed', 'object'])
 
+const addWarning = (warnings, file, message) => {
+  const line = `${file}: ${message}`
+  if (!warnings.includes(line)) warnings.push(line)
+}
+
 /**
  * Heuristic, not a parser: names what the sandbox will block or what is missing, before anyone opens the page.
- * `id` is the artifact being published (null: a new one, which has no assets yet; undefined: unknown, as in `check`).
+ * Asset URLs are collected into `assetRefs` for checkAssets, which needs the server.
  */
-function checkFiles(paths, id) {
+function checkFiles(paths, assetRefs = []) {
   const warnings = []
-  const warn = (file, message) => {
-    const line = `${file}: ${message}`
-    if (!warnings.includes(line)) warnings.push(line)
-  }
+  const warn = (file, message) => addWarning(warnings, file, message)
   for (const [file, full] of Object.entries(paths)) {
     const isPage = /\.(html?|md)$/i.test(file)
     const isCss = /\.css$/i.test(file)
@@ -200,11 +202,8 @@ function checkFiles(paths, id) {
         const assetOf = ASSET_PATH.exec(url.pathname)?.[1]
         if (tag === 'a' || tag === 'area') externalLinks++
         else if (assetOf && FRAME_TAGS.has(tag)) warn(file, `<${tag}> of an asset is blocked: pages cannot frame or embed; link the file with <a download> or show it with <img>/<video>`)
-        else if (assetOf && id !== undefined && assetOf !== id) {
-          warn(file, `${ref} is an asset of artifact ${assetOf}; a page loads only its own assets, so upload it to this one after publishing`)
-        } else if (assetOf) {
-          // This artifact's own asset: the CSP allows it for every remaining tag.
-        } else if (tag === 'script') {
+        else if (assetOf) assetRefs.push({ file, ref, origin: url.origin, assetOf })
+        else if (tag === 'script') {
           if (!SCRIPT_HOSTS.includes(host)) warn(file, `<script> from ${host} is blocked; use ${SCRIPT_HOSTS.join(', ')}, or publish the file`)
           else checkPinned(ref, url)
         } else if (tag === 'link' && /\bstylesheet\b/.test(rel)) {
@@ -256,6 +255,31 @@ function checkFiles(paths, id) {
   return warnings
 }
 
+/**
+ * The CSP loads an asset only from the content origin (scheme, host and port) under the page's own artifact.
+ * `id`: the artifact being published, null for a new one (it has no assets yet), undefined when unknown (`check` alone).
+ */
+async function checkAssets(assetRefs, id, warnings) {
+  if (assetRefs.length === 0) return
+  const summaries = new Map()
+  const summary = async (artifactId) => {
+    if (!summaries.has(artifactId)) summaries.set(artifactId, await api(`/api/artifacts/${encodeURIComponent(artifactId)}`, { allowNotFound: true }))
+    return summaries.get(artifactId)
+  }
+  // A recorded or --id artifact the server no longer has becomes a fresh publish.
+  if (id && !(await summary(id))) id = null
+  for (const { file, ref, origin, assetOf } of assetRefs) {
+    if (id !== undefined && assetOf !== id) {
+      addWarning(warnings, file, `${ref} is an asset of artifact ${assetOf}; a page loads only its own assets, so upload it to this one after publishing`)
+      continue
+    }
+    const owner = await summary(assetOf)
+    const contentOrigin = owner && new URL(owner.contentUrl).origin
+    if (!owner) addWarning(warnings, file, `${ref}: artifact ${assetOf} does not exist on the server`)
+    else if (origin !== contentOrigin) addWarning(warnings, file, `${ref} is not on the content origin ${contentOrigin}, the only place the sandbox loads assets from`)
+  }
+}
+
 function reportWarnings(warnings) {
   if (warnings.length === 0) return
   console.error(`artifact: ${warnings.length} problem(s) the page sandbox will hit (published anyway; "artifact check" rechecks):`)
@@ -284,7 +308,9 @@ async function publish(target, values) {
   if (Object.keys(paths).length === 0) fail(`${target} has no files to publish`)
   const state = readJson(STATE_FILE, {})
   const knownId = values.new ? undefined : values.id ?? state[source]?.id
-  const warnings = checkFiles(paths, knownId ?? null)
+  const assetRefs = []
+  const warnings = checkFiles(paths, assetRefs)
+  await checkAssets(assetRefs, knownId ?? null, warnings)
   reportWarnings(warnings)
   const hashes = hashFiles(paths)
   const capabilities = values.cap === undefined ? undefined : values.cap.split(',').map((cap) => cap.trim()).filter(Boolean)
@@ -492,7 +518,9 @@ async function main() {
       if (!args[0]) fail('check needs a file or directory')
       const source = resolve(args[0])
       if (!existsSync(source)) fail(`${args[0]} does not exist`)
-      const warnings = checkFiles(collectFiles(source))
+      const assetRefs = []
+      const warnings = checkFiles(collectFiles(source), assetRefs)
+      await checkAssets(assetRefs, undefined, warnings)
       print({ warnings }, json, (d) => d.warnings.join('\n') || 'no problems found')
       return process.exit(warnings.length ? 1 : 0)
     }
