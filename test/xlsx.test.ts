@@ -1105,22 +1105,29 @@ describe('conditional formats beyond comparisons and scales', () => {
 describe('numbers too wide for their column (matrix round)', () => {
   test('X-2: in a browser, dates of one format in one column all shrink or all show #, whatever their digits', { skip: !chromiumPath && 'no Chromium found' }, async () => {
     const styles = `<styleSheet ${NS}><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs count="2"><xf/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>`
-    // 2026-01-01, 2026-01-11, 2026-01-15, 2026-08-28, 2026-12-31 …, in a column of the default width (as openpyxl
-    // leaves it): the 1s are narrow in a font with proportional digits.
+    // 2026-01-01, 2026-01-11, 2026-01-15, 2026-08-28, 2026-12-31 …: the 1s are narrow in a font with proportional digits.
     const serials = [46023, 46033, 46037, 46262, 46387, 46100, 46200, 46300]
     // Column B holds numbers that fit however narrow their 1s are: they keep their size.
     const fits = [1, 31000, 11111]
-    const body = sheet(serials.map((v, at) => `<row r="${at + 1}"><c r="A${at + 1}" s="1"><v>${v}</v></c>${at < fits.length ? `<c r="B${at + 1}"><v>${fits[at]}</v></c>` : ''}</row>`).join(''))
+    // The default width (as openpyxl leaves it) shows #; a column 10 wide shrinks the dates, and each date's own
+    // measure differs a little by font (Linux and macOS draw these widths apart): Georgia stands in for that here.
+    const cases: { width?: number; font?: string }[] = [{}, { width: 10 }, { width: 10, font: 'Georgia' }]
     const browser = await chromium.launch({ executablePath: chromiumPath })
     try {
       const page = await browser.newPage()
-      await page.setContent(renderXlsxPage(book([{ name: 's', body }], { styles }), 'b.xlsx', 'b'))
-      const look = (column: number) =>
-        page.evaluate((column) => [...document.querySelectorAll('tbody tr')].map((tr) => tr.children[column] as HTMLElement).filter((td) => td?.classList.contains('n')).map((td) => (/^#+$/.test(td.textContent ?? '') ? '#' : td.style.fontSize || 'as set')), column)
-      const shown = await look(1)
-      assert.equal(shown.length, serials.length)
-      assert.deepEqual(await look(2), fits.map(() => 'as set'))
-      assert.equal(new Set(shown).size, 1, shown.join(' | '))
+      for (const { width, font } of cases) {
+        const cols = width ? `<cols><col min="1" max="1" width="${width}" customWidth="1"/></cols>` : ''
+        const body = sheet(serials.map((v, at) => `<row r="${at + 1}"><c r="A${at + 1}" s="1"><v>${v}</v></c>${at < fits.length ? `<c r="B${at + 1}"><v>${fits[at]}</v></c>` : ''}</row>`).join(''), cols)
+        const html = renderXlsxPage(book([{ name: 's', body }], { styles }), 'b.xlsx', 'b')
+        await page.setContent(font ? html.replace('</head>', `<style>.xl-grid{font-family:'${font}'!important}</style></head>`) : html)
+        const look = (column: number) =>
+          page.evaluate((column) => [...document.querySelectorAll('tbody tr')].map((tr) => tr.children[column] as HTMLElement).filter((td) => td?.classList.contains('n')).map((td) => (/^#+$/.test(td.textContent ?? '') ? '#' : td.style.fontSize || 'as set')), column)
+        const shown = await look(1)
+        const what = `width ${width ?? 'default'}, font ${font ?? 'default'}`
+        assert.equal(shown.length, serials.length, what)
+        assert.deepEqual(await look(2), fits.map(() => 'as set'), what)
+        assert.equal(new Set(shown).size, 1, `${what}: ${shown.join(' | ')}`)
+      }
     } finally {
       await browser.close()
     }

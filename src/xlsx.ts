@@ -3488,7 +3488,8 @@ a.xl-link{color:inherit;cursor:pointer}
 
 /**
  * A number too wide for its column shrinks a little or shows #, judged as Excel judges it: every digit as wide as
- * 0 (Office fonts draw digits one width), so values of one format in one column all fit or all do not.
+ * 0 (Office fonts draw digits one width), so values of one format in one column all fit or all do not; those that
+ * shrink all take the smallest shrink of their column and format, so the column keeps one size whatever the font measures.
  * Tabs live in the hash (#sheet-2) so the viewer's place report keeps the reader's sheet; the viewer
  * accepts only letters, digits, '-' and '_' there. Panels use other ids, so no hash scrolls the page.
  */
@@ -3497,9 +3498,9 @@ function fit(root){if(root.dataset.fitted)return;root.dataset.fitted='1';const w
 for(const td of root.querySelectorAll('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4,w=s.offsetWidth;if(room>0&&w>room)writes.push([s,(parseFloat(getComputedStyle(s).fontSize)*room/w).toFixed(2)+'px'])}
 const ctx=document.createElement('canvas').getContext('2d'),hash={};
 let last='';const use=f=>{if(f!==last){ctx.font=f;last=f}};
-const looks={};const lookOf=td=>{const st=td.getAttribute('style')||'',k=td.className+(/font/.test(st)?st:'');let l=looks[k];if(!l){const cs=getComputedStyle(td);l=looks[k]={cs,font:cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily,px:parseFloat(cs.fontSize),pad:parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight)}}return l};
-for(const td of root.querySelectorAll('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const lk=lookOf(td);if(!over&&t.length*lk.px*0.7+lk.pad<cw)continue;const cs=lk.cs,font=lk.font;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+lk.pad}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){writes.push([td,(parseFloat(cs.fontSize)*k*0.97).toFixed(2)+'px'])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
-for(const [el,size,text] of writes){if(size)el.style.fontSize=size;else{el.title=el.textContent;el.textContent=text}}}
+const looks={},groups={};const lookOf=td=>{const st=td.getAttribute('style')||'',k=td.className+(/font/.test(st)?st:'');let l=looks[k];if(!l){const cs=getComputedStyle(td);l=looks[k]={cs,font:cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily,px:parseFloat(cs.fontSize),pad:parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight)}}return l};
+for(const td of root.querySelectorAll('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const lk=lookOf(td);if(!over&&t.length*lk.px*0.7+lk.pad<cw)continue;const cs=lk.cs,font=lk.font;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+lk.pad}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){const g=td.offsetLeft+'|'+((/\\bx\\d+\\b/.exec(td.className)||[''])[0])+'|'+font;groups[g]=Math.min(groups[g]??1,k);writes.push([td,g,null,parseFloat(cs.fontSize)])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
+for(const w of writes){const el=w[0];if(w.length===4){el.style.fontSize=(w[3]*groups[w[1]]*0.97).toFixed(2)+'px'}else if(w[1])el.style.fontSize=w[1];else{el.title=el.textContent;el.textContent=w[2]}}}
 function show(n){if(!(n>=1&&n<=sheets.length))n=first;sheets.forEach((s,i)=>{s.hidden=i!==n-1});tabs.forEach((t,i)=>{t.setAttribute('aria-selected',String(i===n-1));t.tabIndex=i===n-1?0:-1});const tab=tabs[n-1];if(tab){const bar=tab.parentElement;const l=tab.offsetLeft-bar.offsetLeft;if(l<bar.scrollLeft||l+tab.offsetWidth>bar.scrollLeft+bar.clientWidth)bar.scrollLeft=l-16}fit(sheets[n-1])}
 function fromHash(){const m=/^#sheet-(\\d+)$/.exec(location.hash);show(m?Number(m[1]):first)}
 addEventListener('hashchange',fromHash);fromHash()})()`
