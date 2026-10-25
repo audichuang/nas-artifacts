@@ -28,7 +28,9 @@ const CONTENT_TYPES: Record<string, string> = {
   '.wav': 'audio/wav',
   '.pdf': 'application/pdf',
   '.wasm': 'application/wasm',
-  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 }
 
 export function contentTypeFor(path: string): string {
@@ -62,9 +64,22 @@ export function isPptxPath(path: string): boolean {
   return extname(path).toLowerCase() === '.pptx'
 }
 
-/** A file the content origin renders into a page: HTML as is, Markdown and PowerPoint drawn on the server. */
+export function isDocxPath(path: string): boolean {
+  return extname(path).toLowerCase() === '.docx'
+}
+
+export function isXlsxPath(path: string): boolean {
+  return extname(path).toLowerCase() === '.xlsx'
+}
+
+/** PowerPoint, Word and Excel files: published as they are, drawn on the server. */
+export function isOfficePath(path: string): boolean {
+  return isPptxPath(path) || isDocxPath(path) || isXlsxPath(path)
+}
+
+/** A file the content origin renders into a page: HTML as is, Markdown and Office files drawn on the server. */
 export function isPagePath(path: string): boolean {
-  return isHtmlPath(path) || isMarkdownPath(path) || isPptxPath(path)
+  return isHtmlPath(path) || isMarkdownPath(path) || isOfficePath(path)
 }
 
 export function isHtmlPath(path: string): boolean {

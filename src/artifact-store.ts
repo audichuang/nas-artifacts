@@ -3,8 +3,10 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { BlobStore } from './blob-store.ts'
-import { contentTypeFor, isMarkdownPath, isPagePath, isPptxPath, normalizeFilePath } from './file-paths.ts'
+import { docxText } from './docx.ts'
+import { contentTypeFor, isDocxPath, isMarkdownPath, isOfficePath, isPagePath, isPptxPath, normalizeFilePath } from './file-paths.ts'
 import { pptxText } from './pptx.ts'
+import { xlsxText } from './xlsx.ts'
 import { diffLines, hunks, type ShownLine } from './text-diff.ts'
 
 export const CAPABILITIES = ['db', 'uploads'] as const
@@ -221,10 +223,10 @@ const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"'
 const SEARCH_CHARS = 500_000
 
 /** The words a reader sees: markup, scripts, styles and link targets dropped, entities decoded. */
-/** A PowerPoint file that cannot be read is still published; it is just not searchable by its text. */
-function deckText(content: Buffer): string {
+/** An Office file that cannot be read is still published; it is just not searchable by its text. */
+function officeText(path: string, content: Buffer): string {
   try {
-    return pptxText(content).replace(/\s+/g, ' ')
+    return (isPptxPath(path) ? pptxText(content) : isDocxPath(path) ? docxText(content) : xlsxText(content)).replace(/\s+/g, ' ')
   } catch {
     return ''
   }
@@ -412,7 +414,7 @@ export class ArtifactStore {
     for (const path of pages) {
       if (text.length >= SEARCH_CHARS) break
       const content = this.blobs.read(row.files[path].sha256)
-      text += ` ${isPptxPath(path) ? deckText(content) : pageText(path, content.toString('utf8'))}`
+      text += ` ${isOfficePath(path) ? officeText(path, content) : pageText(path, content.toString('utf8'))}`
     }
     this.db
       .prepare('INSERT INTO search_text (artifact_id, version, text) VALUES (?, ?, ?) ON CONFLICT(artifact_id) DO UPDATE SET version = excluded.version, text = excluded.text')
@@ -480,8 +482,8 @@ export class ArtifactStore {
         delete files[path]
         continue
       }
-      // A PowerPoint file carries all its pictures, so it may fill a whole publish.
-      const limit = isPptxPath(path) ? LIMITS.publishBytes : LIMITS.fileBytes
+      // An Office file carries all its pictures, so it may fill a whole publish.
+      const limit = isOfficePath(path) ? LIMITS.publishBytes : LIMITS.fileBytes
       if (file.content.byteLength > limit) {
         throw new ArtifactError(413, 'file_too_large', `${path} is larger than ${limit} bytes.`)
       }

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { crc32 } from 'node:zlib'
 import { after, before, describe, test } from 'node:test'
 import pptxgen from 'pptxgenjs'
 import { createAppServer } from '../src/app-server.ts'
@@ -11,6 +10,7 @@ import { createContentServer } from '../src/content-server.ts'
 import { readPptx } from '../src/pptx.ts'
 import { parseXml } from '../src/xml.ts'
 import { ZipReader } from '../src/zip.ts'
+import { zip } from './helpers/zip.ts'
 
 const PptxGenJS = ((pptxgen as unknown as { default?: typeof pptxgen.default }).default ?? pptxgen) as typeof pptxgen.default
 
@@ -51,41 +51,6 @@ async function sampleDeck(): Promise<Buffer> {
   slide = pptx.addSlide()
   slide.addText('回第一頁', { x: 1, y: 1, w: 5, h: 1, hyperlink: { slide: 1 } })
   return (await pptx.write({ outputType: 'nodebuffer' })) as Buffer
-}
-
-/** A stored (uncompressed) zip, for packages no tool would write. */
-function zip(files: Record<string, string>): Buffer {
-  const locals: Buffer[] = []
-  const central: Buffer[] = []
-  let offset = 0
-  for (const [name, text] of Object.entries(files)) {
-    const data = Buffer.from(text)
-    const nameBytes = Buffer.from(name)
-    const local = Buffer.alloc(30)
-    local.writeUInt32LE(0x04034b50, 0)
-    local.writeUInt32LE(crc32(data), 14)
-    local.writeUInt32LE(data.length, 18)
-    local.writeUInt32LE(data.length, 22)
-    local.writeUInt16LE(nameBytes.length, 26)
-    const entry = Buffer.alloc(46)
-    entry.writeUInt32LE(0x02014b50, 0)
-    entry.writeUInt32LE(crc32(data), 16)
-    entry.writeUInt32LE(data.length, 20)
-    entry.writeUInt32LE(data.length, 24)
-    entry.writeUInt16LE(nameBytes.length, 28)
-    entry.writeUInt32LE(offset, 42)
-    locals.push(local, nameBytes, data)
-    central.push(entry, nameBytes)
-    offset += 30 + nameBytes.length + data.length
-  }
-  const size = central.reduce((sum, part) => sum + part.length, 0)
-  const end = Buffer.alloc(22)
-  end.writeUInt32LE(0x06054b50, 0)
-  end.writeUInt16LE(Object.keys(files).length, 8)
-  end.writeUInt16LE(Object.keys(files).length, 10)
-  end.writeUInt32LE(size, 12)
-  end.writeUInt32LE(offset, 16)
-  return Buffer.concat([...locals, ...central, end])
 }
 
 const NS = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
@@ -206,7 +171,7 @@ describe('serving PowerPoint files', () => {
     assert.match(html, /--aspect:1\.333333/)
     // Picture URLs stay relative, inside the version's own path, and cannot close CSS url('…').
     const src = /<img src="([^"]+)"/.exec(html)![1]
-    assert.match(src, /^~pptx\/%E5%AD%A3%E5%A0%B1%20%28final%29\.pptx\/ppt\/media\//)
+    assert.match(src, /^~office\/%E5%AD%A3%E5%A0%B1%20%28final%29\.pptx\/ppt\/media\//)
     const picture = await content.request(`http://content.test/a/${id}/v/1/${src}`)
     assert.equal(picture.status, 200)
     assert.equal(picture.headers.get('content-type'), 'image/png')
@@ -216,7 +181,7 @@ describe('serving PowerPoint files', () => {
 
   test('the picture route serves only pictures inside a .pptx of that version', async () => {
     const { id } = store.publish({ title: 'D', files: { 'deck.pptx': { content: bytes }, 'a.txt': { content: Buffer.from('x') } } })
-    for (const path of ['~pptx/deck.pptx/ppt/presentation.xml', '~pptx/deck.pptx/ppt/slides/slide1.xml', '~pptx/a.txt/ppt/media/x.png', '~pptx/other.pptx/ppt/media/image-2-1.png', '~pptx/deck.pptx/ppt/media/missing.png']) {
+    for (const path of ['~office/deck.pptx/ppt/presentation.xml', '~office/deck.pptx/ppt/slides/slide1.xml', '~office/a.txt/ppt/media/x.png', '~office/other.pptx/ppt/media/image-2-1.png', '~office/deck.pptx/ppt/media/missing.png']) {
       assert.equal((await content.request(`http://content.test/a/${id}/v/1/${path}`)).status, 404, path)
     }
   })

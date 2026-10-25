@@ -1,6 +1,6 @@
 import { posix } from 'node:path'
 import { escapeHtml } from './content-render.ts'
-import { contentTypeFor, isServableType } from './file-paths.ts'
+import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { deckPage, type DeckAssets } from './slides.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, type XmlNode } from './xml.ts'
 import { ZipReader } from './zip.ts'
@@ -8,28 +8,10 @@ import { ZipReader } from './zip.ts'
 /**
  * A PowerPoint file published as is (`*.pptx`), drawn on the server as slides the deck runtime pages
  * through: every shape is absolutely placed in slide-relative units, text stays text. Pictures load
- * from the file itself through `~pptx/<file>/<part>` under the version's own path, so they stay inside
- * the artifact's CSP scope. What it does not draw (charts it cannot read, OLE, video) shows as a
+ * from the file itself through the Office media route (office.ts), inside the artifact's CSP scope. What it does not draw (charts it cannot read, OLE, video) shows as a
  * labelled box; the original file is always one download away.
  */
-export const PPTX_MEDIA_SEGMENT = '~pptx'
-
 const EMU_PER_PT = 12700
-
-const DRAWABLE_MEDIA = /^ppt\/(media|embeddings)\/[^/]+$/
-
-/** A picture inside a deck, for the media route: only parts under ppt/media that a browser can show. */
-export function pptxMedia(data: Buffer, part: string): { bytes: Buffer; type: string } | null {
-  if (!DRAWABLE_MEDIA.test(part)) return null
-  const type = contentTypeFor(part)
-  if (!isServableType(type) || type.startsWith('text/')) return null
-  try {
-    const bytes = new ZipReader(data).read(part)
-    return bytes ? { bytes, type } : null
-  } catch {
-    return null
-  }
-}
 
 // ---------------------------------------------------------------------------------------------
 // Package parts and relationships
@@ -277,9 +259,7 @@ function blipUrl(blipFill: XmlNode, ctx: Ctx): string | null {
   const svg = blip ? findDeep(blip, 'svgBlip') : null
   for (const id of [relAttr(svg, 'embed'), relAttr(blip, 'embed')]) {
     const rel = ctx.pkg.rel(ctx.part, id)
-    if (!rel || rel.external || !DRAWABLE_MEDIA.test(rel.target)) continue
-    const type = contentTypeFor(rel.target)
-    if (isServableType(type) && !type.startsWith('text/') && ctx.pkg.zip.has(rel.target)) return ctx.media(rel.target)
+    if (rel && !rel.external && isDrawablePart(rel.target) && ctx.pkg.zip.has(rel.target)) return ctx.media(rel.target)
   }
   return null
 }
@@ -297,9 +277,6 @@ const round = (value: number, digits = 3) => {
   const factor = 10 ** digits
   return Math.round(value * factor) / factor
 }
-
-/** A URL path segment that is also safe inside CSS url('…') and an HTML attribute. */
-const encodeSegment = (segment: string) => encodeURIComponent(segment).replace(/['()*!]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
 
 const pt = (value: number) => `calc(${round(value)}*var(--pt))`
 const emuPt = (emu: number) => pt(emu / EMU_PER_PT)
@@ -1542,7 +1519,7 @@ export function readPptx(data: Buffer, mediaBase: string): PptxDeck {
     }
     return master
   }
-  const media = (part: string) => `${mediaBase}${part.split('/').map(encodeSegment).join('/')}`
+  const media = (part: string) => officeMediaUrl(mediaBase, part)
   const docTitle = pkg.xml('docProps/core.xml')
   const title = docTitle ? (findDeep(docTitle, 'title')?.text.trim() ?? '') : ''
 
@@ -1610,20 +1587,19 @@ export function pptxText(data: Buffer): string {
 }
 
 /**
- * The deck page for a PowerPoint file. Pictures are addressed relative to the page, under
- * `~pptx/<file name>/`, which resolves inside the version's own path. A file that cannot be read
+ * The deck page for a PowerPoint file. Pictures are addressed relative to the page through the
+ * Office media route, which resolves inside the version's own path. A file that cannot be read
  * still gets a page: it says why, and the throw lands in the viewer's error log.
  */
 export function renderPptxDeck(data: Buffer, fileName: string, title: string, assets: DeckAssets): string {
-  const mediaBase = `${PPTX_MEDIA_SEGMENT}/${encodeSegment(fileName)}/`
+  const mediaBase = officeMediaBase(fileName)
   let deck: PptxDeck
   try {
     deck = readPptx(data, mediaBase)
   } catch (error) {
     const message = `PowerPoint: ${error instanceof Error ? error.message : String(error)}`
-    const thrown = JSON.stringify(message).replace(/</g, '\\u003c')
     const slide = `<section class="slide layout-pptx" id="slide-1" data-number="1" aria-label="第 1 頁"><div class="pp-canvas"><div class="pp-missing">${escapeHtml(message)}</div></div></section>`
-    return deckPage(slide, title, assets, `<script>throw new Error(${thrown})</script>`)
+    return deckPage(slide, title, assets, failureScript(message))
   }
   const widthPt = round(deck.width / EMU_PER_PT, 3)
   const heightPt = round(deck.height / EMU_PER_PT, 3)

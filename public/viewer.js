@@ -596,8 +596,15 @@ const canEdit = () => isMarkdownDeck() && artifact.capabilities.length === 0
 const exportLink = document.getElementById('export-pptx')
 function syncEditButton() {
   editButton.hidden = !canEdit()
-  exportLink.hidden = !isDeck()
-  exportLink.href = `/api/artifacts/${id}/export.pptx?v=${version}`
+  // Decks export to PowerPoint; a Word or Excel file downloads as it was published.
+  const entry = currentEntry()
+  const office = place.path === null && /\.(docx|xlsx)$/i.test(entry)
+  exportLink.hidden = !isDeck() && !office
+  exportLink.textContent = office ? entry.split('.').pop().toUpperCase() : 'PPTX'
+  exportLink.title = office ? '下載原始檔' : '下載成 PowerPoint(.pptx)'
+  exportLink.href = office
+    ? `/api/artifacts/${id}/files/${entry.split('/').map(encodeURIComponent).join('/')}?v=${version}`
+    : `/api/artifacts/${id}/export.pptx?v=${version}`
 }
 
 function setEditorStatus(text, isDirty = dirty) {
