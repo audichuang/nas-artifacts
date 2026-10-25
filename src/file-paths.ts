@@ -16,6 +16,8 @@ const CONTENT_TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.jfif': 'image/jpeg',
   '.avif': 'image/avif',
   '.ico': 'image/x-icon',
   '.woff': 'font/woff',

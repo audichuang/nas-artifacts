@@ -7,6 +7,7 @@ import { after, before, describe, test } from 'node:test'
 import { serve, type ServerType } from '@hono/node-server'
 import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
+import { isDrawablePart } from '../src/office.ts'
 import { zip } from './helpers/zip.ts'
 
 const CLI = new URL('../skill/nas-artifacts/scripts/artifact.mjs', import.meta.url).pathname
@@ -98,5 +99,12 @@ describe('the CLI with Office files', () => {
     const out = join(dir, 'out', 'r.docx')
     assert.equal((await cli(['read', id, '--out', out])).code, 0)
     assert.ok(readFileSync(out).equals(bytes))
+  })
+})
+
+describe('pictures inside Office files', () => {
+  test('BMP and JFIF pictures are served, and pictures kept outside a media folder too; XML never is', () => {
+    for (const part of ['ppt/media/a.bmp', 'word/media/b.jfif', 'xl/media/c.png', 'ppt/images/d.jpeg', 'word/drawings/e.gif', 'ppt/slides/media/f.png']) assert.equal(isDrawablePart(part), true, part)
+    for (const part of ['ppt/slides/slide1.xml', 'word/document.xml', 'xl/media/x.svgz', 'docProps/thumbnail.jpeg', 'ppt/media/a.txt', 'customXml/a.png']) assert.equal(isDrawablePart(part), false, part)
   })
 })

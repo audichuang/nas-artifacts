@@ -8,8 +8,8 @@ import { ZipReader } from './zip.ts'
  */
 export const OFFICE_MEDIA_SEGMENT = '~office'
 
-/** Parts a page may load from inside an Office file: pictures and media, never XML. */
-const MEDIA_PART = /^(ppt|word|xl)\/(media|embeddings)\/[^/]+$/
+/** Parts a page may load from inside an Office file: pictures and media anywhere in the document's own folder, never XML. */
+const MEDIA_PART = /^(ppt|word|xl)\/(?:[^/]+\/)*[^/]+$/
 
 /** A URL path segment that is also safe inside CSS url('…') and an HTML attribute. */
 export const encodeSegment = (segment: string): string =>
