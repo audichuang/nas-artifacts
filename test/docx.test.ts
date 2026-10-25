@@ -367,6 +367,29 @@ describe('crafted or very large Word files (stress round 1)', () => {
       ...parts
     })
 
+  test('a page break inside a list item whose numbering comes from its style continues the item, unnumbered', () => {
+    const xml = `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="5"><w:abstractNumId w:val="0"/></w:num></w:numbering>`
+    const styles = `<w:styles ${W}><w:style w:type="paragraph" w:styleId="ListNumber"><w:name w:val="List Number"/><w:pPr><w:numPr><w:numId w:val="5"/></w:numPr></w:pPr></w:style></w:styles>`
+    const item = (body: string) => `<w:p><w:pPr><w:pStyle w:val="ListNumber"/></w:pPr>${body}</w:p>`
+    const body = item(r('第一項') + '<w:r><w:br w:type="page"/></w:r>' + r('第一項續')) + item(r('第二項'))
+    const doc = readDocx(docWith(body, { 'word/numbering.xml': xml, 'word/styles.xml': styles }, [['rNum', 'numbering', 'numbering.xml'], ['rSt', 'styles', 'styles.xml']]), '')
+    const labels = [...doc.html.matchAll(/>(\d+)\.</g)].map((m) => m[1])
+    assert.deepEqual(labels, ['1', '2'])
+    assert.match(doc.html, /第一項續[\s\S]*>2\.<[\s\S]*第二項/)
+  })
+
+  test('a tracked deleted page break does not cut the page; only the live one does', () => {
+    const body = p(r('甲甲') + '<w:del w:id="1" w:author="a"><w:r><w:br w:type="page"/></w:r></w:del>' + r('乙乙') + '<w:r><w:br w:type="page"/></w:r>' + r('丙丙'))
+    const html = readDocx(docWith(body), '').html
+    // 甲 and 乙 stay in one paragraph on the first page; the live break starts the page with 丙.
+    assert.match(html, /甲甲<\/span><span[^>]*>乙乙/)
+    assert.match(html, /乙乙[\s\S]*class="dx-pgbr"[\s\S]*丙丙/)
+
+    // Only deleted text after a live break: nothing on the next page, so no empty continuation.
+    const trailing = readDocx(docWith(p(r('丁丁') + '<w:r><w:br w:type="page"/></w:r><w:del w:id="2" w:author="a"><w:r><w:delText>刪掉的</w:delText></w:r></w:del>') + p(r('戊戊'))), '').html
+    assert.doesNotMatch(trailing, /<div class="dx-p[^"]*"><br><\/div>/)
+  })
+
   test('F3: a huge list start stays a short label, not megabytes of letters', () => {
     const lvl = (fmt: string) => `<w:lvl w:ilvl="0"><w:start w:val="300000000"/><w:numFmt w:val="${fmt}"/><w:lvlText w:val="%1."/></w:lvl>`
     const xml = `<w:numbering ${W}><w:abstractNum w:abstractNumId="0">${lvl('upperLetter')}</w:abstractNum><w:abstractNum w:abstractNumId="1">${lvl('lowerLetter')}</w:abstractNum>
@@ -661,6 +684,12 @@ describe('any Word file draws faithfully (stress round 2)', () => {
     const html = readDocx(docWith(body, mediaParts, media), '').html
     assert.match(html, /<div class="dx-p [^"]*"><span class="dx-float" style="float:right;margin:12pt 9pt 0pt 9pt"><img[^>]*><\/span><span[^>]*>舊檔右圖。</)
     assert.match(html, /<div class="dx-p [^"]*"><span class="dx-float" style="float:left;margin:0pt 9pt 0pt 9pt"><img[^>]*><\/span><span[^>]*>舊檔左圖。</)
+  })
+
+  test('a VML picture wrapped above and below keeps its left, centre or right alignment', () => {
+    const vml = (align: string) => `<w:r><w:pict><v:shape style="position:absolute;margin-left:0;margin-top:0;mso-position-horizontal:${align};width:100pt;height:50pt"><v:imagedata r:id="rBg"/><w10:wrap xmlns:w10="urn:schemas-microsoft-com:office:word" type="topAndBottom"/></v:shape></w:pict></w:r>`
+    const html = readDocx(docWith(p(r('左') + vml('left')) + p(r('中') + vml('center')) + p(r('右') + vml('right')), mediaParts, media), '').html
+    assert.deepEqual([...html.matchAll(/class="dx-figure" style="text-align:(\w+)/g)].map((m) => m[1]), ['left', 'center', 'right'])
   })
 })
 

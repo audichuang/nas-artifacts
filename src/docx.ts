@@ -1806,7 +1806,10 @@ class DocxRenderer {
             emit(this.renderParagraph({ ...current, node: split[0] }, scope, pieces ? 0 : top, 0, groupTop, false, at === 0 && !pieces))
             nextPage()
             pieces++
-            rest = this.paraInfo(split[1], scope)
+            // The rest continues the same list item: the item's indent, but no label of its own (wherever
+            // the numbering comes from, the paragraph or its style).
+            const continued = this.paraInfo(split[1], scope)
+            rest = continued.num ? { ...continued, num: undefined, props: { ...continued.props, firstLine: undefined, hanging: undefined } } : continued
             current = rest
             pageBreak = this.pageBreak(current, true) === 'end' ? 'end' : null
           }
@@ -2466,7 +2469,7 @@ class DocxRenderer {
         }
         if (name === 'drawing' || name === 'pict' || name === 'object' || name === 'sym' || name === 'tab') seen = true
         else if (name === 't') seen ||= node.text.trim() !== ''
-        else if (!['pPr', 'rPr', 'del', 'moveFrom', 'instrText', 'delText'].includes(name)) walk(node.children)
+        else if (!NOT_ON_PAGE.has(name)) walk(node.children)
       }
     }
     walk(info.node.children)
@@ -2772,10 +2775,12 @@ class DocxRenderer {
       // Wrapped like a DrawingML anchor: floated to its side at the paragraph's top, or on a line of its own.
       const alignH = style['mso-position-horizontal']
       const left = vmlLength(style['margin-left']) + vmlLength(style.left)
-      const side =
-        wrapType === 'topAndBottom' || alignH === 'center' ? '' : alignH === 'right' || alignH === 'outside' || (alignH !== 'left' && alignH !== 'inside' && left + w / 2 > scope.width / 2) ? 'right' : 'left'
+      const toRight = alignH === 'right' || alignH === 'outside' || (alignH !== 'left' && alignH !== 'inside' && alignH !== 'center' && left + w / 2 > scope.width / 2)
+      const side = wrapType === 'topAndBottom' || alignH === 'center' ? '' : toRight ? 'right' : 'left'
+      // Above and below the text: on a line of its own, at its side as DrawingML's top-and-bottom wrap is.
+      const align = alignH === 'center' ? 'center' : toRight ? 'right' : 'left'
       const down = ['text', 'paragraph'].includes(style['mso-position-vertical-relative'] ?? 'text') && !['top', 'center', 'bottom'].includes(style['mso-position-vertical'] ?? '') ? clamp(vmlLength(style['margin-top']) + vmlLength(style.top), 0, 1000) : 0
-      const open = side ? `<span class="dx-float" style="float:${side};margin:${pt(down)} 9pt 0pt 9pt">` : `<span class="dx-figure" style="text-align:center${down > 0 ? `;margin-top:${pt(down)}` : ''}">`
+      const open = side ? `<span class="dx-float" style="float:${side};margin:${pt(down)} 9pt 0pt 9pt">` : `<span class="dx-figure" style="text-align:${align}${down > 0 ? `;margin-top:${pt(down)}` : ''}">`
       out.floats.push(`${open}${html}</span>`)
       out.visual = true
       return ''
@@ -3240,7 +3245,8 @@ function splitAtPageBreak(p: XmlNode): [XmlNode, XmlNode] | null {
       if (local(item.name) === 'br' && attr(item, 'type') === 'page') {
         return [{ ...node, children: node.children.slice(0, i + 1) }, { ...node, children: [...props, ...node.children.slice(i + 1)] }]
       }
-      if (!PROPS.has(local(item.name)) && item.children.length) {
+      // The same parts pageBreak() looks past: a deleted or moved-away break is not on the page.
+      if (!NOT_ON_PAGE.has(local(item.name)) && item.children.length) {
         const inner = split(item, depth + 1)
         if (inner) return [{ ...node, children: [...node.children.slice(0, i), inner[0]] }, { ...node, children: [...props, inner[1], ...node.children.slice(i + 1)] }]
       }
@@ -3252,12 +3258,15 @@ function splitAtPageBreak(p: XmlNode): [XmlNode, XmlNode] | null {
   const [first, rest] = pieces
   // Nothing after the break: the paragraph simply ends the page.
   const content = (node: XmlNode): boolean =>
-    node.children.some((c) => !PROPS.has(local(c.name)) && (['drawing', 'pict', 'object', 'sym', 'tab', 'br'].includes(local(c.name)) || (local(c.name) === 't' && c.text !== '') || content(c)))
+    node.children.some((c) => !NOT_ON_PAGE.has(local(c.name)) && (['drawing', 'pict', 'object', 'sym', 'tab', 'br'].includes(local(c.name)) || (local(c.name) === 't' && c.text !== '') || content(c)))
   if (!content(rest)) return null
   const pPr = child(rest, 'pPr')
-  const restPPr = pPr ? { ...pPr, children: pPr.children.filter((c) => !['numPr', 'pageBreakBefore'].includes(local(c.name))) } : null
+  const restPPr = pPr ? { ...pPr, children: pPr.children.filter((c) => local(c.name) !== 'pageBreakBefore') } : null
   return [first, { ...rest, children: rest.children.map((c) => (c === pPr && restPPr ? restPPr : c)) }]
 }
+
+/** Parts of a paragraph that are not on the page: properties, tracked deletions and moves, field codes. */
+const NOT_ON_PAGE = new Set(['pPr', 'rPr', 'del', 'moveFrom', 'instrText', 'delText'])
 
 /** The searchable text of a Word file: body, header, footer, notes and text boxes. */
 export function docxText(data: Buffer): string {
