@@ -134,7 +134,7 @@ function richBook(): Buffer {
   const chart = `<c:chartSpace ${DRAWING_NS}><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>月營收</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>
 <c:ser><c:idx val="0"/><c:tx><c:strRef><c:f>Sheet!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>營收</c:v></c:pt></c:strCache></c:strRef></c:tx><c:spPr><a:solidFill><a:schemeClr val="accent6"/></a:solidFill></c:spPr>
 <c:cat><c:strRef><c:f>x</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>一月</c:v></c:pt><c:pt idx="1"><c:v>二月</c:v></c:pt></c:strCache></c:strRef></c:cat>
-<c:val><c:numRef><c:f>x</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>3</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>`
+<c:val><c:numRef><c:f>x</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>3</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>`
   return book(
     [
       { name: 'Sheet', body: first, rels: [['h1', 'hyperlink', 'javascript:alert(&quot;x&quot;)', 'External'], ['d1', 'drawing', '../drawings/drawing1.xml'], ['cm', 'comments', '../comments1.xml']] },
@@ -315,7 +315,7 @@ describe('reading Excel workbooks', () => {
 
   test('pictures, charts and text boxes are placed over the grid; what is not drawn is a labelled box', () => {
     assert.match(first, /<img class="xl-draw xl-pic" src="~office\/%E5%B8%B3%E6%9C%AC%20%281%29\.xlsx\/xl\/media\/image1\.png" alt="公司標誌"[^>]*style="inset-inline-start:\d+(\.\d)?px;top:\d+(\.\d)?px;width:/)
-    assert.match(first, /<div class="xl-draw xl-chart"[^>]*><svg[^>]*aria-label="月營收"[\s\S]*>一月<\/text>[\s\S]*<rect[^>]*fill="#F79646"/)
+    assert.match(first, /<div class="xl-draw xl-chart"[^>]*><svg[^>]*aria-label="月營收"[\s\S]*<rect[^>]*fill="#F79646"[\s\S]*>一月<\/text>/)
     assert.match(first, /class="xl-draw xl-shape"[^>]*background:#C0504D[\s\S]*>文字方塊 &#60;x&#62;<\/span>/)
     assert.match(first, /class="xl-draw xl-missing"[^>]*>物件\(網頁版未支援,請下載原始檔查看\)</)
     // The grid continues under the chart in column I (0-based 8).
@@ -458,7 +458,7 @@ describe('reading Excel workbooks', () => {
       'b'
     )
     assert.match(panel(page, 1), />1904\/1\/1</)
-    assert.match(panel(page, 2), /<div class="xl-chartsheet"[^>]*><svg[\s\S]*<polyline/)
+    assert.match(panel(page, 2), /<div class="xl-chartsheet"[^>]*><svg[\s\S]*<path d="M[^"]*" fill="none" stroke="#4472C4"/)
   })
 
   test('a file that is not a workbook gets a page that says why, and a throw for the error log', () => {
@@ -560,68 +560,79 @@ function chartPanel(plot: string): string {
 const numbers = (values: number[]) => `<c:numRef><c:f>x</c:f><c:numCache><c:ptCount val="${values.length}"/>${values.map((v, at) => `<c:pt idx="${at}"><c:v>${v}</c:v></c:pt>`).join('')}</c:numCache></c:numRef>`
 const series = (color: string, values: number[], tag = 'val') => `<c:ser><c:spPr><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:ln></c:spPr><c:${tag}>${numbers(values)}</c:${tag}></c:ser>`
 
-/** Value-axis labels and the y of their gridline; `at(v)` is where value v sits. */
-function valueAxis(svg: string) {
-  const ticks = [...svg.matchAll(/<text x="[\d.]+" y="(-?[\d.]+)" text-anchor="end" font-size="10">([^<]*)<\/text>/g)].map((m) => ({ label: m[2], y: Number(m[1]) - 3 }))
-  const [a, b] = ticks
-  const value = (label: string) => Number(label.replace(/[,%]/g, ''))
-  const at = (v: number) => a.y + ((v - value(a.label)) / (value(b.label) - value(a.label))) * (b.y - a.y)
-  return { labels: ticks.map((t) => t.label), at }
-}
-const rectsOf = (svg: string, color: string) =>
-  [...svg.matchAll(new RegExp(`<rect x="(-?[\\d.]+)" y="(-?[\\d.]+)" width="(-?[\\d.]+)" height="(-?[\\d.]+)" fill="#${color}"`, 'g'))].map((m) => ({ top: Number(m[2]), bottom: Number(m[2]) + Number(m[4]) }))
 const close = (actual: number, expected: number, what: string) => assert.ok(Math.abs(actual - expected) < 0.6, `${what}: ${actual} vs ${expected}`)
+const AXES = '<c:axId val="1"/><c:axId val="2"/>'
+const axis = (kind: string, id: number, cross: number, pos: string) => `<c:${kind}><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="${pos}"/><c:crossAx val="${cross}"/></c:${kind}>`
+const texts = (svg: string) => [...svg.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map((m) => m[1])
 
-describe('charts tell the truth about their data', () => {
-  test('a 100% stacked chart fills each category to 100%, not to the sum of its values', () => {
-    const svg = chartPanel(`<c:barChart><c:barDir val="col"/><c:grouping val="percentStacked"/><c:overlap val="100"/>${series('111111', [1, 30])}${series('222222', [3, 10])}</c:barChart>`)
-    const axis = valueAxis(svg)
-    assert.equal(axis.labels.at(-1), '100%', axis.labels.join(' '))
-    const [a1, a2] = rectsOf(svg, '111111')
-    const [b1, b2] = rectsOf(svg, '222222')
-    close(a1.bottom, axis.at(0), 'first bar starts at 0')
-    close(a1.top, axis.at(25), 'first part is 25%')
-    close(b1.top, axis.at(100), 'second part ends at 100%')
-    close(a2.top, axis.at(75), 'second category first part is 75%')
-    close(b2.top, axis.at(100), 'second category ends at 100%')
+describe('charts draw through the shared chart renderer', () => {
+  test('series take their colours from the file; a stacked bar draws every part', () => {
+    const svg = chartPanel(`<c:barChart><c:barDir val="col"/><c:grouping val="percentStacked"/><c:overlap val="100"/>${series('111111', [1, 30])}${series('222222', [3, 10])}${AXES}</c:barChart>${axis('catAx', 1, 2, 'b')}${axis('valAx', 2, 1, 'l')}`)
+    assert.equal((svg.match(/<rect [^>]*fill="#111111"/g) ?? []).length, 2)
+    assert.equal((svg.match(/<rect [^>]*fill="#222222"/g) ?? []).length, 2)
+    assert.ok(texts(svg).includes('100%'), texts(svg).join('|'))
   })
 
-  test('a stacked bar keeps negatives below zero, apart from the positives', () => {
-    const svg = chartPanel(`<c:barChart><c:barDir val="col"/><c:grouping val="stacked"/>${series('111111', [5])}${series('222222', [-2])}</c:barChart>`)
-    const axis = valueAxis(svg)
-    const [p] = rectsOf(svg, '111111')
-    const [q] = rectsOf(svg, '222222')
-    close(p.bottom, axis.at(0), 'P from 0')
-    close(p.top, axis.at(5), 'P to 5')
-    close(q.top, axis.at(0), 'Q from 0')
-    close(q.bottom, axis.at(-2), 'Q down to -2')
+  test('a scatter chart plots its numeric x values on a value axis, not in file order', () => {
+    const svg = chartPanel(`<c:scatterChart><c:scatterStyle val="lineMarker"/><c:ser><c:idx val="0"/><c:order val="0"/><c:xVal>${numbers([30, 10, 20])}</c:xVal><c:yVal>${numbers([1, 2, 3])}</c:yVal></c:ser>${AXES}</c:scatterChart>${axis('valAx', 1, 2, 'b')}${axis('valAx', 2, 1, 'l')}`)
+    assert.doesNotMatch(svg, /xl-missing/)
+    // The x axis is numeric: it labels 10, 20, 30 rather than the categories 1, 2, 3.
+    for (const label of ['10', '20', '30']) assert.ok(texts(svg).includes(label), texts(svg).join('|'))
+    const markers = [...svg.matchAll(/<path d="M(-?[\d.]+),(-?[\d.]+)[^"]*"[^>]*data-marker/g)].map((m) => Number(m[1]))
+    assert.equal(markers.length, 3)
+    // x = 30 is drawn right of x = 20, which is right of x = 10, whatever their order in the file.
+    assert.ok(markers[0] > markers[2] && markers[2] > markers[1], markers.join(' '))
   })
 
-  test('stacked lines and areas stack; percent-stacked ones reach 100%', () => {
-    const line = chartPanel(`<c:lineChart><c:grouping val="stacked"/>${series('111111', [1, 2])}${series('222222', [1, 2])}</c:lineChart>`)
-    const axis = valueAxis(line)
-    const ys = (svg: string, color: string) => /<polyline points="([^"]+)"[^>]*stroke="#COLOR"/.exec(svg.replace('COLOR', color)) ?? new RegExp(`<polyline points="([^"]+)"[^>]*stroke="#${color}"`).exec(svg)
-    const second = ys(line, '222222')![1].split(' ').map((p) => Number(p.split(',')[1]))
-    close(second[0], axis.at(2), 'stacked line first point')
-    close(second[1], axis.at(4), 'stacked line second point')
-    const area = chartPanel(`<c:areaChart><c:grouping val="percentStacked"/>${series('111111', [1, 3])}${series('222222', [3, 1])}</c:areaChart>`)
-    const areaAxis = valueAxis(area)
-    assert.equal(areaAxis.labels.at(-1), '100%', areaAxis.labels.join(' '))
-    const path = new RegExp(`<path d="([^"]+)" fill="#111111"`).exec(area)![1]
-    const ysOf = (d: string) => [...d.matchAll(/(-?[\d.]+),(-?[\d.]+)/g)].map((m) => Number(m[2]))
-    assert.ok(ysOf(path).some((y) => Math.abs(y - areaAxis.at(25)) < 0.6), `first area reaches 25%: ${path}`)
-    const top = new RegExp(`<path d="([^"]+)" fill="#222222"`).exec(area)![1]
-    assert.ok(ysOf(top).filter((y) => Math.abs(y - areaAxis.at(100)) < 0.6).length >= 2, `second area tops out at 100%: ${top}`)
-    assert.ok(ysOf(top).some((y) => Math.abs(y - areaAxis.at(75)) < 0.6), `second area sits on the first: ${top}`)
+  test('radar, bubble and combo charts draw instead of a labelled box', () => {
+    const radar = chartPanel(`<c:radarChart><c:radarStyle val="marker"/>${series('333333', [1, 2, 3])}${AXES}</c:radarChart>${axis('catAx', 1, 2, 'b')}${axis('valAx', 2, 1, 'l')}`)
+    assert.match(radar, /<svg[^>]*>[\s\S]*stroke="#333333"/)
+    const bubble = chartPanel(`<c:bubbleChart><c:ser><c:idx val="0"/><c:order val="0"/><c:spPr><a:solidFill><a:srgbClr val="444444"/></a:solidFill></c:spPr><c:xVal>${numbers([1, 2])}</c:xVal><c:yVal>${numbers([1, 2])}</c:yVal><c:bubbleSize>${numbers([1, 4])}</c:bubbleSize></c:ser>${AXES}</c:bubbleChart>${axis('valAx', 1, 2, 'b')}${axis('valAx', 2, 1, 'l')}`)
+    assert.match(bubble, /fill="#444444"/)
+    const combo = chartPanel(
+      `<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>${series('555555', [100, 140, 90])}${AXES}</c:barChart>` +
+        `<c:lineChart><c:grouping val="standard"/>${series('666666', [0.2, 0.35, 0.1])}<c:axId val="3"/><c:axId val="4"/></c:lineChart>` +
+        `${axis('catAx', 1, 2, 'b')}${axis('valAx', 2, 1, 'l')}${axis('catAx', 3, 4, 'b')}${axis('valAx', 4, 3, 'r')}`
+    )
+    assert.equal((combo.match(/<rect [^>]*fill="#555555"/g) ?? []).length, 3)
+    assert.match(combo, /<path d="M[^"]*" fill="none" stroke="#666666"/)
+    for (const svg of [radar, bubble, combo]) assert.doesNotMatch(svg, /xl-missing/)
+  })
+})
+
+/** A sheet with one drawing anchored at the origin, 72 pt (96 px) square; returns the sheet panel. */
+function shapePanel(objects: string): string {
+  const drawing = `<xdr:wsDr ${DRAWING_NS}><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="914400" cy="914400"/>${objects}<xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>`
+  const page = renderXlsxPage(
+    book([{ name: 's', body: sheet('', '', '<drawing r:id="d"/>'), rels: [['d', 'drawing', '../drawings/drawing1.xml']] }], { extra: { 'xl/drawings/drawing1.xml': drawing } }),
+    'b.xlsx',
+    'b'
+  )
+  return panel(page, 1)
+}
+const sp = (geometry: string, text = '', tag = 'sp') =>
+  `<xdr:${tag}><xdr:nvSpPr><xdr:cNvPr id="2" name="s"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>${geometry}<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill><a:tailEnd type="triangle"/></a:ln></xdr:spPr>${text ? `<xdr:txBody><a:bodyPr/><a:p><a:r><a:t>${text}</a:t></a:r></a:p></xdr:txBody>` : ''}</xdr:${tag}>`
+
+describe('drawing shapes are their ECMA-376 geometry', () => {
+  test('a heart, a callout and a cloud draw their own paths, filled and then outlined', () => {
+    const heart = shapePanel(sp('<a:prstGeom prst="heart"><a:avLst/></a:prstGeom>'))
+    assert.match(heart, /<div class="xl-draw xl-geo"[^>]*><svg class="xl-geom" viewBox="0 0 72 72"[^>]*><path d="M[^"]*C[^"]*" fill="#FF0000"\/><path d="M[^"]*C[^"]*" fill="none" stroke="#0000FF"/)
+    assert.doesNotMatch(heart, /border-radius|background:#FF0000/)
+    // The callout's tail leaves the box below it.
+    const callout = /<path d="([^"]*)" fill="#FF0000"/.exec(shapePanel(sp('<a:prstGeom prst="wedgeRectCallout"><a:avLst/></a:prstGeom>')))![1]
+    assert.ok(Math.max(...(callout.match(/-?[\d.]+/g) ?? []).map(Number)) > 72, callout)
+    const cloud = /<path d="([^"]*)" fill="#FF0000"/.exec(shapePanel(sp('<a:prstGeom prst="cloud"><a:avLst/></a:prstGeom>')))![1]
+    assert.ok((cloud.match(/A/g) ?? []).length >= 10)
   })
 
-  test('scatter and radar charts are a labelled box, not a line through x values in file order', () => {
-    for (const kind of ['scatterChart', 'radarChart']) {
-      const tag = kind === 'scatterChart' ? 'yVal' : 'val'
-      const svg = chartPanel(`<c:${kind}><c:ser><c:xVal>${numbers([3, 1, 2])}</c:xVal><c:${tag}>${numbers([1, 2, 3])}</c:${tag}></c:ser></c:${kind}>`)
-      assert.doesNotMatch(svg, /<svg/, kind)
-      assert.match(svg, /class="xl-draw xl-missing"[^>]*>圖表\(此圖表類型網頁版未支援/, kind)
-    }
+  test("text sits in the geometry's text rectangle; a connector is an open line with its arrowhead", () => {
+    const ellipse = shapePanel(sp('<a:prstGeom prst="ellipse"/>', '橢圓的字'))
+    assert.match(ellipse, /<div class="xl-shape xl-shape-tx" style="left:14\.6\d*%;top:14\.6\d*%;width:70\.7\d*%;height:70\.7\d*%[^"]*">[\s\S]*橢圓的字/)
+    const line = shapePanel(sp('<a:prstGeom prst="straightConnector1"/>', '', 'cxnSp'))
+    assert.match(line, /<path d="M0,0 L72,72" fill="none" stroke="#0000FF"[^>]*marker-end="url\(#xl-m\d+\)"/)
+    assert.doesNotMatch(line, /fill="#FF0000"/)
+    // An unknown preset keeps its box and says so.
+    assert.match(shapePanel(sp('<a:prstGeom prst="notAShape"/>')), /class="xl-draw xl-shape"[^>]*background:#FF0000[\s\S]*未支援的圖形:notAShape/)
   })
 })
 

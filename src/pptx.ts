@@ -1,5 +1,7 @@
 import { posix } from 'node:path'
 import { escapeHtml } from './content-render.ts'
+import { chartTitle, renderChart } from './office-chart.ts'
+import { adjustValues, customGeometry, fillShade, presetGeometry, type Geometry } from './office-geometry.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { deckPage, type DeckAssets } from './slides.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, XmlError, type XmlNode } from './xml.ts'
@@ -12,6 +14,8 @@ import { ZipError, ZipReader } from './zip.ts'
  * labelled box; the original file is always one download away.
  */
 const EMU_PER_PT = 12700
+/** Office's default theme accents, for a file without a theme of its own. */
+const OFFICE_ACCENTS = ['4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47']
 
 // ---------------------------------------------------------------------------------------------
 // Package parts and relationships
@@ -431,22 +435,23 @@ function pictureSize(fill: XmlNode, ctx: Ctx): { w: number; h: number } | null {
 type NoPicture = 'missing' | 'external' | 'format'
 
 /** The URL of the picture a `blip` names, or why there is none. */
-function blipSource(blipFill: XmlNode, ctx: Ctx): { url: string } | { none: NoPicture } {
+function blipSource(blipFill: XmlNode, ctx: Ctx): { url: string } | { none: NoPicture; target?: string } {
   const blip = child(blipFill, 'blip')
   // An SVG picture carries its PNG fallback in r:embed and the vector in an extension.
   const svg = blip ? findDeep(blip, 'svgBlip') : null
   let none: NoPicture = 'missing'
+  let target: string | undefined
   for (const id of [relAttr(svg, 'embed'), relAttr(blip, 'embed')]) {
     const rel = ctx.pkg.rel(ctx.part, id)
     if (!rel) continue
     if (rel.external) none = 'external'
     else if (!ctx.pkg.zip.has(rel.target)) continue
     else if (isDrawablePart(rel.target)) return { url: ctx.media(rel.target) }
-    else none = 'format'
+    else (none = 'format'), (target = rel.target)
   }
   // A linked picture (r:link) is fetched from its address by PowerPoint; the page never reaches outside.
   if (none === 'missing' && (relAttr(blip, 'link') || relAttr(svg, 'link'))) none = 'external'
-  return { none }
+  return { none, target }
 }
 
 /** The URL of a picture part a `blip` names, or null when browsers cannot show it. */
@@ -455,10 +460,12 @@ function blipUrl(blipFill: XmlNode, ctx: Ctx): string | null {
   return 'url' in source ? source.url : null
 }
 
-const NO_PICTURE: Record<NoPicture, string> = {
-  missing: '圖片遺失',
-  external: '外部連結的圖片(網頁版不會讀取外部網址)',
-  format: '圖片(網頁版無法顯示這種格式,請下載 PPTX 查看)'
+/** The label for a picture that cannot be shown, worded as Word and Excel pages word it. */
+function noPictureLabel(none: NoPicture, target?: string): string {
+  if (none === 'missing') return '圖片遺失(檔案裡找不到這張圖片)'
+  if (none === 'external') return '外部連結的圖片(圖片在文件之外,網頁版不載入外部連結)'
+  const ext = posix.extname(target ?? '').slice(1).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
+  return `${ext ? `${ext} 圖片` : '圖片'}(網頁版未支援,請下載原始檔查看)`
 }
 
 /** What a reader is told when something in the file cannot be drawn: the reader's message as is when it is already Chinese, else its kind. */
@@ -559,126 +566,13 @@ function shadowCss(spPr: XmlNode | null, style: XmlNode | null, ctx: Ctx): strin
 // ---------------------------------------------------------------------------------------------
 // Geometry
 
-const adjOf = (prstGeom: XmlNode | null): Record<string, number> => {
-  const out: Record<string, number> = {}
-  for (const gd of children(child(prstGeom, 'avLst'), 'gd')) {
-    const match = /^val\s+(-?\d+)/.exec(attr(gd, 'fmla') ?? '')
-    if (match) out[attr(gd, 'name') ?? ''] = Number(match[1])
-  }
-  return out
-}
-
-/** An SVG path for a preset shape in a w × h box, or null for the ones drawn as a CSS box. */
-function presetPath(prst: string, w: number, h: number, adj: Record<string, number>): string | null {
-  const ss = Math.min(w, h)
-  const a = (name: string, fallback: number) => (adj[name] ?? fallback) / 100000
-  const poly = (points: [number, number][]) => `M${points.map(([x, y]) => `${round(x, 2)},${round(y, 2)}`).join(' L')} Z`
-  switch (prst) {
-    case 'triangle': {
-      const x = w * a('adj', 50000)
-      return poly([[x, 0], [w, h], [0, h]])
-    }
-    case 'rtTriangle':
-      return poly([[0, 0], [w, h], [0, h]])
-    case 'diamond':
-    case 'flowChartDecision':
-      return poly([[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]])
-    case 'parallelogram':
-    case 'flowChartInputOutput': {
-      const x = ss * a('adj', 25000)
-      return poly([[x, 0], [w, 0], [w - x, h], [0, h]])
-    }
-    case 'trapezoid': {
-      const x = ss * a('adj', 25000)
-      return poly([[x, 0], [w - x, 0], [w, h], [0, h]])
-    }
-    case 'pentagon':
-      return poly([[w / 2, 0], [w, h * 0.38], [w * 0.81, h], [w * 0.19, h], [0, h * 0.38]])
-    case 'homePlate': {
-      const x = w - ss * a('adj', 50000)
-      return poly([[0, 0], [x, 0], [w, h / 2], [x, h], [0, h]])
-    }
-    case 'chevron': {
-      const x = ss * a('adj', 50000)
-      return poly([[0, 0], [w - x, 0], [w, h / 2], [w - x, h], [0, h], [x, h / 2]])
-    }
-    case 'hexagon': {
-      const x = ss * a('adj', 25000)
-      return poly([[x, 0], [w - x, 0], [w, h / 2], [w - x, h], [x, h], [0, h / 2]])
-    }
-    case 'octagon': {
-      const x = ss * a('adj', 29289)
-      return poly([[x, 0], [w - x, 0], [w, x], [w, h - x], [w - x, h], [x, h], [0, h - x], [0, x]])
-    }
-    case 'rightArrow': {
-      const shaft = h * a('adj1', 50000)
-      const head = ss * a('adj2', 50000)
-      const y1 = (h - shaft) / 2
-      return poly([[0, y1], [w - head, y1], [w - head, 0], [w, h / 2], [w - head, h], [w - head, h - y1], [0, h - y1]])
-    }
-    case 'leftArrow': {
-      const shaft = h * a('adj1', 50000)
-      const head = ss * a('adj2', 50000)
-      const y1 = (h - shaft) / 2
-      return poly([[w, y1], [head, y1], [head, 0], [0, h / 2], [head, h], [head, h - y1], [w, h - y1]])
-    }
-    case 'upArrow': {
-      const shaft = w * a('adj1', 50000)
-      const head = ss * a('adj2', 50000)
-      const x1 = (w - shaft) / 2
-      return poly([[x1, h], [x1, head], [0, head], [w / 2, 0], [w, head], [w - x1, head], [w - x1, h]])
-    }
-    case 'downArrow': {
-      const shaft = w * a('adj1', 50000)
-      const head = ss * a('adj2', 50000)
-      const x1 = (w - shaft) / 2
-      return poly([[x1, 0], [x1, h - head], [0, h - head], [w / 2, h], [w, h - head], [w - x1, h - head], [w - x1, 0]])
-    }
-    case 'leftRightArrow': {
-      const shaft = h * a('adj1', 50000)
-      const head = ss * a('adj2', 50000)
-      const y1 = (h - shaft) / 2
-      return poly([[0, h / 2], [head, 0], [head, y1], [w - head, y1], [w - head, 0], [w, h / 2], [w - head, h], [w - head, h - y1], [head, h - y1], [head, h]])
-    }
-    case 'plus':
-    case 'mathPlus': {
-      const x = ss * a('adj', 25000)
-      return poly([[x, 0], [w - x, 0], [w - x, x], [w, x], [w, h - x], [w - x, h - x], [w - x, h], [x, h], [x, h - x], [0, h - x], [0, x], [x, x]])
-    }
-    case 'star5': {
-      const points: [number, number][] = []
-      for (let i = 0; i < 10; i++) {
-        const angle = -Math.PI / 2 + (i * Math.PI) / 5
-        const r = i % 2 === 0 ? 0.5 : 0.19
-        points.push([w / 2 + Math.cos(angle) * r * w, h / 2 + Math.sin(angle) * r * h * 1.05 + h * 0.025])
-      }
-      return poly(points)
-    }
-    case 'snip1Rect': {
-      const x = ss * a('adj', 16667)
-      return poly([[0, 0], [w - x, 0], [w, x], [w, h], [0, h]])
-    }
-    case 'round2SameRect': {
-      const r = ss * a('adj1', 16667)
-      return `M${r},0 L${w - r},0 Q${w},0 ${w},${r} L${w},${h} L0,${h} L0,${r} Q0,0 ${r},0 Z`
-    }
-    case 'flowChartTerminator': {
-      const r = h / 2
-      return `M${r},0 L${w - r},0 A${r},${r} 0 0 1 ${w - r},${h} L${r},${h} A${r},${r} 0 0 1 ${r},0 Z`
-    }
-    case 'line':
-    case 'straightConnector1':
-    case 'curvedConnector3':
-      return `M0,0 L${w},${h}`
-    case 'bentConnector2':
-      return `M0,0 L${w},0 L${w},${h}`
-    case 'bentConnector3': {
-      const x = w * a('adj1', 50000)
-      return `M0,0 L${x},0 L${x},${h} L${w},${h}`
-    }
-    default:
-      return null
-  }
+/**
+ * The ECMA-376 geometry of a shape's `prstGeom` or `custGeom` in a box of cx × cy EMU (paths and text rectangle in
+ * points). Null for a preset name the standard does not define; a custom shape with no path draws nothing.
+ */
+function geometryOf(node: XmlNode, cx: number, cy: number): Geometry | null {
+  if (local(node.name) === 'custGeom') return customGeometry(node, cx, cy) ?? { paths: [], textRect: { l: 0, t: 0, r: cx / EMU_PER_PT, b: cy / EMU_PER_PT } }
+  return presetGeometry(attr(node, 'prst') ?? 'rect', cx, cy, adjustValues(node))
 }
 
 let paintCount = 0
@@ -741,55 +635,6 @@ function svgPaint(fillNode: XmlNode | null, ctx: Ctx, w: number, h: number): { f
     return { fill: `url(#${id})`, defs: `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${PATTERN_PT}" height="${PATTERN_PT}"><g transform="scale(${scale})" shape-rendering="crispEdges">${pattern.inner}</g></pattern>` }
   }
   return none
-}
-
-const OPEN_PATHS = new Set(['line', 'straightConnector1', 'curvedConnector3', 'bentConnector2', 'bentConnector3'])
-
-/** A custom geometry (`a:custGeom`) as SVG path data in a w × h box. */
-function customPath(custGeom: XmlNode, w: number, h: number): { d: string; open: boolean } | null {
-  const parts: string[] = []
-  let open = true
-  for (const pathNode of children(child(custGeom, 'pathLst'), 'path')) {
-    const pw = num(pathNode, 'w') || w
-    const ph = num(pathNode, 'h') || h
-    const sx = w / pw
-    const sy = h / ph
-    let cx = 0
-    let cy = 0
-    const point = (node: XmlNode | null): [number, number] => [(num(node, 'x') ?? 0) * sx, (num(node, 'y') ?? 0) * sy]
-    for (const cmd of pathNode.children) {
-      const name = local(cmd.name)
-      const pts = children(cmd, 'pt').map(point)
-      if (name === 'moveTo' && pts[0]) {
-        ;[cx, cy] = pts[0]
-        parts.push(`M${round(cx, 2)},${round(cy, 2)}`)
-      } else if (name === 'lnTo' && pts[0]) {
-        ;[cx, cy] = pts[0]
-        parts.push(`L${round(cx, 2)},${round(cy, 2)}`)
-      } else if (name === 'cubicBezTo' && pts.length === 3) {
-        parts.push(`C${pts.map(([x, y]) => `${round(x, 2)},${round(y, 2)}`).join(' ')}`)
-        ;[cx, cy] = pts[2]
-      } else if (name === 'quadBezTo' && pts.length === 2) {
-        parts.push(`Q${pts.map(([x, y]) => `${round(x, 2)},${round(y, 2)}`).join(' ')}`)
-        ;[cx, cy] = pts[1]
-      } else if (name === 'arcTo') {
-        const wr = (num(cmd, 'wR') ?? 0) * sx
-        const hr = (num(cmd, 'hR') ?? 0) * sy
-        const start = ((num(cmd, 'stAng') ?? 0) / 60000) * (Math.PI / 180)
-        const sweep = ((num(cmd, 'swAng') ?? 0) / 60000) * (Math.PI / 180)
-        const ox = cx - wr * Math.cos(start)
-        const oy = cy - hr * Math.sin(start)
-        const ex = ox + wr * Math.cos(start + sweep)
-        const ey = oy + hr * Math.sin(start + sweep)
-        parts.push(`A${round(wr, 2)},${round(hr, 2)} 0 ${Math.abs(sweep) > Math.PI ? 1 : 0} ${sweep > 0 ? 1 : 0} ${round(ex, 2)},${round(ey, 2)}`)
-        ;[cx, cy] = [ex, ey]
-      } else if (name === 'close') {
-        parts.push('Z')
-        open = false
-      }
-    }
-  }
-  return parts.length ? { d: parts.join(' '), open } : null
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1320,17 +1165,32 @@ function renderShape(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
   const flip = [x.flipH ? 'scaleX(-1)' : '', x.flipV ? 'scaleY(-1)' : ''].filter(Boolean).join(' ')
   const shadow = shadowCss(spPr, style, ctx)
   const prst = geomNode && local(geomNode.name) === 'prstGeom' ? attr(geomNode, 'prst') ?? 'rect' : null
-  const custom = geomNode && local(geomNode.name) === 'custGeom' ? customPath(geomNode, w, h) : null
-  const svgPath = custom?.d ?? (prst ? presetPath(prst, w, h, adjOf(geomNode)) : null)
+  // A plain rectangle stays a CSS box (its fills, patterns and borders are CSS's own); every other shape is its
+  // ECMA-376 geometry drawn as SVG. A preset name the standard does not define is a labelled box.
+  const plain = !geomNode || prst === 'rect'
+  const shape = plain ? null : geometryOf(geomNode!, x.cx, x.cy)
+  const unknown = !plain && shape === null
   if (background || line) {
-    if (svgPath) {
-      const open = custom ? custom.open : OPEN_PATHS.has(prst ?? '')
-      const paint = open ? { fill: 'none', defs: '' } : svgPaint(fillNode ?? themed?.fill ?? null, themed?.ctx ?? ctx, w, h)
-      const fill = paint.fill
+    if (shape) {
+      const paint = svgPaint(fillNode ?? themed?.fill ?? null, themed?.ctx ?? ctx, w, h)
       const strokeAttrs = line
         ? ` stroke="${line.color}" stroke-width="${round(line.width)}"${dashArray(line.dash, line.width) ? ` stroke-dasharray="${dashArray(line.dash, line.width)}"` : ''} stroke-linejoin="round"`
         : ''
-      const markers = line && open ? arrowMarkers(line, out) : ''
+      const [markerDefs, markerAttrs] = (line && shape.paths.some((p) => p.stroke && !p.closed) ? arrowMarkers(line, out) : '|').split('|')
+      // Every fill first, in order, then every stroke (the standard lists chartPlus's lines before its box). A preset
+      // fills each path as the standard says (smileyFace's open eye arcs are filled, its lines are not); an open path
+      // of a custom shape is a line and takes no fill. Arrowheads go on open paths.
+      const custom = local(geomNode!.name) === 'custGeom'
+      let paths = ''
+      if (paint.fill !== 'none') {
+        for (const p of shape.paths) {
+          if (p.fill === 'none' || (!p.closed && custom)) continue
+          paths += `<path d="${p.d}" fill="${paint.fill}"/>`
+          const shade = fillShade(p.fill)
+          if (shade) paths += `<path d="${p.d}" fill="${shade.color}" fill-opacity="${shade.opacity}"/>`
+        }
+      }
+      if (line) for (const p of shape.paths) if (p.stroke) paths += `<path d="${p.d}" fill="none"${strokeAttrs}${p.closed ? '' : markerAttrs ?? ''}/>`
       // A line with no height (or no width) gets a box as thick as its stroke, centred on it, so both axes keep one scale.
       const thick = line ? Math.max(line.width, 0.75) : 1
       const flatH = h < 0.01
@@ -1340,21 +1200,20 @@ function renderShape(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
         flatH ? `top:${pt(-thick / 2)};height:${pt(thick)}` : '', flatW ? `left:${pt(-thick / 2)};width:${pt(thick)}` : '',
         flip ? `transform:${flip}` : '', shadow ? `filter:${shadow}` : ''
       ].filter(Boolean).join(';')
-      geometry = `<svg class="pp-geom" viewBox="${viewBox}" preserveAspectRatio="none"${svgStyle ? ` style="${svgStyle}"` : ''}>${markers.split('|')[0]}${paint.defs ? `<defs>${paint.defs}</defs>` : ''}<path d="${svgPath}" fill="${fill}"${strokeAttrs}${markers.split('|')[1] ?? ''}/></svg>`
-    } else {
+      if (paths) geometry = `<svg class="pp-geom" viewBox="${viewBox}" preserveAspectRatio="none"${svgStyle ? ` style="${svgStyle}"` : ''}>${markerDefs}${paint.defs ? `<defs>${paint.defs}</defs>` : ''}${paths}</svg>`
+    } else if (plain || unknown) {
       const geom: string[] = []
       if (background) geom.push(`background:${background}`)
       if (line) {
         const half = pt(line.width / 2)
         geom.push(`inset:calc(-1*${half})`, `border:${pt(line.width)} ${line.dash === 'solid' ? 'solid' : line.dash.toLowerCase().includes('dot') && !line.dash.toLowerCase().includes('dash') ? 'dotted' : 'dashed'} ${line.color}`)
       }
-      if (prst === 'ellipse' || prst === 'flowChartConnector') geom.push('border-radius:50%')
-      else if (prst === 'roundRect' || prst === 'flowChartAlternateProcess') geom.push(`border-radius:${pt(Math.min(w, h) * ((adjOf(geomNode).adj ?? 16667) / 100000))}`)
       if (flip) geom.push(`transform:${flip}`)
       if (shadow) geom.push(`filter:${shadow}`)
       geometry = `<div class="pp-geom" style="${geom.join(';')}"></div>`
     }
   }
+  if (unknown) geometry += `<div class="pp-missing" style="top:auto;height:auto">${escapeHtml(`未支援的圖形:${prst}`)}</div>`
   let text = ''
   if (txBody && hasText) {
     const fontRef = colorListStyle(colorElement(child(style, 'fontRef')))
@@ -1367,6 +1226,14 @@ function renderShape(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | 'la
     if (txXfrm) {
       const inner = boxStyle({ ...txXfrm, x: txXfrm.x - x.x, y: txXfrm.y - x.y }, { x: 0, y: 0, cx: x.cx, cy: x.cy })
       text = `<div class="pp-grp" style="${inner.join(';')}">${text}</div>`
+    } else if (shape) {
+      // Text sits in the shape's text rectangle, as PowerPoint lays it out (a flip moves the rectangle, not the letters).
+      const { l, t, r, b } = shape.textRect
+      if (r > l && b > t && (l > 0.01 || t > 0.01 || w - r > 0.01 || h - b > 0.01)) {
+        const left = x.flipH ? w - r : l
+        const top = x.flipV ? h - b : t
+        text = `<div class="pp-grp" style="left:${pct(left, w)};top:${pct(top, h)};width:${pct(r - l, w)};height:${pct(b - t, h)}">${text}</div>`
+      }
     }
   }
   out.html += `<div class="pp-sp" style="${box.join(';')}">${geometry}${text}</div>`
@@ -1410,7 +1277,7 @@ function renderPicture(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | '
   const nvPr = path(node, 'nvPicPr', 'nvPr')
   const isMovie = Boolean(child(nvPr, 'videoFile') || child(nvPr, 'audioFile') || findDeep(nvPr ?? node, 'media'))
   if (!url) {
-    const label = isMovie ? '影音(網頁版無法播放,請下載 PPTX 查看)' : NO_PICTURE['none' in source ? source.none : 'missing']
+    const label = isMovie ? '影音(網頁版無法播放,請下載 PPTX 查看)' : escapeHtml('none' in source ? noPictureLabel(source.none, source.target) : noPictureLabel('missing'))
     out.html += `<div class="pp-sp" style="${box.join(';')}"><div class="pp-missing">${label}</div></div>`
     return
   }
@@ -1424,19 +1291,34 @@ function renderPicture(node: XmlNode, frame: Frame, ctx: Ctx, level: 'slide' | '
   ]
   const flip = [x.flipH ? 'scaleX(-1)' : '', x.flipV ? 'scaleY(-1)' : ''].filter(Boolean).join(' ')
   const clip: string[] = []
-  const prst = attr(child(spPr, 'prstGeom'), 'prst')
-  if (prst === 'ellipse') clip.push('border-radius:50%')
-  else if (prst === 'roundRect') clip.push(`border-radius:${pt((Math.min(x.cx, x.cy) / EMU_PER_PT) * ((adjOf(child(spPr, 'prstGeom')).adj ?? 16667) / 100000))}`)
+  // A picture is cut to its shape. The path is in points while the slide scales, so it clips through an SVG
+  // clipPath in the picture's own bounding box (0–1), scaled from the shape's box.
+  const geomNode = child(spPr, 'prstGeom') ?? child(spPr, 'custGeom')
+  const shape = geomNode && attr(geomNode, 'prst') !== 'rect' ? geometryOf(geomNode, x.cx, x.cy) : null
+  const outline = shape?.paths.filter((p) => p.closed && p.fill !== 'none') ?? []
+  const w = x.cx / EMU_PER_PT
+  const h = x.cy / EMU_PER_PT
+  let clipDefs = ''
+  if (outline.length && w > 0 && h > 0) {
+    const id = `pp-c${paintCount++}`
+    clipDefs = `<svg width="0" height="0" style="position:absolute" aria-hidden="true"><clipPath id="${id}" clipPathUnits="objectBoundingBox"><path transform="scale(${round(1 / w, 8)} ${round(1 / h, 8)})" d="${outline.map((p) => p.d).join(' ')}"/></clipPath></svg>`
+    clip.push(`clip-path:url(#${id})`)
+  }
   if (flip) clip.push(`transform:${flip}`)
   const alpha = num(findDeep(blipFill!, 'alphaModFix'), 'amt')
   if (alpha !== undefined) clip.push(`opacity:${round(alpha / 100000)}`)
   const shadow = shadowCss(spPr, child(node, 'style'), ctx)
   if (shadow) clip.push(`filter:${shadow}`)
   const line = lineOf(child(spPr, 'ln'), child(node, 'style'), ctx)
-  const border = line ? `<div class="pp-geom" style="inset:calc(-1*${pt(line.width / 2)});border:${pt(line.width)} solid ${line.color}${clip[0]?.startsWith('border-radius') ? `;${clip[0]}` : ''}"></div>` : ''
+  const stroke = line && shape
+    ? shape.paths.filter((p) => p.stroke).map((p) => `<path d="${p.d}" fill="none" stroke="${line.color}" stroke-width="${round(line.width)}"/>`).join('')
+    : ''
+  const border = !line ? '' : stroke
+    ? `<svg class="pp-geom" viewBox="0 0 ${round(w)} ${round(h)}" preserveAspectRatio="none"${flip ? ` style="transform:${flip}"` : ''}>${stroke}</svg>`
+    : `<div class="pp-geom" style="inset:calc(-1*${pt(line.width / 2)});border:${pt(line.width)} solid ${line.color}"></div>`
   // A video or sound shows its poster frame, labelled so it does not pass for a still picture.
   const label = isMovie ? '<div class="pp-missing" style="top:auto;height:auto">影音(網頁版無法播放,請下載 PPTX 查看)</div>' : ''
-  out.html += `<div class="pp-sp" style="${box.join(';')}"><div class="pp-pic" style="${clip.join(';')}"><img src="${escapeHtml(url)}" alt="${escapeHtml(name)}" style="${imgStyle.join(';')}" decoding="async" draggable="false"></div>${border}${label}</div>`
+  out.html += `<div class="pp-sp" style="${box.join(';')}">${clipDefs}<div class="pp-pic" style="${clip.join(';')}"><img src="${escapeHtml(url)}" alt="${escapeHtml(name)}" style="${imgStyle.join(';')}" decoding="async" draggable="false"></div>${border}${label}</div>`
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1482,11 +1364,24 @@ function renderGraphicFrame(node: XmlNode, frame: Frame, ctx: Ctx, out: Rendered
   if (uri.endsWith('/chart')) {
     const rel = ctx.pkg.rel(ctx.part, relAttr(child(data, 'chart'), 'id'))
     const chart = rel ? ctx.pkg.xml(rel.target) : null
-    const rendered = chart ? renderChart(chart, x, { ...ctx, part: rel!.target }) : null
+    const chartCtx = { ...ctx, part: rel?.target ?? ctx.part }
+    const rendered = chart
+      ? renderChart(chart, {
+          widthPt: x.cx / EMU_PER_PT,
+          heightPt: x.cy / EMU_PER_PT,
+          resolveColor: (holder) => {
+            const color = colorIn(holder, chartCtx)
+            return color ? cssColor(color) : null
+          },
+          themeColor: (i) => `#${ctx.theme.colors[`accent${i + 1}`] ?? OFFICE_ACCENTS[i % 6]}`,
+          fontFamily: fontStack(undefined, undefined, ctx.theme),
+          textColor: cssColor(hexToRgba(ctx.theme.colors[ctx.clrMap.tx1 ?? 'dk1'] ?? '404040') ?? { r: 64, g: 64, b: 64, a: 1 })
+        })
+      : null
     if (rendered) {
-      out.html += `<div class="pp-sp" style="${box.join(';')}">${unflipped(rendered.html, ctx)}</div>`
+      out.html += `<div class="pp-sp" style="${box.join(';')}"><div class="pp-geom pp-chart">${unflipped(rendered.svg, ctx)}</div></div>`
       out.text.push(rendered.text)
-    } else out.html += missing(box, '圖表')
+    } else out.html += missing(box, chart && chartTitle(chart) ? `圖表「${chartTitle(chart)}」` : '圖表')
     return
   }
   // OLE objects and the like carry a picture of themselves.
@@ -1840,211 +1735,6 @@ function renderTable(table: XmlNode, ctx: Ctx): { html: string; text: string } {
   if (cut) html += `<tr><td colspan="${grid.length || 1}" style="padding:${pt(4)};font-size:${pt(12)};color:#59636e">表格太大,只顯示前 ${TABLE_MAX} 列、${TABLE_MAX} 欄,完整內容請下載 PPTX 查看</td></tr>`
   return { html: `${html}</table>`, text: texts.join('\n') }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Charts: bar, line, area, pie and doughnut from the values cached in the chart part
-
-type Series = { name: string; values: (number | null)[]; color: string }
-
-const SERIES_DEFAULTS = ['accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6']
-
-function cachedValues(node: XmlNode | null): (string | null)[] {
-  const cache = node ? findDeep(node, 'numCache') ?? findDeep(node, 'strCache') ?? findDeep(node, 'multiLvlStrCache') : null
-  if (!cache) return []
-  const count = num(child(cache, 'ptCount'), 'val') ?? 0
-  const out: (string | null)[] = Array.from({ length: Math.min(count, 2000) }, () => null)
-  // Multi-level categories: the first level holds the labels next to the axis.
-  const points = local(cache.name) === 'multiLvlStrCache' ? children(child(cache, 'lvl'), 'pt') : children(cache, 'pt')
-  for (const point of points) {
-    const at = num(point, 'idx') ?? -1
-    if (at >= 0 && at < out.length) out[at] = child(point, 'v')?.text ?? null
-  }
-  return out
-}
-
-function chartTitle(chart: XmlNode): string {
-  const title = path(chart, 'chart', 'title')
-  if (!title) return ''
-  const runs: string[] = []
-  const walk = (node: XmlNode) => {
-    for (const item of node.children) {
-      if (local(item.name) === 't') runs.push(item.text)
-      else walk(item)
-    }
-  }
-  walk(title)
-  return runs.join('')
-}
-
-function renderChart(chart: XmlNode, x: Xfrm, ctx: Ctx): { html: string; text: string } | null {
-  const plot = path(chart, 'chart', 'plotArea')
-  if (!plot) return null
-  const kinds = ['barChart', 'bar3DChart', 'lineChart', 'line3DChart', 'areaChart', 'pieChart', 'pie3DChart', 'doughnutChart']
-  const group = plot.children.find((node) => kinds.includes(local(node.name)))
-  if (!group) return null
-  const kind = local(group.name).replace('3D', '')
-  let categories: string[] = []
-  const series: Series[] = children(group, 'ser').map((ser, at) => {
-    const name = cachedValues(child(ser, 'tx'))[0] ?? `數列 ${at + 1}`
-    if (!categories.length) categories = cachedValues(child(ser, 'cat')).map((v) => v ?? '')
-    const values = cachedValues(child(ser, 'val')).map((v) => (v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v)))
-    const fill = colorIn(path(ser, 'spPr', 'solidFill'), ctx) ?? colorIn(path(ser, 'spPr', 'ln', 'solidFill'), ctx)
-    const fallback = hexToRgba(ctx.theme.colors[SERIES_DEFAULTS[at % 6]] ?? '4472C4')!
-    return { name, values, color: cssColor(fill ?? fallback) }
-  })
-  // Excel's own limit on series; with at most 2000 points each (cachedValues) the drawing stays bounded.
-  if (!series.length || series.length > 255) return null
-  const length = Math.max(categories.length, ...series.map((s) => s.values.length))
-  if (length * series.length > 50_000) return null
-  categories = Array.from({ length }, (_, at) => categories[at] ?? String(at + 1))
-  const title = chartTitle(chart)
-  const W = x.cx / EMU_PER_PT
-  const H = x.cy / EMU_PER_PT
-  const textColor = cssColor(hexToRgba(ctx.theme.colors[ctx.clrMap.tx1 ?? 'dk1'] ?? '404040') ?? { r: 64, g: 64, b: 64, a: 1 })
-  const font = fontStack(undefined, undefined, ctx.theme)
-  const fs = 10
-  let svg = ''
-  const top = title ? 24 : 8
-  if (title) svg += `<text x="${round(W / 2)}" y="16" text-anchor="middle" font-size="13" font-weight="700" fill="${textColor}">${escapeHtml(title)}</text>`
-  const legendH = series.length > 1 || kind === 'pieChart' || kind === 'doughnutChart' ? 18 : 0
-  if (kind === 'pieChart' || kind === 'doughnutChart') {
-    const values = series[0].values.map((v) => Math.max(0, v ?? 0))
-    const total = values.reduce((a, b) => a + b, 0) || 1
-    if (!Number.isFinite(total)) return null
-    const r = Math.max(4, Math.min(W, H - top - legendH) / 2 - 6)
-    const cx = W / 2
-    const cy = top + (H - top - legendH) / 2
-    let angle = -Math.PI / 2
-    const points = series[0]
-    const colors = values.map((_, at) => {
-      const dPt = children(child(group, 'ser'), 'dPt').find((d) => num(child(d, 'idx'), 'val') === at)
-      const c = colorIn(path(dPt, 'spPr', 'solidFill'), ctx) ?? hexToRgba(ctx.theme.colors[SERIES_DEFAULTS[at % 6]] ?? '4472C4')
-      return c ? cssColor(c) : points.color
-    })
-    values.forEach((value, at) => {
-      const sweep = (value / total) * Math.PI * 2
-      const end = angle + sweep
-      const large = sweep > Math.PI ? 1 : 0
-      const [x1, y1, x2, y2] = [cx + r * Math.cos(angle), cy + r * Math.sin(angle), cx + r * Math.cos(end), cy + r * Math.sin(end)]
-      svg += sweep >= Math.PI * 2 - 1e-6
-        ? `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(r)}" fill="${colors[at]}"/>`
-        : `<path d="M${round(cx)},${round(cy)} L${round(x1)},${round(y1)} A${round(r)},${round(r)} 0 ${large} 1 ${round(x2)},${round(y2)} Z" fill="${colors[at]}" stroke="#fff" stroke-width="1"/>`
-      angle = end
-    })
-    if (kind === 'doughnutChart') svg += `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(r * 0.5)}" fill="#fff"/>`
-    svg += legend(categories.map((name, at) => ({ name, color: colors[at] })), W, H - 6, fs, textColor)
-  } else {
-    // Each value as the span it covers: from 0, or stacked on the series before it in its category. Bars stack
-    // positives up and negatives down; stacked lines and areas add up as they go; 100% stacked is a share of the category.
-    const grouping = attr(child(group, 'grouping'), 'val') ?? ''
-    const percent = grouping === 'percentStacked'
-    const stacked = percent || grouping === 'stacked'
-    const totals = categories.map((_, at) => series.reduce((sum, s) => sum + Math.abs(s.values[at] ?? 0), 0))
-    const up = categories.map(() => 0)
-    const down = categories.map(() => 0)
-    const spans = series.map((s) =>
-      s.values.map((raw, at): [number, number] | null => {
-        if (raw === null) return null
-        const value = percent ? (totals[at] ? (raw / totals[at]) * 100 : 0) : raw
-        if (!stacked) return [0, value]
-        const base = kind === 'barChart' && value < 0 ? down : up
-        const from = base[at]
-        base[at] = from + value
-        return [from, base[at]]
-      })
-    )
-    let max = 0
-    let min = 0
-    for (const list of spans) for (const span of list) if (span) for (const v of span) (max = Math.max(max, v)), (min = Math.min(min, v))
-    if (max === min) max = min + 1
-    const step = niceStep((max - min) / 5)
-    const top2 = Math.ceil(max / step) * step
-    const bottom = Math.floor(min / step) * step
-    // A value near the largest number overflows the axis to Infinity: such a chart shows as a labelled box.
-    if (![max, min, step, top2, bottom, top2 - bottom].every(Number.isFinite)) return null
-    // Bar charts may run sideways (barDir="bar"): the same drawing with the axes swapped, first category at the bottom.
-    const horizontal = kind === 'barChart' && attr(child(group, 'barDir'), 'val') === 'bar'
-    const left = horizontal ? Math.min(W * 0.3, 70) : 36
-    const plotTop = top + 4
-    const plotBottom = H - legendH - 20
-    const plotH = Math.max(1, plotBottom - plotTop)
-    const plotW = Math.max(1, W - left - 8)
-    const catLength = horizontal ? plotH : plotW
-    const valLength = horizontal ? plotW : plotH
-    const dist = (value: number) => ((value - bottom) / (top2 - bottom || 1)) * valLength
-    const point = (c: number, d: number): [number, number] => (horizontal ? [left + d, plotBottom - c] : [left + c, plotBottom - d])
-    const n = Math.max(1, categories.length || series[0].values.length)
-    const slot = catLength / n
-    for (let tick = 0; tick <= 100; tick++) {
-      const v = bottom + tick * step
-      if (v > top2 + step / 2) break
-      const label = `${formatNumber(v)}${percent ? '%' : ''}`
-      const [x1, y1] = point(0, dist(v))
-      const [x2, y2] = point(catLength, dist(v))
-      svg += `<line x1="${round(x1)}" x2="${round(x2)}" y1="${round(y1)}" y2="${round(y2)}" stroke="#d9d9d9" stroke-width="0.5"/>`
-      svg += horizontal
-        ? `<text x="${round(x1)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}" fill="${textColor}">${escapeHtml(label)}</text>`
-        : `<text x="${left - 4}" y="${round(y1 + 3)}" text-anchor="end" font-size="${fs}" fill="${textColor}">${escapeHtml(label)}</text>`
-    }
-    categories.forEach((name, at) => {
-      const [x, y] = point(slot * (at + 0.5), 0)
-      svg += horizontal
-        ? `<text x="${round(left - 4)}" y="${round(y + 3)}" text-anchor="end" font-size="${fs}" fill="${textColor}">${escapeHtml(name)}</text>`
-        : `<text x="${round(x)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}" fill="${textColor}">${escapeHtml(name)}</text>`
-    })
-    if (kind === 'barChart') {
-      const width = stacked ? slot * 0.6 : (slot * 0.7) / series.length
-      series.forEach((s, si) => {
-        spans[si].forEach((span, at) => {
-          if (span === null) return
-          const c0 = slot * at + slot * (stacked ? 0.2 : 0.15) + (stacked ? 0 : width * si)
-          const [from, to] = span
-          const [ax, ay] = point(c0, dist(from))
-          const [bx, by] = point(c0 + width, dist(to))
-          svg += `<rect x="${round(Math.min(ax, bx))}" y="${round(Math.min(ay, by))}" width="${round(Math.abs(bx - ax))}" height="${round(Math.abs(by - ay))}" fill="${s.color}"/>`
-        })
-      })
-    } else {
-      series.forEach((s, si) => {
-        const at = (c: number, v: number) => point(slot * (c + 0.5), dist(v)).map((n) => round(n)).join(',')
-        const shown = spans[si].map((span, c) => (span ? { c, span } : null)).filter((item) => item !== null)
-        const upper = shown.map(({ c, span }) => at(c, span[1]))
-        if (!upper.length) return
-        // An area runs along its values and back along what it stands on (0, or the series below it).
-        const lower = shown.map(({ c, span }) => at(c, span[0])).reverse()
-        if (kind === 'areaChart') svg += `<path d="M${upper.join(' L')} L${lower.join(' L')} Z" fill="${s.color}" opacity="0.7"/>`
-        else svg += `<polyline points="${upper.join(' ')}" fill="none" stroke="${s.color}" stroke-width="2"/>`
-      })
-    }
-    if (legendH) svg += legend(series.map((s) => ({ name: s.name, color: s.color })), W, H - 6, fs, textColor)
-  }
-  const text = [title, ...series.map((s) => s.name), ...categories].filter(Boolean).join(' ')
-  return {
-    html: `<svg class="pp-geom" viewBox="0 0 ${round(W)} ${round(H)}" font-family="${font.replace(/"/g, '')}" role="img" aria-label="${escapeHtml(title || '圖表')}">${svg}</svg>`,
-    text
-  }
-}
-
-function legend(items: { name: string; color: string }[], W: number, y: number, fs: number, color: string): string {
-  const widths = items.map((item) => 14 + [...item.name].reduce((sum, ch) => sum + (/[⺀-￯]/.test(ch) ? fs : fs * 0.55), 0) + 10)
-  let x = (W - widths.reduce((a, b) => a + b, 0)) / 2
-  return items
-    .map((item, at) => {
-      const out = `<rect x="${round(x)}" y="${round(y - fs + 2)}" width="8" height="8" fill="${item.color}"/><text x="${round(x + 11)}" y="${round(y)}" font-size="${fs}" fill="${color}">${escapeHtml(item.name)}</text>`
-      x += widths[at]
-      return out
-    })
-    .join('')
-}
-
-function niceStep(raw: number): number {
-  if (!(raw > 0)) return 1
-  const power = 10 ** Math.floor(Math.log10(raw))
-  const unit = raw / power
-  return (unit <= 1 ? 1 : unit <= 2 ? 2 : unit <= 5 ? 5 : 10) * power
-}
-
-const formatNumber = (value: number) => (Math.abs(value) >= 1000 ? value.toLocaleString('en-US') : String(round(value, 2)))
 
 // ---------------------------------------------------------------------------------------------
 // Backgrounds and notes

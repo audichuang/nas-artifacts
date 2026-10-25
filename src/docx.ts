@@ -1,5 +1,7 @@
 import { posix } from 'node:path'
 import { escapeHtml, injectBridge } from './content-render.ts'
+import { chartTitle, renderChart } from './office-chart.ts'
+import { fillShade, shapeGeometry } from './office-geometry.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, XmlError, type XmlNode } from './xml.ts'
 import { ZipReader, ZipError } from './zip.ts'
@@ -12,6 +14,8 @@ import { ZipReader, ZipError } from './zip.ts'
  * (charts, SmartArt, OLE objects) shows as a labelled box; the original file is one download away.
  */
 const EMU_PER_PT = 12700
+/** Office's default theme accents, for a file without a theme of its own. */
+const OFFICE_ACCENTS = ['4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47']
 const LIMITS = { blocks: 20_000, cells: 50_000, cellBlocks: 100_000, notes: 2_000, depth: 12, chain: 20 }
 /** The largest list start Word accepts; a file's bigger number is clamped to it. */
 const MAX_LIST_START = 32_767
@@ -2431,6 +2435,7 @@ class DocxRenderer {
       case 'wpc':
         return this.group(node, scope, size, w, h)
       case 'chart':
+        return this.chart(node, scope, size, w, h, fill)
       case 'chartex':
         return unsupported('圖表', w, h)
       case 'relIds':
@@ -2438,6 +2443,31 @@ class DocxRenderer {
       default:
         return unsupported('圖形', w, h)
     }
+  }
+
+  /** A chart part (`c:chart` in a drawing) drawn by the shared chart renderer at the drawing's extent; a labelled box when it cannot be drawn. */
+  private chart(node: XmlNode, scope: Scope, size: string, w: number, h: number, fill: boolean): string {
+    const rel = this.pkg.rel(scope.story.part, relAttr(node, 'id'))
+    const xml = rel && !rel.external && this.pkg.zip.has(rel.target) ? this.pkg.xml(rel.target) : null
+    if (!xml) return unsupported('圖表', w, h, '檔案裡找不到這張圖表')
+    const drawn = w > 0 && h > 0
+      ? renderChart(xml, {
+          widthPt: w,
+          heightPt: h,
+          resolveColor: (holder) => {
+            const color = holder?.children.map((c) => this.drawingColor(c)).find(Boolean)
+            return color ? cssColor(color) : null
+          },
+          themeColor: (i) => `#${this.theme.colors[`accent${i + 1}`] ?? OFFICE_ACCENTS[i % 6]}`,
+          fontFamily: this.fontStack({}),
+          // Office's chart text is the text colour at 65% (#595959 on black text).
+          textColor: `#${!this.theme.colors.dk1 || this.theme.colors.dk1.toUpperCase() === '000000' ? '595959' : this.theme.colors.dk1}`
+        })
+      : null
+    const title = chartTitle(xml)
+    if (!drawn) return unsupported(title ? `圖表「${title}」` : '圖表', w, h)
+    const ratio = !fill ? `;aspect-ratio:${round(w)}/${round(h)}` : ''
+    return `<span class="dx-chart" style="${size}${ratio}">${drawn.svg}</span>`
   }
 
   /** The box for a picture that cannot be shown (missing, linked from outside the file, or in a format browsers do not draw); null when it can. */
@@ -2475,29 +2505,50 @@ class DocxRenderer {
     }
     const ln = child(spPr, 'ln')
     let border: string | null = null
+    let lineColor: Rgba | null = null
     const lineFill = this.fillColor(ln)
     const lineWidth = clamp((num(ln, 'w') ?? 9525) / EMU_PER_PT, 0.25, 20)
-    if (lineFill) border = `${pt(lineWidth)} solid ${cssColor(lineFill)}`
+    if (lineFill) lineColor = lineFill
     else if (lineFill === undefined) {
       const ref = child(style, 'lnRef')
-      const color = ref && (num(ref, 'idx') ?? 0) > 0 ? this.drawingColor(ref.children[0]) : null
-      if (color) border = `${pt(lineWidth)} solid ${cssColor(color)}`
+      lineColor = ref && (num(ref, 'idx') ?? 0) > 0 ? this.drawingColor(ref.children[0]) : null
     }
-    const geometry = attr(child(spPr, 'prstGeom'), 'prst') ?? 'rect'
+    if (lineColor) border = `${pt(lineWidth)} solid ${cssColor(lineColor)}`
+    const geomNode = child(spPr, 'prstGeom') ?? child(spPr, 'custGeom')
+    const geometry = geomNode ? (local(geomNode.name) === 'custGeom' ? 'custom' : attr(geomNode, 'prst') ?? 'rect') : 'rect'
     const content = path(wsp, 'txbx', 'txbxContent')
-    if (/line|connector/i.test(geometry) && !content) {
+    if ((geometry === 'line' || geometry === 'straightConnector1') && !content) {
       return border ? `<span class="dx-line" style="${fill ? 'width:100%' : `width:${pt(w)};max-width:100%`};border-top:${border}"></span>` : ''
     }
     if (!content && !background && !border) return ''
+    // A plain rectangle stays a CSS box; every other shape is its ECMA-376 geometry drawn behind the text, and the
+    // text sits in the geometry's text rectangle. A preset the standard does not define keeps a box and says so.
+    const shape = geometry === 'rect' ? null : shapeGeometry(spPr, w * EMU_PER_PT, h * EMU_PER_PT)
     const bodyPr = child(wsp, 'bodyPr')
-    const inset = (name: string, fallback: number) => pt(clamp((num(bodyPr, name) ?? fallback) / EMU_PER_PT, 0, 100))
+    const rect = shape && w > 0 && h > 0 ? shape.textRect : { l: 0, t: 0, r: w, b: h }
+    const inset = (name: string, fallback: number, extra: number) => pt(clamp((num(bodyPr, name) ?? fallback) / EMU_PER_PT, 0, 100) + clamp(extra, 0, 1000))
     const css = [size, 'box-sizing:border-box']
     if (!fill && h) css.push(`min-height:${pt(h)}`)
-    css.push(`padding:${inset('tIns', 45720)} ${inset('rIns', 91440)} ${inset('bIns', 45720)} ${inset('lIns', 91440)}`)
-    if (background) css.push(`background:${cssColor(background)}`)
-    if (border) css.push(`border:${border}`)
-    if (geometry === 'ellipse') css.push('border-radius:50%')
-    else if (geometry === 'roundRect') css.push('border-radius:12%/18%')
+    css.push(`padding:${inset('tIns', 45720, rect.t)} ${inset('rIns', 91440, w - rect.r)} ${inset('bIns', 45720, h - rect.b)} ${inset('lIns', 91440, rect.l)}`)
+    let svg = ''
+    if (shape) {
+      css.push('position:relative;z-index:0')
+      let paths = ''
+      if (background) {
+        for (const p of shape.paths) {
+          if (p.fill === 'none' || (!p.closed && geometry === 'custom')) continue
+          paths += `<path d="${p.d}" fill="${cssColor(background)}"/>`
+          const shade = fillShade(p.fill)
+          if (shade) paths += `<path d="${p.d}" fill="${shade.color}" fill-opacity="${shade.opacity}"/>`
+        }
+      }
+      if (lineColor) for (const p of shape.paths) if (p.stroke) paths += `<path d="${p.d}" fill="none" stroke="${cssColor(lineColor)}" stroke-width="${round(lineWidth)}" stroke-linejoin="round"/>`
+      if (paths) svg = `<svg class="dx-geom" viewBox="0 0 ${round(Math.max(w, 0.01))} ${round(Math.max(h, 0.01))}" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>`
+    } else {
+      if (background) css.push(`background:${cssColor(background)}`)
+      if (border) css.push(`border:${border}`)
+    }
+    const unknown = geometry !== 'rect' && geometry !== 'custom' && !shape ? unsupported(`未支援的圖形:${geometry}`) : ''
     const anchor = attr(bodyPr, 'anchor')
     if (anchor === 'ctr') css.push('justify-content:center')
     else if (anchor === 'b') css.push('justify-content:flex-end')
@@ -2510,11 +2561,11 @@ class DocxRenderer {
     if (content) {
       if (scope.depth >= LIMITS.depth) inner = unsupported('多層巢狀文字方塊')
       else {
-        const innerScope: Scope = { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, w - 14), dark: background ? isDark(background) : scope.dark, sheet: null }
+        const innerScope: Scope = { ...scope, layer: EMPTY_LAYER, depth: scope.depth + 1, width: Math.max(36, rect.r - rect.l - 14), dark: background ? isDark(background) : scope.dark, sheet: null }
         inner = this.renderBlocks(content.children, innerScope)
       }
     }
-    return `<span class="dx-txbx" style="${css.join(';')}">${inner}</span>`
+    return `<span class="dx-txbx" style="${css.join(';')}">${svg}${inner}${unknown}</span>`
   }
 
   private group(node: XmlNode, scope: Scope, size: string, w: number, h: number): string {
@@ -2971,6 +3022,9 @@ td{vertical-align:top}
 .dx-gi{position:absolute;display:block}
 .dx-gi>.dx-txbx{display:flex;overflow:hidden}
 .dx-wordart{display:inline-block;font-weight:700;white-space:nowrap;max-width:100%;overflow:hidden}
+.dx-geom{position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible;z-index:-1}
+.dx-chart{display:inline-block;max-width:100%;vertical-align:top;background:transparent}
+.dx-chart>svg{display:block}
 .dx-unsup{display:inline-block;max-width:100%;box-sizing:border-box;border:1px dashed #9aa0a6;background:#f6f7f9;color:#5f6368;font:12px/1.45 sans-serif;font-style:normal;font-weight:400;padding:6px 8px;vertical-align:middle;white-space:normal;text-indent:0;text-align:center}
 .dx-notice{box-sizing:border-box;max-width:min(100%,640px);margin:0 auto 12px;background:#fff8e1;border:1px solid #ecd28b;color:#5d4500;font:13px/1.5 sans-serif;padding:8px 12px;border-radius:6px}
 .dx-lnk{color:inherit;text-decoration:none}

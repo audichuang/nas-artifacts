@@ -609,3 +609,54 @@ describe('any Word file draws faithfully (stress round 2)', () => {
     assert.doesNotMatch(visible.replace(/Word|\.docx|x\.docx/g, ''), /[A-Za-z]{4,}/, visible)
   })
 })
+
+describe('Word drawings: charts and shape geometry', () => {
+  const docWith = (body: string, parts: Record<string, string> = {}, relList: [string, string, string][] = []) =>
+    zip({
+      'word/document.xml': `<w:document ${W}><w:body>${body}</w:body></w:document>`,
+      'word/_rels/document.xml.rels': rels(relList),
+      'word/theme/theme1.xml': theme,
+      ...parts
+    })
+  const inline = (cx: number, cy: number, graphic: string, uri: string) =>
+    p(`<w:r><w:drawing><wp:inline><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="3" name="d"/><a:graphic><a:graphicData uri="${uri}">${graphic}</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`)
+  const C = 'xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+  const ser = (values: number[]) =>
+    `<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>S!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>銷售</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:f>S!$A$2:$A$4</c:f><c:strCache><c:ptCount val="${values.length}"/>${values.map((_, i) => `<c:pt idx="${i}"><c:v>季${i + 1}</c:v></c:pt>`).join('')}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>S!$B$2:$B$4</c:f><c:numCache><c:ptCount val="${values.length}"/>${values.map((v, i) => `<c:pt idx="${i}"><c:v>${v}</c:v></c:pt>`).join('')}</c:numCache></c:numRef></c:val></c:ser>`
+  const axes = '<c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx>'
+
+  test('a chart in a drawing is drawn as an SVG at its extent, in the theme colours; a missing part is a labelled box', () => {
+    const chart = `<c:chartSpace ${C}><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>季報</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>${ser([3, 5, 4])}<c:axId val="1"/><c:axId val="2"/></c:barChart>${axes}</c:plotArea></c:chart></c:chartSpace>`
+    const graphic = '<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rC"/>'
+    const uri = 'http://schemas.openxmlformats.org/drawingml/2006/chart'
+    const doc = readDocx(
+      docWith(inline(5486400, 3200400, graphic, uri) + inline(914400, 914400, graphic.replace('rC', 'gone'), uri), { 'word/charts/chart1.xml': chart }, [['rC', 'chart', 'charts/chart1.xml'], ['rT', 'theme', 'theme/theme1.xml']]),
+      ''
+    )
+    // 5486400 × 3200400 EMU is 432 × 252 pt.
+    assert.match(doc.html, /<span class="dx-chart" style="width:432pt[^"]*aspect-ratio:432\/252"><svg [^>]*viewBox="0 0 432 252"[^>]*aria-label="季報"/)
+    assert.equal((doc.html.match(/<rect [^>]*fill="#4472C4"/g) ?? []).length, 3)
+    assert.match(doc.html, />季1<\/text>/)
+    assert.match(doc.html, /class="dx-unsup"[^>]*>圖表\(檔案裡找不到這張圖表\)</)
+    // A file with no theme still colours its series apart, with Office's default accents; the line group of a combo is drawn too.
+    const combo = `<c:chartSpace ${C}><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>${ser([3, 5, 4])}<c:axId val="1"/><c:axId val="2"/></c:barChart><c:lineChart><c:grouping val="standard"/>${ser([4, 2, 6]).replace(/<c:idx val="0"\/><c:order val="0"\/>/, '<c:idx val="1"/><c:order val="1"/>')}<c:axId val="1"/><c:axId val="2"/></c:lineChart>${axes}</c:plotArea></c:chart></c:chartSpace>`
+    const bare = zip({ 'word/document.xml': `<w:document ${W}><w:body>${inline(5486400, 3200400, graphic, uri)}</w:body></w:document>`, 'word/_rels/document.xml.rels': rels([['rC', 'chart', 'charts/chart1.xml']]), 'word/charts/chart1.xml': combo })
+    const html = readDocx(bare, '').html
+    assert.equal((html.match(/<rect [^>]*fill="#4472C4"/g) ?? []).length, 3)
+    assert.match(html, /<path d="M[^"]*" fill="none" stroke="#ED7D31"/)
+  })
+
+  test("a non-rectangular shape draws its geometry behind its text, which sits in the shape's text rectangle", () => {
+    const shape = (prst: string) =>
+      `<wps:wsp><wps:spPr><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent>${p(r('心裡的字'))}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp>`
+    const uri = 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape'
+    const html = readDocx(docWith(inline(914400, 914400, shape('heart'), uri) + inline(914400, 914400, shape('ellipse'), uri) + inline(914400, 914400, shape('notAShape'), uri)), '').html
+    const [heart, ellipse, unknown] = [...html.matchAll(/<span class="dx-txbx" style="([^"]*)">([\s\S]*?)<\/span>/g)].map((m) => ({ style: m[1], body: m[2] }))
+    assert.match(heart.body, /^<svg class="dx-geom" viewBox="0 0 72 72"[^>]*><path d="M[^"]*C[^"]*" fill="rgb\(255,0,0\)"\/><path d="M[^"]*C[^"]*" fill="none" stroke="rgb\(0,0,255\)"/)
+    assert.doesNotMatch(heart.style, /background:|border:|border-radius/)
+    // An ellipse's text rectangle is inset 14.6% (10.54 pt of 72) on every side.
+    assert.match(ellipse.style, /padding:10\.5\d*pt 10\.5\d*pt 10\.5\d*pt 10\.5\d*pt/)
+    assert.match(unknown.style, /background:rgb\(255,0,0\)/)
+    assert.match(html, /未支援的圖形:notAShape/)
+  })
+})

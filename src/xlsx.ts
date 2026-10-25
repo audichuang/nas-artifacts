@@ -7,6 +7,8 @@
  */
 import { posix } from 'node:path'
 import { escapeHtml, injectBridge } from './content-render.ts'
+import { chartTitle, renderChart, type ChartResult } from './office-chart.ts'
+import { fillShade, presetGeometry, shapeGeometry } from './office-geometry.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, tagAttrs, type XmlNode } from './xml.ts'
 import { ZipReader } from './zip.ts'
@@ -21,6 +23,7 @@ export const XLSX_LIMITS = {
 }
 
 const EMU_PER_PX = 9525
+const EMU_PER_PT = 12700
 const UNSUPPORTED = '網頁版未支援,請下載原始檔查看'
 
 // ---------------------------------------------------------------------------------------------
@@ -2452,36 +2455,34 @@ function findDeep(node: XmlNode, name: string): XmlNode | null {
   return null
 }
 
+let markerCount = 0
+
 function renderShape(node: XmlNode, box: Box, ctx: DrawCtx): string {
   const spPr = child(node, 'spPr')
   const theme = ctx.wb.theme
-  const xfrm = xfrmOf(child(spPr, 'xfrm'))
+  const xfrmNode = child(spPr, 'xfrm')
+  const xfrm = xfrmOf(xfrmNode)
   const styleRef = child(node, 'style')
-  const css: string[] = [boxStyle(box, xfrm?.rot ?? 0)]
-  const fill = child(spPr, 'solidFill')
-  const fillColor = fill ? drawingColor(fill, theme) : child(spPr, 'noFill') ? null : drawingColor(child(styleRef, 'fillRef'), theme)
-  if (fillColor && local(node.name) !== 'cxnSp') css.push(`background:${cssDrawing(fillColor)}`)
+  const connector = local(node.name) === 'cxnSp'
+  // A gradient shows as its first stop's colour.
+  const fill = child(spPr, 'solidFill') ?? child(child(child(spPr, 'gradFill'), 'gsLst'), 'gs')
+  const fillColor = connector ? null : fill ? drawingColor(fill, theme) : child(spPr, 'noFill') ? null : drawingColor(child(styleRef, 'fillRef'), theme)
   const ln = child(spPr, 'ln')
-  const lineColor = child(ln, 'noFill') ? null : drawingColor(child(ln, 'solidFill'), theme) ?? drawingColor(child(styleRef, 'lnRef'), theme)
+  const lineColor = child(ln, 'noFill') ? null : drawingColor(child(ln, 'solidFill'), theme) ?? drawingColor(child(styleRef, 'lnRef'), theme) ?? (connector ? { hex: '000000', alpha: 1 } : null)
   const lineWidth = Math.max(1, (num(ln, 'w') ?? 9525) / EMU_PER_PX)
-  const geometry = attr(child(spPr, 'prstGeom'), 'prst') ?? 'rect'
-  if (local(node.name) === 'cxnSp' || geometry === 'line' || geometry.includes('Connector')) {
-    // A connector: a line across its box (direction from the flips).
-    const color = lineColor ? cssDrawing(lineColor) : '#000'
-    const flipH = attr(child(spPr, 'xfrm'), 'flipH') === '1'
-    const flipV = attr(child(spPr, 'xfrm'), 'flipV') === '1'
-    const [x1, x2] = flipH ? [box.w, 0] : [0, box.w]
-    const [y1, y2] = flipV ? [box.h, 0] : [0, box.h]
-    return `<svg class="xl-draw" style="${boxStyle({ ...box, w: Math.max(box.w, 1), h: Math.max(box.h, 1) })};overflow:visible" viewBox="0 0 ${round(Math.max(box.w, 1), 1)} ${round(Math.max(box.h, 1), 1)}" aria-hidden="true"><line x1="${round(x1, 1)}" y1="${round(y1, 1)}" x2="${round(x2, 1)}" y2="${round(y2, 1)}" stroke="${color}" stroke-width="${round(lineWidth, 1)}"/></svg>`
-  }
-  if (lineColor) css.push(`border:${round(lineWidth, 1)}px solid ${cssDrawing(lineColor)}`)
-  if (geometry === 'ellipse') css.push('border-radius:50%')
-  else if (geometry === 'roundRect') css.push('border-radius:12px')
+  const geomNode = child(spPr, 'prstGeom') ?? child(spPr, 'custGeom')
+  const prst = geomNode && local(geomNode.name) === 'prstGeom' ? attr(geomNode, 'prst') ?? 'rect' : null
+  // A plain rectangle stays a CSS box; every other shape is its ECMA-376 geometry, evaluated for the box it is drawn in.
+  const plain = !connector && (!geomNode || prst === 'rect')
+  const wEmu = box.w * EMU_PER_PX
+  const hEmu = box.h * EMU_PER_PX
+  const shape = plain ? null : geomNode ? shapeGeometry(spPr, wEmu, hEmu) : presetGeometry('line', wEmu, hEmu, {})
+  const unknown = !plain && !shape
   const txBody = child(node, 'txBody')
   const fontColor = drawingColor(child(styleRef, 'fontRef'), theme)
   const anchor = attr(child(txBody, 'bodyPr'), 'anchor') ?? 't'
-  css.push(`justify-content:${anchor === 'ctr' ? 'center' : anchor === 'b' ? 'flex-end' : 'flex-start'}`)
-  if (fontColor) css.push(`color:${cssDrawing(fontColor)}`)
+  const textCss: string[] = [`justify-content:${anchor === 'ctr' ? 'center' : anchor === 'b' ? 'flex-end' : 'flex-start'}`]
+  if (fontColor) textCss.push(`color:${cssDrawing(fontColor)}`)
   let body = ''
   for (const paragraph of children(txBody, 'p')) {
     const algn = attr(child(paragraph, 'pPr'), 'algn')
@@ -2507,7 +2508,67 @@ function renderShape(node: XmlNode, box: Box, ctx: DrawCtx): string {
     }
     body += `<p${align ? ` style="text-align:${align}"` : ''}>${line || '&#8203;'}</p>`
   }
-  return `<div class="xl-draw xl-shape" style="${css.join(';')}">${body}</div>`
+  if (!shape) {
+    const css: string[] = [boxStyle(box, xfrm?.rot ?? 0)]
+    if (fillColor) css.push(`background:${cssDrawing(fillColor)}`)
+    if (lineColor) css.push(`border:${round(lineWidth, 1)}px solid ${cssDrawing(lineColor)}`)
+    const label = unknown ? `<p class="xl-shape-note">${escapeHtml(`未支援的圖形:${prst}`)}</p>` : ''
+    return `<div class="xl-draw xl-shape" style="${[...css, ...textCss].join(';')}">${body}${label}</div>`
+  }
+  // Every fill first, then every stroke. Presets fill each path as the standard says; an open path of a custom shape
+  // is a line and takes no fill. Arrowheads go on open paths.
+  const custom = local(geomNode?.name ?? '') === 'custGeom'
+  const wPt = wEmu / EMU_PER_PT
+  const hPt = hEmu / EMU_PER_PT
+  const paint = fillColor ? cssDrawing(fillColor) : null
+  let paths = ''
+  if (paint) {
+    for (const p of shape.paths) {
+      if (p.fill === 'none' || (!p.closed && custom)) continue
+      paths += `<path d="${p.d}" fill="${paint}"/>`
+      const shade = fillShade(p.fill)
+      if (shade) paths += `<path d="${p.d}" fill="${shade.color}" fill-opacity="${shade.opacity}"/>`
+    }
+  }
+  let defs = ''
+  if (lineColor) {
+    const color = cssDrawing(lineColor)
+    let ends = ''
+    const end = (name: 'headEnd' | 'tailEnd') => {
+      const type = attr(child(ln, name), 'type')
+      if (!type || type === 'none') return
+      const id = `xl-m${markerCount++}`
+      const shapeOf = type === 'oval' ? '<circle cx="5" cy="5" r="4"/>' : type === 'diamond' ? '<path d="M5,0 L10,5 L5,10 L0,5 Z"/>' : '<path d="M0,0 L10,5 L0,10 Z"/>'
+      defs += `<marker id="${id}" viewBox="0 0 10 10" refX="${type === 'oval' || type === 'diamond' ? 5 : 9}" refY="5" markerWidth="4" markerHeight="4" orient="${name === 'headEnd' ? 'auto-start-reverse' : 'auto'}" fill="${color}">${shapeOf}</marker>`
+      ends += ` marker-${name === 'headEnd' ? 'start' : 'end'}="url(#${id})"`
+    }
+    if (shape.paths.some((p) => p.stroke && !p.closed)) {
+      end('headEnd')
+      end('tailEnd')
+    }
+    for (const p of shape.paths) {
+      if (p.stroke) paths += `<path d="${p.d}" fill="none" stroke="${color}" stroke-width="${round(lineWidth, 1)}" vector-effect="non-scaling-stroke" stroke-linejoin="round"${p.closed ? '' : ends}/>`
+    }
+  }
+  if (!paths && !body) return ''
+  // A line with no height (or width) gets a box one pixel thick, centred on it.
+  const flatW = box.w < 0.5
+  const flatH = box.h < 0.5
+  const viewBox = [flatW ? -0.375 : 0, flatH ? -0.375 : 0, flatW ? 0.75 : wPt, flatH ? 0.75 : hPt].map((v) => round(v, 3)).join(' ')
+  const flip = [attr(xfrmNode, 'flipH') === '1' ? 'scaleX(-1)' : '', attr(xfrmNode, 'flipV') === '1' ? 'scaleY(-1)' : ''].filter(Boolean).join(' ')
+  const svgStyle = [flatW ? 'left:-0.5px;width:1px' : '', flatH ? 'top:-0.5px;height:1px' : '', flip ? `transform:${flip}` : ''].filter(Boolean).join(';')
+  const svg = paths ? `<svg class="xl-geom" viewBox="${viewBox}" preserveAspectRatio="none"${svgStyle ? ` style="${svgStyle}"` : ''} aria-hidden="true">${defs ? `<defs>${defs}</defs>` : ''}${paths}</svg>` : ''
+  // Text sits in the geometry's text rectangle (a flip moves the rectangle, not the letters).
+  let text = ''
+  if (body) {
+    const { l, t, r, b } = shape.textRect
+    const pc = (value: number, of: number) => `${round(of > 0 ? (value / of) * 100 : 0, 3)}%`
+    const left = flip.includes('scaleX') ? wPt - r : l
+    const top = flip.includes('scaleY') ? hPt - b : t
+    const rect = r > l && b > t ? `left:${pc(left, wPt)};top:${pc(top, hPt)};width:${pc(r - l, wPt)};height:${pc(b - t, hPt)}` : 'inset:0'
+    text = `<div class="xl-shape xl-shape-tx" style="${[rect, ...textCss].join(';')}">${body}</div>`
+  }
+  return `<div class="xl-draw xl-geo" style="${boxStyle(box, xfrm?.rot ?? 0)}">${svg}${text}</div>`
 }
 
 function renderGraphicFrame(node: XmlNode, box: Box, ctx: DrawCtx): string {
@@ -2518,289 +2579,30 @@ function renderGraphicFrame(node: XmlNode, box: Box, ctx: DrawCtx): string {
     const rel = ctx.wb.pkg.rel(ctx.part, relAttr(chartRef, 'id'))
     const chart = rel && !rel.external ? ctx.wb.pkg.xml(rel.target) : null
     if (!chart) return missingBox(box, `圖表(找不到圖表內容)`)
-    const drawn = renderChart(chart, box.w, box.h, ctx.wb.theme, (formula) => lookupRange(ctx.wb, formula))
+    const drawn = drawChart(chart, box.w, box.h, ctx.wb)
     ctx.text.push(drawn?.text ?? chartTitle(chart))
     if (!drawn) return missingBox(box, `圖表${chartTitle(chart) ? `「${chartTitle(chart)}」` : ''}(此圖表類型${UNSUPPORTED})`)
-    return `<div class="xl-draw xl-chart" style="${boxStyle(box)}">${drawn.html}</div>`
+    return `<div class="xl-draw xl-chart" style="${boxStyle(box)}">${drawn.svg}</div>`
   }
   return missingBox(box, `物件(${UNSUPPORTED})`)
 }
 
-// Charts from the values cached in the chart part (what Excel drew last time it saved).
-
-function cachedValues(node: XmlNode | null): (string | null)[] {
-  const cache = node ? findDeep(node, 'numCache') ?? findDeep(node, 'strCache') ?? findDeep(node, 'multiLvlStrCache') : null
-  if (!cache) {
-    const literal = node ? findDeep(node, 'numLit') ?? findDeep(node, 'strLit') : null
-    if (!literal) return []
-    return children(literal, 'pt').slice(0, XLSX_LIMITS.chartPoints).map((point) => child(point, 'v')?.text ?? null)
-  }
-  const count = Math.min(num(child(cache, 'ptCount'), 'val') ?? 0, XLSX_LIMITS.chartPoints)
-  const out: (string | null)[] = Array.from({ length: count }, () => null)
-  const points = local(cache.name) === 'multiLvlStrCache' ? children(child(cache, 'lvl'), 'pt') : children(cache, 'pt')
-  for (const point of points) {
-    const at = num(point, 'idx') ?? -1
-    if (at >= 0 && at < out.length) out[at] = child(point, 'v')?.text ?? null
-  }
-  return out
-}
-
-function chartTitle(chart: XmlNode): string {
-  const title = path(chart, 'chart', 'title')
-  if (!title) return ''
-  const runs: string[] = []
-  const walk = (node: XmlNode) => {
-    for (const item of node.children) {
-      if (local(item.name) === 't' || local(item.name) === 'v') runs.push(item.text)
-      else walk(item)
-    }
-  }
-  walk(title)
-  return runs.join('').slice(0, 200)
-}
-
-const SERIES_DEFAULTS = ['accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6']
-
-function niceStep(raw: number): number {
-  if (!(raw > 0)) return 1
-  const power = 10 ** Math.floor(Math.log10(raw))
-  const unit = raw / power
-  return (unit <= 1 ? 1 : unit <= 2 ? 2 : unit <= 5 ? 5 : 10) * power
-}
-
-const axisNumber = (value: number) => (Math.abs(value) >= 1000 ? Math.round(value).toLocaleString('en-US') : String(round(value, 2)))
-
-/** Rough text width in SVG units: CJK full width, Latin a little over half. */
-const textWidth = (text: string, fs: number) => [...text].reduce((sum, ch) => sum + (/[⺀-￯]/.test(ch) ? fs : fs * 0.58), 0)
-
-type LegendItem = { name: string; color: string }
-
-/** Legend entries in centred lines that fit the chart's width. */
-function legendLines(items: LegendItem[], W: number, fs: number): LegendItem[][] {
-  const lines: LegendItem[][] = []
-  let line: LegendItem[] = []
-  let used = 0
-  for (const item of items.slice(0, 40)) {
-    const width = 24 + textWidth(item.name, fs)
-    if (line.length && used + width > W - 8) {
-      lines.push(line)
-      line = []
-      used = 0
-    }
-    line.push(item)
-    used += width
-  }
-  if (line.length) lines.push(line)
-  return lines.slice(0, 4)
-}
-
-function legend(lines: LegendItem[][], W: number, bottom: number, fs: number): string {
-  let out = ''
-  lines.forEach((line, row) => {
-    const y = bottom - (lines.length - 1 - row) * (fs + 4)
-    const widths = line.map((item) => 24 + textWidth(item.name, fs))
-    let x = Math.max(4, (W - widths.reduce((a, b) => a + b, 0)) / 2)
-    line.forEach((item, at) => {
-      out += `<rect x="${round(x)}" y="${round(y - fs + 2)}" width="8" height="8" fill="${item.color}"/><text x="${round(x + 11)}" y="${round(y)}" font-size="${fs}">${escapeHtml(item.name)}</text>`
-      x += widths[at]
-    })
+/** A chart part drawn by the shared chart renderer at W × H (any unit: only the proportions and text scale follow). */
+function drawChart(chart: XmlNode, W: number, H: number, wb: Workbook): ChartResult | null {
+  const theme = wb.theme
+  return renderChart(chart, {
+    widthPt: W,
+    heightPt: H,
+    resolveColor: (holder) => {
+      const color = drawingColor(holder, theme)
+      return color ? cssDrawing(color) : null
+    },
+    themeColor: (i) => `#${theme.scheme[`accent${i + 1}`] ?? '4472C4'}`,
+    fontFamily: fontStack(theme.minor, theme.minorEa),
+    textColor: `#${theme.scheme.dk1 === '000000' ? '595959' : theme.scheme.dk1}`,
+    // A tool that writes no cache (openpyxl) still names the cells: read them from this workbook.
+    readCells: (formula) => lookupRange(wb, formula)
   })
-  return out
-}
-
-/**
- * A series' values: the cache Excel saved, or, when a tool wrote none (openpyxl does not), the
- * cells its formula names, read from this workbook.
- */
-type Lookup = (formula: string) => (string | null)[]
-
-function seriesValues(node: XmlNode | null, lookup: Lookup | null): (string | null)[] {
-  // A series name may be written as plain text (<c:tx><c:v>…</c:v></c:tx>).
-  const literal = child(node, 'v')
-  if (literal) return [literal.text]
-  const cached = cachedValues(node)
-  if (cached.length || !node || !lookup) return cached
-  const formula = findDeep(node, 'f')?.text
-  return formula ? lookup(formula) : []
-}
-
-function renderChart(chart: XmlNode, W: number, H: number, theme: Theme, lookup: Lookup | null = null): { html: string; text: string } | null {
-  const plot = path(chart, 'chart', 'plotArea')
-  if (!plot) return null
-  const kinds = ['barChart', 'bar3DChart', 'lineChart', 'line3DChart', 'areaChart', 'area3DChart', 'pieChart', 'pie3DChart', 'doughnutChart', 'scatterChart', 'radarChart']
-  const group = plot.children.find((node) => kinds.includes(local(node.name)))
-  if (!group) return null
-  const kind = local(group.name).replace('3D', '')
-  // Scatter and radar charts need their own axes; a category line through x values in file order
-  // would misstate them, so they stay a labelled box.
-  if (kind === 'scatterChart' || kind === 'radarChart') return null
-  let categories: string[] = []
-  const series = children(group, 'ser').slice(0, 50).map((ser, at) => {
-    const name = seriesValues(child(ser, 'tx'), lookup)[0] ?? `數列 ${at + 1}`
-    if (!categories.length) categories = seriesValues(child(ser, 'cat') ?? child(ser, 'xVal'), lookup).map((v) => v ?? '')
-    const values = seriesValues(child(ser, 'val') ?? child(ser, 'yVal'), lookup).map((v) => (v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v)))
-    // Bars and slices take the fill (a gradient's first stop will do); lines take their stroke.
-    const area = drawingColor(path(ser, 'spPr', 'solidFill'), theme) ?? drawingColor(path(ser, 'spPr', 'gradFill', 'gsLst', 'gs'), theme)
-    const stroke = drawingColor(path(ser, 'spPr', 'ln', 'solidFill'), theme)
-    const fill = kind === 'lineChart' ? stroke ?? area : area
-    const fallback = applyTint(theme.scheme[SERIES_DEFAULTS[at % 6]] ?? '4472C4', at >= 6 ? -0.25 : 0)
-    return { name, values, color: fill ? cssDrawing(fill) : `#${fallback}`, ser }
-  })
-  if (!series.length) return null
-  const length = Math.min(XLSX_LIMITS.chartPoints, Math.max(categories.length, ...series.map((s) => s.values.length)))
-  categories = Array.from({ length }, (_, at) => categories[at] ?? String(at + 1))
-  const title = chartTitle(chart)
-  const fs = 10
-  const textColor = `#${theme.scheme.dk1 === '000000' ? '404040' : theme.scheme.dk1}`
-  let svg = ''
-  const top = title ? 24 : 8
-  if (title) svg += `<text x="${round(W / 2)}" y="16" text-anchor="middle" font-size="13" font-weight="700">${escapeHtml(title)}</text>`
-  const pie = kind === 'pieChart' || kind === 'doughnutChart'
-  const varied = !pie && series.length === 1 && attr(child(group, 'varyColors'), 'val') === '1'
-  const pointColor = (s: (typeof series)[number], at: number) => {
-    const dPt = children(s.ser, 'dPt').find((d) => num(child(d, 'idx'), 'val') === at)
-    const own = drawingColor(path(dPt, 'spPr', 'solidFill'), theme)
-    if (own) return cssDrawing(own)
-    return varied ? `#${applyTint(theme.scheme[SERIES_DEFAULTS[at % 6]] ?? '4472C4', at >= 6 ? -0.25 : 0)}` : s.color
-  }
-  const showLegend = Boolean(child(path(chart, 'chart'), 'legend')) || series.length > 1
-  const legendItems = !showLegend ? [] : pie || varied ? categories.map((name, at) => ({ name, color: '' })) : series.map((s) => ({ name: s.name, color: s.color }))
-  const lines = legendLines(legendItems, W, fs)
-  const legendH = lines.length ? lines.length * (fs + 4) + 4 : 0
-  if (pie) {
-    const values = series[0].values.map((v) => Math.max(0, v ?? 0))
-    const total = values.reduce((a, b) => a + b, 0) || 1
-    const r = Math.max(4, Math.min(W, H - top - legendH) / 2 - 6)
-    const cx = W / 2
-    const cy = top + (H - top - legendH) / 2
-    let angle = -Math.PI / 2
-    const colors = values.map((_, at) => {
-      const dPt = children(series[0].ser, 'dPt').find((d) => num(child(d, 'idx'), 'val') === at)
-      const c = drawingColor(path(dPt, 'spPr', 'solidFill'), theme)
-      return c ? cssDrawing(c) : `#${applyTint(theme.scheme[SERIES_DEFAULTS[at % 6]] ?? '4472C4', at >= 6 ? -0.25 : 0)}`
-    })
-    lines.forEach((line) => line.forEach((item) => (item.color = colors[categories.indexOf(item.name)] ?? series[0].color)))
-    values.forEach((value, at) => {
-      const sweep = (value / total) * Math.PI * 2
-      const end = angle + sweep
-      const [x1, y1, x2, y2] = [cx + r * Math.cos(angle), cy + r * Math.sin(angle), cx + r * Math.cos(end), cy + r * Math.sin(end)]
-      svg += sweep >= Math.PI * 2 - 1e-6
-        ? `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(r)}" fill="${colors[at]}"/>`
-        : `<path d="M${round(cx)},${round(cy)} L${round(x1)},${round(y1)} A${round(r)},${round(r)} 0 ${sweep > Math.PI ? 1 : 0} 1 ${round(x2)},${round(y2)} Z" fill="${colors[at]}" stroke="#fff" stroke-width="1"/>`
-      angle = end
-    })
-    if (kind === 'doughnutChart') svg += `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(r * 0.5)}" fill="#fff"/>`
-    svg += legend(lines, W, H - 6, fs)
-  } else {
-    if (varied) lines.forEach((line) => line.forEach((item) => (item.color = pointColor(series[0], categories.indexOf(item.name)))))
-    const grouping = attr(child(group, 'grouping'), 'val') ?? ''
-    const percent = grouping === 'percentStacked'
-    const stacked = grouping === 'stacked' || percent
-    // Each point's span on the value axis. Stacked bars pile positives up from 0 and negatives
-    // down from 0; stacked lines and areas add each series to the ones before it; 100% stacked
-    // ones divide by the category's total size, so every category ends at 100%.
-    const scale = categories.map((_, at) => {
-      if (!percent) return 1
-      const total = series.reduce((sum, s) => sum + Math.abs(s.values[at] ?? 0), 0)
-      return total ? 100 / total : 0
-    })
-    const up = categories.map(() => 0)
-    const down = categories.map(() => 0)
-    const spans = series.map((s) =>
-      s.values.slice(0, length).map((raw, at): { from: number; to: number } | null => {
-        // A gap in an area drops to the series below it; lines and bars just leave it out.
-        const gap = kind === 'areaChart' ? 0 : null
-        if (!stacked) return raw === null ? (gap === null ? null : { from: 0, to: 0 }) : { from: 0, to: raw }
-        const value = (raw ?? 0) * scale[at]
-        let from: number
-        if (kind === 'barChart') {
-          from = value < 0 ? down[at] : up[at]
-          if (value < 0) down[at] = from + value
-          else up[at] = from + value
-        } else {
-          from = up[at]
-          up[at] = from + value
-        }
-        return raw === null && gap === null ? null : { from, to: from + value }
-      })
-    )
-    const all = spans.flatMap((list) => list.flatMap((span) => (span ? [span.from, span.to] : [])))
-    let max = Math.max(0, ...all)
-    const min = Math.min(0, ...all)
-    if (max === min) max = min + 1
-    const step = niceStep((max - min) / 5)
-    const top2 = Math.ceil(max / step) * step
-    const bottom = Math.floor(min / step) * step
-    const horizontal = kind === 'barChart' && attr(child(group, 'barDir'), 'val') === 'bar'
-    // Value labels in the chart's own number format when it names one.
-    const valueCode = attr(path(plot, 'valAx', 'numFmt'), 'formatCode')
-    const valueLabel = (value: number) =>
-      percent ? `${axisNumber(value)}%` : valueCode && valueCode !== 'General' ? formatNumber(valueCode, value).text.trim() : axisNumber(value)
-    const valueTicks: number[] = []
-    for (let i = 0; i <= 50 && bottom + i * step <= top2 + step / 2; i++) valueTicks.push(Number((bottom + i * step).toPrecision(12)))
-    const widest = (labels: string[]) => Math.max(0, ...labels.map((label) => textWidth(label, fs)))
-    const left = horizontal ? Math.min(W * 0.35, widest(categories) + 10) : Math.min(W * 0.3, widest(valueTicks.map(valueLabel)) + 10)
-    const plotTop = top + 4
-    const plotBottom = H - legendH - 20
-    const plotH = Math.max(1, plotBottom - plotTop)
-    const plotW = Math.max(1, W - left - 8)
-    const catLength = horizontal ? plotH : plotW
-    const valLength = horizontal ? plotW : plotH
-    const dist = (value: number) => ((value - bottom) / (top2 - bottom || 1)) * valLength
-    const point = (c: number, d: number): [number, number] => (horizontal ? [left + d, plotBottom - c] : [left + c, plotBottom - d])
-    const n = Math.max(1, categories.length)
-    const slot = catLength / n
-    for (const v of valueTicks) {
-      const [x1, y1] = point(0, dist(v))
-      const [x2, y2] = point(catLength, dist(v))
-      svg += `<line x1="${round(x1)}" x2="${round(x2)}" y1="${round(y1)}" y2="${round(y2)}" stroke="#d9d9d9" stroke-width="0.5"/>`
-      svg += horizontal
-        ? `<text x="${round(x1)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}">${escapeHtml(valueLabel(v))}</text>`
-        : `<text x="${round(left - 4)}" y="${round(y1 + 3)}" text-anchor="end" font-size="${fs}">${escapeHtml(valueLabel(v))}</text>`
-    }
-    const labelEvery = Math.max(1, Math.ceil(n / Math.max(1, Math.floor(catLength / (horizontal ? 12 : 40)))))
-    categories.forEach((name, at) => {
-      if (at % labelEvery) return
-      const [x, y] = point(slot * (at + 0.5), 0)
-      svg += horizontal
-        ? `<text x="${round(left - 4)}" y="${round(y + 3)}" text-anchor="end" font-size="${fs}">${escapeHtml(name)}</text>`
-        : `<text x="${round(x)}" y="${round(plotBottom + 13)}" text-anchor="middle" font-size="${fs}">${escapeHtml(name)}</text>`
-    })
-    if (kind === 'barChart') {
-      const width = stacked ? slot * 0.6 : (slot * 0.7) / series.length
-      series.forEach((s, si) => {
-        spans[si].forEach((span, at) => {
-          if (!span) return
-          const c0 = slot * at + slot * (stacked ? 0.2 : 0.15) + (stacked ? 0 : width * si)
-          const [ax, ay] = point(c0, dist(span.from))
-          const [bx, by] = point(c0 + width, dist(span.to))
-          svg += `<rect x="${round(Math.min(ax, bx))}" y="${round(Math.min(ay, by))}" width="${round(Math.abs(bx - ax))}" height="${round(Math.abs(by - ay))}" fill="${pointColor(s, at)}"/>`
-        })
-      })
-    } else {
-      const at2 = (at: number, value: number) => point(slot * (at + 0.5), dist(value)).map((v) => round(v)).join(',')
-      series.forEach((s, si) => {
-        const list = spans[si]
-        if (!list.some(Boolean)) return
-        if (kind === 'areaChart') {
-          // An area runs over every category, a gap counted as 0, down to the series below it.
-          const tops = list.map((span, at) => at2(at, span ? span.to : 0))
-          const bottoms = list.map((span, at) => at2(at, span ? span.from : 0)).reverse()
-          svg += `<path d="M${tops.join(' L')} L${bottoms.join(' L')} Z" fill="${s.color}" opacity="0.7"/>`
-        } else {
-          const pts = list.flatMap((span, at) => (span ? [at2(at, span.to)] : []))
-          svg += `<polyline points="${pts.join(' ')}" fill="none" stroke="${s.color}" stroke-width="2"/>`
-        }
-      })
-    }
-    if (legendH) svg += legend(lines, W, H - 6, fs)
-  }
-  const text = [title, ...series.map((s) => s.name), ...categories.slice(0, 200)].filter(Boolean).join(' ')
-  const background = drawingColor(path(chart, 'spPr', 'solidFill'), theme)
-  return {
-    html: `<svg viewBox="0 0 ${round(W)} ${round(H)}" width="100%" height="100%" role="img" aria-label="${escapeHtml(title || '圖表')}" fill="${textColor}" style="background:${background ? cssDrawing(background) : '#fff'}">${svg}</svg>`,
-    text
-  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3316,10 +3118,10 @@ function renderChartsheet(wb: Workbook, entry: SheetEntry, wantHtml: boolean): S
     const aspect = Math.min(3, Math.max(0.5, box.w / Math.max(1, box.h)))
     const w = 720
     const h = Math.round(w / aspect)
-    const drawn = chart ? renderChart(chart, w, h, wb.theme, (formula) => lookupRange(wb, formula)) : null
+    const drawn = chart ? drawChart(chart, w, h, wb) : null
     text.push(drawn?.text ?? (chart ? chartTitle(chart) : ''))
     html += drawn
-      ? `<div class="xl-chartsheet" style="aspect-ratio:${round(w / h, 4)}">${drawn.html}</div>`
+      ? `<div class="xl-chartsheet" style="aspect-ratio:${round(w / h, 4)}">${drawn.svg}</div>`
       : `<p class="xl-note">圖表(此圖表類型${UNSUPPORTED})</p>`
   }
   return { html: wantHtml ? `<div class="xl-scroll xl-pad">${html || '<p class="xl-note">這張圖表工作表沒有內容。</p>'}</div>` : '', text, css: new Set() }
@@ -3410,8 +3212,12 @@ a.xl-link{color:inherit;cursor:pointer}
 .xl-chart{background:#fff;border:1px solid #d9d9d9}
 .xl-shape{display:flex;flex-direction:column;overflow:visible;padding:4px 7px;font-size:11pt;color:#000}
 .xl-shape p{margin:0}
+.xl-geo{overflow:visible}
+.xl-geom{position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible}
+.xl-shape-tx{position:absolute;box-sizing:border-box}
+.xl-shape-note{font-size:11px;color:#555}
 .xl-missing{display:flex;align-items:center;justify-content:center;text-align:center;padding:6px;background:#f6f6f6;border:1px dashed #9e9e9e;color:#555;font-size:12px;overflow:hidden}
-.xl-chartsheet{max-width:1100px;margin:0 auto;border:1px solid #d9d9d9}
+.xl-chartsheet{max-width:1100px;margin:0 auto;border:1px solid #d9d9d9;background:#fff}
 .xl-chartsheet svg{display:block}
 .xl-empty{padding:24px;color:#555}
 .xl-grid thead th.fc{z-index:5}

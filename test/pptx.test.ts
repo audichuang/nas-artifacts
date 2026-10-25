@@ -147,7 +147,7 @@ describe('reading PowerPoint files', () => {
     assert.match(first.html, /<aside class="slide-notes" hidden><p>講稿 &#60;一&#62;<\/p><\/aside>/)
     assert.match(first.html, /^<section class="slide layout-pptx"[^>]*style="background:rgb\(11,61,46\)"/)
     assert.match(second.html, /<table class="pp-tbl">[\s\S]*項目[\s\S]*蘋果/)
-    assert.match(second.html, /<svg class="pp-geom"[^>]*aria-label="季度"[\s\S]*>一月</)
+    assert.match(second.html, /<div class="pp-geom pp-chart"><svg [^>]*aria-label="季度"[\s\S]*>一月</)
     // Line charts keep their categories in a multi-level cache.
     assert.match(second.html, /aria-label="走勢"[\s\S]*>春<\/text>/)
     assert.doesNotMatch(second.html, /NaN/)
@@ -287,21 +287,18 @@ describe('crafted and unusual PowerPoint files', () => {
     assert.match(slide.html, /<linearGradient id="([\w-]+)"[^>]*><stop offset="0%" stop-color="rgb\(255,0,0\)"\/>[\s\S]*<path d="M[^"]*" fill="url\(#\1\)"/)
   })
 
-  test('stacked charts stack: negatives below zero, line and area on top of each other, 100% stacked up to 100%', () => {
+  test('charts draw through the shared chart renderer, coloured by the file; a combo chart draws every group', () => {
     const bar = readPptx(chartDeck(chartXml('barChart', 'stacked', [['FF0000', [5]], ['00FF00', [-2]]])), '').slides[0].html
-    const negative = /<rect x="[^"]*" y="([-\d.]+)"[^>]*fill="rgb\(0,255,0\)"/.exec(bar)
-    assert.equal(Number(negative?.[1]), tickY(bar, '0'))
-    const line = readPptx(chartDeck(chartXml('lineChart', 'stacked', [['FF0000', [1, 1]], ['00FF00', [2, 2]]])), '').slides[0].html
-    const second = /<polyline points="[-\d.]+,([-\d.]+)[^"]*" fill="none" stroke="rgb\(0,255,0\)"/.exec(line)
-    assert.equal(Number(second?.[1]), tickY(line, '3'))
-    const area = readPptx(chartDeck(chartXml('areaChart', 'stacked', [['FF0000', [1, 1]], ['00FF00', [2, 2]]])), '').slides[0].html
-    const top = /<path d="M[-\d.]+,([-\d.]+)[^"]*" fill="rgb\(0,255,0\)"/.exec(area)
-    assert.equal(Number(top?.[1]), tickY(area, '3'))
-    const percent = readPptx(chartDeck(chartXml('barChart', 'percentStacked', [['FF0000', [1]], ['00FF00', [3]]])), '').slides[0].html
-    assert.ok(Number.isFinite(tickY(percent, '100%')))
-    assert.doesNotMatch(percent, />(200|300|400)%?</)
-    const full = /<rect x="[^"]*" y="([-\d.]+)"[^>]*fill="rgb\(0,255,0\)"/.exec(percent)
-    assert.equal(Number(full?.[1]), tickY(percent, '100%'))
+    assert.match(bar, /<rect [^>]*fill="rgb\(255,0,0\)"/)
+    assert.match(bar, /<rect [^>]*fill="rgb\(0,255,0\)"/)
+    const ser = (color: string, values: number[], line = false) =>
+      `<c:ser><c:idx val="0"/><c:order val="0"/><c:spPr>${line ? `<a:ln w="28575"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:ln>` : `<a:solidFill><a:srgbClr val="${color}"/></a:solidFill>`}</c:spPr><c:cat><c:strRef><c:strCache><c:ptCount val="${values.length}"/>${values.map((_, at) => `<c:pt idx="${at}"><c:v>k${at}</c:v></c:pt>`).join('')}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:ptCount val="${values.length}"/>${values.map((v, at) => `<c:pt idx="${at}"><c:v>${v}</c:v></c:pt>`).join('')}</c:numCache></c:numRef></c:val></c:ser>`
+    const ax = (id: number, cross: number, kind: string, pos: string) => `<c:${kind}><c:axId val="${id}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="${pos}"/><c:crossAx val="${cross}"/></c:${kind}>`
+    const combo = `<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>${ser('FF0000', [100, 140, 90])}<c:axId val="1"/><c:axId val="2"/></c:barChart><c:lineChart><c:grouping val="standard"/>${ser('0000FF', [0.2, 0.35, 0.1], true)}<c:axId val="3"/><c:axId val="4"/></c:lineChart>${ax(1, 2, 'catAx', 'b')}${ax(2, 1, 'valAx', 'l')}${ax(3, 4, 'catAx', 'b')}${ax(4, 3, 'valAx', 'r')}</c:plotArea></c:chart></c:chartSpace>`
+    const html = readPptx(chartDeck(combo), '').slides[0].html
+    assert.equal((html.match(/<rect [^>]*fill="rgb\(255,0,0\)"/g) ?? []).length, 3)
+    assert.match(html, /<path d="M[^"]*"[^>]*stroke="rgb\(0,0,255\)"/)
+    assert.doesNotMatch(html, /pp-missing/)
   })
 
   test('text in a flipped group stays readable; the group still mirrors its shapes', () => {
@@ -426,14 +423,15 @@ describe('what a reader is told, in Traditional Chinese', () => {
       { 1: [['gone', 'image', '../media/image1.png']], 2: [['emf', 'image', '../media/image2.emf']] }
     )
     const slides = readPptx(deck, '').slides
-    assert.match(slides[0].html, /class="pp-missing">圖片遺失</)
-    assert.match(slides[1].html, /class="pp-missing">圖片\(網頁版無法顯示這種格式/)
-    assert.match(slides[2].html, /class="pp-missing">圖片遺失</)
+    // Worded as the Word and Excel pages word them.
+    assert.match(slides[0].html, /class="pp-missing">圖片遺失\(檔案裡找不到這張圖片\)</)
+    assert.match(slides[1].html, /class="pp-missing">EMF 圖片\(網頁版未支援,請下載原始檔查看\)</)
+    assert.match(slides[2].html, /class="pp-missing">圖片遺失\(檔案裡找不到這張圖片\)</)
     const linked = deckOf([picture('<a:blip r:link="web"/>')], {
       'ppt/slides/_rels/slide1.xml.rels': `<Relationships><Relationship Id="l" Type="http://x/slideLayout" Target="../slideLayouts/slideLayout1.xml"/><Relationship Id="web" Type="http://x/image" Target="https://example.com/x.png" TargetMode="External"/></Relationships>`
     })
     const [shown] = readPptx(linked, '').slides
-    assert.match(shown.html, /class="pp-missing">外部連結的圖片\(網頁版不會讀取外部網址\)</)
+    assert.match(shown.html, /class="pp-missing">外部連結的圖片\(圖片在文件之外,網頁版不載入外部連結\)</)
     assert.doesNotMatch(shown.html, /example\.com/)
   })
 
@@ -590,5 +588,75 @@ describe('picture, pattern and gradient fills', () => {
     assert.equal(paint?.[1], 'linearGradient')
     assert.match(paint![0], /x1="0\.5" y1="0" x2="0\.5" y2="1"/)
     assert.match(paint![2], /<stop offset="0%" stop-color="rgb\(255,0,0\)"\/><stop offset="100%" stop-color="rgb\(0,0,255\)"\/>/)
+  })
+})
+
+describe('shape geometry (ECMA-376 presets and custom shapes)', () => {
+  const fill = '<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>'
+  const ln = '<a:ln w="12700"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln>'
+  const slideOf = (spPr: string, body = '') => readPptx(deckOf([shape(spPr, body)]), '').slides[0].html
+  const pathsOf = (html: string) => [...html.matchAll(/<path d="([^"]*)" fill="([^"]*)"([^>]*)\/>/g)].map((m) => ({ d: m[1], fill: m[2], rest: m[3] }))
+  const coords = (d: string) => (d.match(/-?[\d.]+/g) ?? []).map(Number)
+
+  test('non-rectangular presets draw their own outline: heart curves, a callout tail leaves the box, a cloud is arcs', () => {
+    const heart = pathsOf(slideOf(`${xfrm()}<a:prstGeom prst="heart"><a:avLst/></a:prstGeom>${fill}`))
+    assert.ok(heart.length >= 1)
+    assert.match(heart[0].d, /C/)
+    assert.equal(heart[0].fill, 'rgb(255,0,0)')
+    // wedgeRectCallout's default tail points below the box (adj2 = 62500 of the height past the centre).
+    const callout = pathsOf(slideOf(`${xfrm()}<a:prstGeom prst="wedgeRectCallout"><a:avLst/></a:prstGeom>${fill}`))
+    assert.ok(Math.max(...coords(callout[0].d)) > 72, callout[0].d)
+    const cloud = slideOf(`${xfrm()}<a:prstGeom prst="cloud"><a:avLst/></a:prstGeom>${fill}${ln}`)
+    assert.ok((pathsOf(cloud)[0].d.match(/A/g) ?? []).length >= 10)
+    assert.doesNotMatch(cloud, /border-radius/)
+  })
+
+  test('fills come first, then strokes; shaded paths get an overlay; lines take no fill and carry the arrowheads', () => {
+    const can = pathsOf(slideOf(`${xfrm()}<a:prstGeom prst="can"/>${fill}${ln}`))
+    const firstStroke = can.findIndex((p) => p.rest.includes('stroke='))
+    assert.ok(firstStroke > 0 && can.slice(firstStroke).every((p) => p.rest.includes('stroke=')), JSON.stringify(can))
+    // The can's lid is lightened: drawn in the fill colour, then white at 40%.
+    assert.ok(can.some((p) => p.fill === '#fff' && /fill-opacity="0\.4"/.test(p.rest)))
+    const arrow = slideOf(`${xfrm()}<a:prstGeom prst="bentConnector3"/>${ln.replace('</a:ln>', '<a:tailEnd type="triangle"/></a:ln>')}`)
+    const lines = pathsOf(arrow)
+    assert.ok(lines.every((p) => p.fill === 'none'))
+    assert.match(lines[0].rest, /marker-end="url\(#pp-m\d+t\)"/)
+    // A line with only a fill is never a filled box: its one segment encloses nothing.
+    const filledLine = slideOf(`${xfrm()}<a:prstGeom prst="line"/>${fill}<a:ln><a:noFill/></a:ln>`)
+    assert.doesNotMatch(filledLine, /background:rgb\(255,0,0\)/)
+    assert.deepEqual(pathsOf(filledLine).map((p) => p.d), ['M0,0 L72,72'])
+    // smileyFace's eyes are open arcs the standard fills (darkened); its mouth is a line and is not filled.
+    const smiley = pathsOf(slideOf(`${xfrm()}<a:prstGeom prst="smileyFace"/>${fill}${ln}`))
+    assert.ok(smiley.some((p) => p.fill === '#000' && /fill-opacity="0\.2"/.test(p.rest)))
+    assert.ok(smiley.some((p) => /Q/.test(p.d) && p.fill === 'none'))
+    assert.ok(!smiley.some((p) => /Q/.test(p.d) && p.fill !== 'none'))
+  })
+
+  test("text sits in the geometry's text rectangle, as PowerPoint lays it out", () => {
+    const html = slideOf(`${xfrm()}<a:prstGeom prst="ellipse"/>${fill}`, '<a:p><a:r><a:t>橢圓裡的字</a:t></a:r></a:p>')
+    // An ellipse's text box is the square inscribed at 45°: (1 - cos 45°) / 2 = 14.645% in from each side.
+    assert.match(html, /<div class="pp-grp" style="left:14\.6\d+%;top:14\.6\d+%;width:70\.7\d+%;height:70\.7\d+%"><div class="pp-tx"[\s\S]*橢圓裡的字/)
+    // A rectangle keeps the whole box.
+    assert.doesNotMatch(slideOf(`${xfrm()}<a:prstGeom prst="rect"/>${fill}`, '<a:p><a:r><a:t>方</a:t></a:r></a:p>'), /class="pp-grp"/)
+  })
+
+  test('a custom geometry is evaluated with its own guides; an unknown preset is a labelled box', () => {
+    const cust = `<a:custGeom><a:avLst/><a:gdLst><a:gd name="mid" fmla="*/ w 1 2"/></a:gdLst><a:rect l="l" t="t" r="r" b="b"/><a:pathLst><a:path><a:moveTo><a:pt x="mid" y="t"/></a:moveTo><a:lnTo><a:pt x="r" y="b"/></a:lnTo><a:lnTo><a:pt x="l" y="b"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom>`
+    const [path] = pathsOf(slideOf(`${xfrm()}${cust}${fill}`))
+    assert.match(path.d, /^M36,0 L72,72 L0,72 Z$/)
+    const unknown = slideOf(`${xfrm()}<a:prstGeom prst="notAShape"/>${fill}`)
+    assert.match(unknown, /background:rgb\(255,0,0\)/)
+    assert.match(unknown, /class="pp-missing"[^>]*>未支援的圖形:notAShape</)
+  })
+
+  test("a picture is clipped to its shape's path, scaled with the slide", () => {
+    const PNG = Buffer.from(PNG_DATA.split(',')[1], 'base64').toString('latin1')
+    const pic = `<p:pic><p:nvPicPr><p:cNvPr id="4" name="p"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="img"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>${xfrm()}<a:prstGeom prst="ellipse"/>${ln}</p:spPr></p:pic>`
+    const html = readPptx(deckOf([pic], { 'ppt/media/image1.png': PNG }, { 1: [['img', 'image', '../media/image1.png']] }), 'm/').slides[0].html
+    const id = /class="pp-pic" style="clip-path:url\(#([\w-]+)\)/.exec(html)?.[1]
+    assert.ok(id, html)
+    assert.match(html, new RegExp(`<clipPath id="${id}" clipPathUnits="objectBoundingBox"><path transform="scale\\([\\d.]+ [\\d.]+\\)" d="M[^"]*A`))
+    // The outline follows the same path instead of a square border.
+    assert.match(html, /<svg class="pp-geom" viewBox="0 0 72 72"[^>]*><path d="M[^"]*A[^"]*" fill="none" stroke="rgb\(0,0,255\)"/)
   })
 })

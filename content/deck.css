@@ -101,6 +101,7 @@ body.show-notes .deck-stage { bottom: calc(var(--bar-h) + var(--notes-h)); }
 .pp-sp, .pp-grp { position: absolute; box-sizing: border-box; }
 div.pp-geom { position: absolute; inset: 0; box-sizing: border-box; }
 svg.pp-geom { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }
+.pp-chart > svg { position: absolute; left: 0; top: 0; display: block; }
 .pp-tx { position: absolute; inset: 0; display: flex; flex-direction: column; box-sizing: border-box; white-space: pre-wrap; tab-size: 4; }
 .pp-p { margin: 0; }
 .pp-bu { display: inline-block; text-indent: 0; white-space: pre; }
