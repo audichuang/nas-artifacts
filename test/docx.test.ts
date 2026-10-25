@@ -790,7 +790,7 @@ describe('Word shapes and layout (matrix round)', () => {
     try {
       const html = renderDocxPage(docOf(p(r('x'))), 'big.docx', 'big')
       assert.match(html, /檔案太大/)
-      assert.doesNotMatch(html, /損毀|不是有效/)
+      assert.doesNotMatch(html, /損[毀壞]|不是/)
     } finally {
       Object.assign(ZIP_LIMITS, saved)
     }

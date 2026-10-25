@@ -1935,7 +1935,8 @@ export function renderPptxDeck(data: Buffer, fileName: string, title: string, as
   } catch (error) {
     const message = `PowerPoint: ${error instanceof Error ? error.message : String(error)}`
     const reason = failureReason(error)
-    const detail = readerMessage(error)
+    // A size limit's message is already the reason; it is not repeated as a detail.
+    const detail = error instanceof ZipError && error.limit ? reason : readerMessage(error)
     const box = `<div class="pp-missing" role="alert" style="flex-direction:column;gap:calc(6*var(--pt))"><strong style="font-size:calc(20*var(--pt))">這份 PowerPoint 檔無法顯示</strong><span>${escapeHtml(reason)}</span>${detail === reason ? '' : `<code>${escapeHtml(detail)}</code>`}<span>可以下載原始檔,用 PowerPoint 開啟查看。</span></div>`
     const slide = `<section class="slide layout-pptx" id="slide-1" data-number="1" aria-label="第 1 頁"><div class="pp-canvas">${box}</div></section>`
     return deckPage(slide, title, assets, failureScript(message))

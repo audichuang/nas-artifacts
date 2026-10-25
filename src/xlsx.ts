@@ -13,7 +13,7 @@ import { chineseCount, CN_DIGITS, CN_LEGAL } from './office-numbers.ts'
 import { CELL_PATTERNS, patternCover, patternSvg } from './office-patterns.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, tagAttrs, type XmlNode } from './xml.ts'
-import { ZipReader } from './zip.ts'
+import { ZipError, ZipReader } from './zip.ts'
 
 /** How much of a workbook one page draws. Past these the page says what was cut. */
 export const XLSX_LIMITS = {
@@ -1444,6 +1444,8 @@ function openWorkbook(data: Buffer, mediaBase: string): Workbook {
   try {
     pkg = new Package(data)
   } catch (error) {
+    // A file past a size limit is readable, only too big for this page: say so, not that it is broken.
+    if (error instanceof ZipError && error.limit) throw new Error(`${error.message}。檔案本身沒有壞,請下載原始檔查看。`)
     throw new Error(`這不是 .xlsx 檔,或檔案已損壞(${reason(error)})`)
   }
   const rel = pkg.relOfType('', 'officeDocument')
@@ -2025,8 +2027,8 @@ const ICON_SETS: Record<string, [string, string][]> = (() => {
 const SPARKLINES_PER_SHEET = 4000
 
 /**
- * The sparklines on the shown part of a sheet, as SVG keyed by cell (r * 20000 + c), sized to the cell. Data comes
- * from the whole workbook (any sheet, not only its shown rows); one whose data cannot be found says so in its cell.
+ * The sparklines on the shown part of a sheet, as SVG keyed by cell (r * 20000 + c), sized to the cell. Data may sit
+ * on any sheet, within the rows and columns the reader keeps of it; one whose data cannot be found says so in its cell.
  */
 function sparklines(wb: Workbook, head: XmlNode, lastRow: number, lastCol: number, size: (r: number, c: number) => [number, number]): Map<number, string> {
   const out = new Map<number, string>()
@@ -2104,14 +2106,16 @@ function sparklineSvg(raw: (number | null)[], look: SparkLook, w: number, h: num
   const r2 = (v: number) => round(v, 2)
   const hi = Math.max(...known)
   const lo = Math.min(...known)
+  const firstAt = values.findIndex((x) => x !== null)
+  const lastAt = n - 1 - [...values].reverse().findIndex((x) => x !== null)
   // Which point takes which colour: first, last, high, low and negative points over the series colour, as Excel layers them.
   const pointColor = (v: number, at: number, base: string) => {
     let fill = base
     if (look.negative && v < 0) fill = look.negative
     if (look.low && v === lo) fill = look.low
     if (look.high && v === hi) fill = look.high
-    if (look.first && at === values.findIndex((x) => x !== null)) fill = look.first
-    if (look.last && at === n - 1 - [...values].reverse().findIndex((x) => x !== null)) fill = look.last
+    if (look.first && at === firstAt) fill = look.first
+    if (look.last && at === lastAt) fill = look.last
     return fill
   }
   let body = ''
@@ -2153,11 +2157,12 @@ function sparklineSvg(raw: (number | null)[], look: SparkLook, w: number, h: num
         }
         runs[runs.length - 1].push(`${r2(x(at))},${r2(y(v))}`)
       })
+      const drawn = runs.some((run) => run.length > 1)
       for (const run of runs) if (run.length > 1) body += `<polyline points="${run.join(' ')}" fill="none" stroke="${look.series}" stroke-width="${r2(look.weight)}" stroke-linejoin="round"/>`
       values.forEach((v, at) => {
         if (v === null) return
         const special = pointColor(v, at, '')
-        const fill = special || look.markers || (runs.every((run) => run.length < 2) ? look.series : '')
+        const fill = special || look.markers || (drawn ? '' : look.series)
         if (fill) body += `<circle cx="${r2(x(at))}" cy="${r2(y(v))}" r="${r2(Math.max(1.5, look.weight))}" fill="${fill}"/>`
       })
     }
@@ -3445,7 +3450,8 @@ function fit(root){if(root.dataset.fitted)return;root.dataset.fitted='1';const w
 for(const td of root.querySelectorAll('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4,w=s.offsetWidth;if(room>0&&w>room)writes.push([s,(parseFloat(getComputedStyle(s).fontSize)*room/w).toFixed(2)+'px'])}
 const ctx=document.createElement('canvas').getContext('2d'),hash={};
 let last='';const use=f=>{if(f!==last){ctx.font=f;last=f}};
-for(const td of root.querySelectorAll('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const cs=getComputedStyle(td),font=cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight)}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){writes.push([td,(parseFloat(cs.fontSize)*k*0.97).toFixed(2)+'px'])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
+const looks={};const lookOf=td=>{const st=td.getAttribute('style')||'',k=td.className+(/font/.test(st)?st:'');let l=looks[k];if(!l){const cs=getComputedStyle(td);l=looks[k]={cs,font:cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily,px:parseFloat(cs.fontSize),pad:parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight)}}return l};
+for(const td of root.querySelectorAll('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const lk=lookOf(td);if(!over&&t.length*lk.px*0.7+lk.pad<cw)continue;const cs=lk.cs,font=lk.font;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+lk.pad}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){writes.push([td,(parseFloat(cs.fontSize)*k*0.97).toFixed(2)+'px'])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
 for(const [el,size,text] of writes){if(size)el.style.fontSize=size;else{el.title=el.textContent;el.textContent=text}}}
 function show(n){if(!(n>=1&&n<=sheets.length))n=first;sheets.forEach((s,i)=>{s.hidden=i!==n-1});tabs.forEach((t,i)=>{t.setAttribute('aria-selected',String(i===n-1));t.tabIndex=i===n-1?0:-1});const tab=tabs[n-1];if(tab){const bar=tab.parentElement;const l=tab.offsetLeft-bar.offsetLeft;if(l<bar.scrollLeft||l+tab.offsetWidth>bar.scrollLeft+bar.clientWidth)bar.scrollLeft=l-16}fit(sheets[n-1])}
 function fromHash(){const m=/^#sheet-(\\d+)$/.exec(location.hash);show(m?Number(m[1]):first)}

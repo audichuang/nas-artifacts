@@ -206,7 +206,7 @@ describe('crafted and unusual PowerPoint files', () => {
     try {
       const html = renderPptxDeck(deckOf([shape(xfrm(), '<a:p><a:r><a:t>x</a:t></a:r></a:p>')]), 'big.pptx', 'big', { css: '', js: '' } as never)
       assert.match(html, /檔案太大/)
-      assert.doesNotMatch(html, /損毀|不是有效/)
+      assert.doesNotMatch(html, /損[毀壞]|不是/)
     } finally {
       Object.assign(ZIP_LIMITS, saved)
     }

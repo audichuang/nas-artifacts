@@ -1175,7 +1175,7 @@ describe('workbooks past the zip limits (matrix round)', () => {
     try {
       const html = renderXlsxPage(book([{ name: 's', body: sheet('<row r="1"><c r="A1"><v>1</v></c></row>') }]), 'big.xlsx', 'big')
       assert.match(html, /檔案太大/)
-      assert.doesNotMatch(html, /損毀|不是有效/)
+      assert.doesNotMatch(html, /損[毀壞]|不是/)
     } finally {
       Object.assign(ZIP_LIMITS, saved)
     }
