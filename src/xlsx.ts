@@ -10,6 +10,7 @@ import { escapeHtml, injectBridge } from './content-render.ts'
 import { chartTitle, renderChart, type ChartResult } from './office-chart.ts'
 import { fillShade, presetGeometry, shapeGeometry } from './office-geometry.ts'
 import { chineseCount, CN_DIGITS, CN_LEGAL } from './office-numbers.ts'
+import { CELL_PATTERNS, patternCover, patternSvg } from './office-patterns.ts'
 import { failureScript, isDrawablePart, officeMediaBase, officeMediaUrl } from './office.ts'
 import { attr, child, children, local, num, parseXml, path, relAttr, tagAttrs, type XmlNode } from './xml.ts'
 import { ZipReader } from './zip.ts'
@@ -943,7 +944,8 @@ export function formatText(code: string, text: string, palette: string[] = DEFAU
 // Styles
 
 type Side = { style: string; color: string; weight: number } | null
-type Border = { left: Side; right: Side; top: Side; bottom: Side }
+/** `diagonal`: the line corner to corner, rising (up: bottom-left to top-right), falling (down), or both. */
+type Border = { left: Side; right: Side; top: Side; bottom: Side; diagonal?: { up: boolean; down: boolean; side: NonNullable<Side> } | null }
 type Align = { h: string; v: string; wrap: boolean; indent: number; rot: number; shrink: boolean }
 type Xf = { fmt: number; font: number; fill: number; border: number; align: Align | null }
 type Dxf = { font: Partial<Font> & { set: boolean }; fill: string; border: Border | null }
@@ -968,10 +970,6 @@ const BORDER_CSS: Record<string, string> = {
   hair: '1px dotted', dotted: '1px dotted', dashDotDot: '1px dashed', dashDot: '1px dashed', dashed: '1px dashed', thin: '1px solid',
   mediumDashDotDot: '2px dashed', slantDashDot: '2px dashed', mediumDashDot: '2px dashed', mediumDashed: '2px dashed', medium: '2px solid', double: '3px double', thick: '3px solid'
 }
-const PATTERN_RATIO: Record<string, number> = {
-  gray0625: 0.0625, gray125: 0.125, lightGray: 0.25, mediumGray: 0.5, darkGray: 0.75, darkHorizontal: 0.5, darkVertical: 0.5, darkDown: 0.5, darkUp: 0.5,
-  darkGrid: 0.5, darkTrellis: 0.75, lightHorizontal: 0.25, lightVertical: 0.25, lightDown: 0.25, lightUp: 0.25, lightGrid: 0.25, lightTrellis: 0.25
-}
 
 function readSide(node: XmlNode | null, palette: Palette): Side {
   const style = attr(node, 'style')
@@ -980,12 +978,28 @@ function readSide(node: XmlNode | null, palette: Palette): Side {
 }
 
 function readBorder(node: XmlNode | null, palette: Palette): Border {
+  const on = (name: string) => ['1', 'true'].includes(attr(node, name) ?? '')
+  const side = readSide(child(node, 'diagonal'), palette)
   return {
     left: readSide(child(node, 'left') ?? child(node, 'start'), palette),
     right: readSide(child(node, 'right') ?? child(node, 'end'), palette),
     top: readSide(child(node, 'top'), palette),
-    bottom: readSide(child(node, 'bottom'), palette)
+    bottom: readSide(child(node, 'bottom'), palette),
+    diagonal: side && (on('diagonalUp') || on('diagonalDown')) ? { up: on('diagonalUp'), down: on('diagonalDown'), side } : null
   }
+}
+
+/** A cell's diagonal lines as a CSS background layer: an SVG stretched over the cell, its stroke one width at any size. */
+function diagonalCss(diagonal: Border['diagonal']): string {
+  if (!diagonal) return ''
+  const { style, color } = diagonal.side
+  const [width, kind] = BORDER_CSS[style].split(' ')
+  const px = parseFloat(width)
+  const dash = kind === 'dotted' ? ` stroke-dasharray="${px} ${px * 2}"` : kind === 'dashed' ? ` stroke-dasharray="${px * 4} ${px * 2}"` : ''
+  const line = (x1: number, y1: number, x2: number, y2: number) =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#${color}" stroke-width="${px}"${dash} vector-effect="non-scaling-stroke"/>`
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="none">${diagonal.up ? line(0, 100, 100, 0) : ''}${diagonal.down ? line(0, 0, 100, 100) : ''}</svg>`
+  return `url('data:image/svg+xml,${encodeURIComponent(svg)}') 0 0/100% 100% no-repeat`
 }
 
 /** A fill as a CSS background and, for solid-looking fills, its colour (to pick readable text). */
@@ -997,8 +1011,10 @@ function readFill(node: XmlNode | null, palette: Palette): { css: string; hex: s
     if (type === 'none') return { css: '', hex: null }
     const fg = xColor(fgNode, palette) ?? '000000'
     const bg = xColor(child(pattern, 'bgColor'), palette) ?? 'FFFFFF'
-    const hex = type === 'solid' ? fg : mix(fg, bg, PATTERN_RATIO[type] ?? 0.5)
-    return { css: `#${hex}`, hex }
+    if (type === 'solid') return { css: `#${fg}`, hex: fg }
+    // Any other pattern is its hatch in its two colours; the hex is how dark it reads, to pick the text colour.
+    const bits = CELL_PATTERNS[type] ?? CELL_PATTERNS.mediumGray
+    return { css: `url('data:image/svg+xml,${encodeURIComponent(patternSvg(`#${fg}`, `#${bg}`, bits))}') 0 0/8px 8px repeat`, hex: mix(fg, bg, patternCover(bits)) }
   }
   const gradient = child(node, 'gradientFill')
   if (gradient) {
@@ -3169,7 +3185,10 @@ function xfCss(wb: Workbook, index: number): string {
   const fontRules = fontCss(font, base, wb.theme)
   if (fontRules) rules.push(fontRules)
   const fill = wb.styles.fills[xf.fill]
-  if (fill) rules.push(`background:${fill};border-inline-end-color:transparent;border-bottom-color:transparent`)
+  // Diagonal lines lie over the fill, as the first background layer.
+  const diagonal = diagonalCss(wb.styles.borders[xf.border]?.diagonal)
+  if (fill || diagonal) rules.push(`background:${[diagonal, fill].filter(Boolean).join(',')}`)
+  if (fill) rules.push('border-inline-end-color:transparent;border-bottom-color:transparent')
   const align = xf.align
   if (align) {
     const h = { left: 'left', center: 'center', right: 'right', justify: 'justify', distributed: 'justify', centerContinuous: 'center', fill: 'left' }[align.h]

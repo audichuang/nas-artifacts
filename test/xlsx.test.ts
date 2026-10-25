@@ -268,7 +268,7 @@ describe('reading Excel workbooks', () => {
     // theme 4 (accent1 4F81BD) darkened by 25%; the font name loses its quotes and markup.
     assert.match(html, /\.xl-grid td\.x3\{text-decoration:line-through;color:#376092;font-family:'Evilstylescriptx',/)
     assert.match(html, /\.xl-grid td\.x3\{[^}]*background:#FFFF00/)
-    assert.match(html, /\.xl-grid td\.x4\{color:#FF0000;font-family:'Arial',[^}]*background:#BFBFBF;border-inline-end-color:transparent;border-bottom-color:transparent;text-align:right;padding-inline-end:20px\}/)
+    assert.match(html, /\.xl-grid td\.x4\{color:#FF0000;font-family:'Arial',[^}]*background:url\('data:image\/svg\+xml,[^']*'\) 0 0\/8px 8px repeat;border-inline-end-color:transparent;border-bottom-color:transparent;text-align:right;padding-inline-end:20px\}/)
     assert.doesNotMatch(html, /Evil'|<\/style><script>x/)
   })
 
@@ -1119,5 +1119,51 @@ describe('numbers too wide for their column (matrix round)', () => {
     } finally {
       await browser.close()
     }
+  })
+})
+
+describe('cell fills and borders (matrix round)', () => {
+  const PATTERN_TYPES = ['gray0625', 'gray125', 'lightGray', 'mediumGray', 'darkGray', 'darkHorizontal', 'darkVertical', 'darkDown', 'darkUp', 'darkGrid', 'darkTrellis', 'lightHorizontal', 'lightVertical', 'lightDown', 'lightUp', 'lightGrid', 'lightTrellis']
+  const styled = (fills: string, borders: string, xfs: string) =>
+    `<styleSheet ${NS}><fills count="99"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${fills}</fills><borders count="9"><border/>${borders}</borders><cellXfs count="99"><xf/>${xfs}</cellXfs></styleSheet>`
+  const cssOf = (html: string, xf: number) => new RegExp(`\\.xl-grid td\\.x${xf}\\{([^}]*)\\}`).exec(html)?.[1] ?? ''
+
+  test('X-3: each of the 17 pattern fills is its hatch in its two colours, not a blend', () => {
+    const fills = PATTERN_TYPES.map((type) => `<fill><patternFill patternType="${type}"><fgColor rgb="FF1F4E79"/><bgColor rgb="FFFFE699"/></patternFill></fill>`).join('')
+    const xfs = PATTERN_TYPES.map((_, at) => `<xf fillId="${at + 2}" applyFill="1"/>`).join('')
+    const body = sheet(`<row r="1">${PATTERN_TYPES.map((_, at) => `<c r="${colName(at + 1)}1" s="${at + 1}"><v>${at}</v></c>`).join('')}</row>`)
+    const html = renderXlsxPage(book([{ name: 's', body }], { styles: styled(fills, '', xfs) }), 'b.xlsx', 'b')
+    const tiles = new Set<string>()
+    PATTERN_TYPES.forEach((type, at) => {
+      const css = cssOf(html, at + 1)
+      const m = /background:url\('data:image\/svg\+xml,([^']*)'\) 0 0\/8px 8px repeat/.exec(css)
+      assert.ok(m, `${type}: ${css}`)
+      const svg = decodeURIComponent(m[1])
+      assert.match(svg, /<rect width="8" height="8" fill="#FFE699"\/><path d="M[^"]+" fill="#1F4E79"\/>/, type)
+      tiles.add(svg)
+    })
+    assert.equal(tiles.size, PATTERN_TYPES.length, 'every pattern its own tile')
+    // A solid fill stays its foreground colour.
+    const solid = renderXlsxPage(book([{ name: 's', body: sheet('<row r="1"><c r="A1" s="1"><v>1</v></c></row>') }], { styles: styled('<fill><patternFill patternType="solid"><fgColor rgb="FF00B050"/></patternFill></fill>', '', '<xf fillId="2" applyFill="1"/>') }), 'b.xlsx', 'b')
+    assert.match(cssOf(solid, 1), /background:#00B050/)
+  })
+
+  test('X-3: diagonalUp and diagonalDown borders draw their lines over the fill', () => {
+    const borders = `<border diagonalUp="1"><diagonal style="thin"><color rgb="FFFF0000"/></diagonal></border><border diagonalUp="1" diagonalDown="1"><diagonal style="dashed"><color rgb="FF0000FF"/></diagonal></border><border diagonalDown="1"><diagonal style="none"/></border>`
+    const fills = '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill>'
+    const xfs = '<xf borderId="1" applyBorder="1"/><xf borderId="2" fillId="2" applyBorder="1" applyFill="1"/><xf borderId="3" applyBorder="1"/>'
+    const body = sheet('<row r="1"><c r="A1" s="1"/><c r="B1" s="2"/><c r="C1" s="3"/></row>')
+    const html = renderXlsxPage(book([{ name: 's', body }], { styles: styled(fills, borders, xfs) }), 'b.xlsx', 'b')
+    const lines = (css: string) => [...css.matchAll(/url\('data:image\/svg\+xml,([^']*)'\) 0 0\/100% 100% no-repeat/g)].map((m) => decodeURIComponent(m[1]))
+    const up = lines(cssOf(html, 1))
+    assert.equal(up.length, 1)
+    assert.match(up[0], /<line x1="0" y1="100" x2="100" y2="0" stroke="#FF0000"[^>]*vector-effect="non-scaling-stroke"/)
+    const both = cssOf(html, 2)
+    assert.equal(lines(both).length, 1)
+    assert.match(lines(both)[0], /<line x1="0" y1="100" x2="100" y2="0"[^>]*stroke-dasharray/)
+    assert.match(lines(both)[0], /<line x1="0" y1="0" x2="100" y2="100"/)
+    // The lines lie over the cell's own fill, the last background layer.
+    assert.match(both, /background:url\([^)]*\) 0 0\/100% 100% no-repeat,#FFFF00/)
+    assert.equal(lines(cssOf(html, 3)).length, 0)
   })
 })
