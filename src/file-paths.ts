@@ -30,7 +30,21 @@ const CONTENT_TYPES: Record<string, string> = {
   '.wasm': 'application/wasm',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptm': 'application/vnd.ms-powerpoint.presentation.macroEnabled.12',
+  '.ppsx': 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+  '.ppsm': 'application/vnd.ms-powerpoint.slideshow.macroEnabled.12',
+  '.potx': 'application/vnd.openxmlformats-officedocument.presentationml.template',
+  '.potm': 'application/vnd.ms-powerpoint.template.macroEnabled.12',
+  '.docm': 'application/vnd.ms-word.document.macroEnabled.12',
+  '.dotx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+  '.dotm': 'application/vnd.ms-word.template.macroEnabled.12',
+  '.xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
+  '.xltx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+  '.xltm': 'application/vnd.ms-excel.template.macroEnabled.12',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.doc': 'application/msword',
+  '.xls': 'application/vnd.ms-excel'
 }
 
 export function contentTypeFor(path: string): string {
@@ -60,16 +74,18 @@ export function isMarkdownPath(path: string): boolean {
   return extname(path).toLowerCase() === '.md'
 }
 
+// Macro-enabled files, slide shows and templates are the same packages; their macros never run here.
+// The old binary formats (.ppt, .doc, .xls) are pages too, so the reader is told to save them in the new format.
 export function isPptxPath(path: string): boolean {
-  return extname(path).toLowerCase() === '.pptx'
+  return ['.pptx', '.pptm', '.ppsx', '.ppsm', '.potx', '.potm', '.ppt'].includes(extname(path).toLowerCase())
 }
 
 export function isDocxPath(path: string): boolean {
-  return extname(path).toLowerCase() === '.docx'
+  return ['.docx', '.docm', '.dotx', '.dotm', '.doc'].includes(extname(path).toLowerCase())
 }
 
 export function isXlsxPath(path: string): boolean {
-  return extname(path).toLowerCase() === '.xlsx'
+  return ['.xlsx', '.xlsm', '.xltx', '.xltm', '.xls'].includes(extname(path).toLowerCase())
 }
 
 /** PowerPoint, Word and Excel files: published as they are, drawn on the server. */

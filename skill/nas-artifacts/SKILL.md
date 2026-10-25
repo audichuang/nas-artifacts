@@ -64,7 +64,7 @@ When the user already has the file (a company template, a deck someone sent, a r
 
 - `.pptx` shows as a deck at the file's own slide size: paging, overview, speaker notes, full screen and PDF as for Markdown decks; 「PPTX」 downloads the published file unchanged.
 - `.docx` shows as one continuous document page (no pagination; header once at the top, footer and footnotes at the end). `.xlsx` shows every visible sheet as a tab with an Excel-like grid; `#sheet-N` on the viewer URL opens sheet N; formulas show the value saved in the file. Both have a 「DOCX」/「XLSX」 button that downloads the file unchanged.
-- Something the browser cannot draw (EMF/WMF pictures, video, OLE objects, SmartArt in Word and Excel, chart types beyond bar, line, area, pie and doughnut) shows as a labelled box; a file that cannot be read at all (not a zip, password-protected) shows the reason and lands in `artifact errors`. Very large sheets show their first 2000 rows × 200 columns and say so.
+- Something the browser cannot draw (EMF/WMF pictures, video, OLE objects, SmartArt and charts in Word, SmartArt in Excel, chart types beyond bar, line, area, pie and doughnut) shows as a labelled box; a file that cannot be read at all (not a zip, password-protected) shows the reason and lands in `artifact errors`. Very large sheets show their first 2000 rows × 200 columns and say so.
 - Fonts come from the reader's device: a font it lacks (Calibri, 微軟正黑體 on a Mac) is replaced by a similar one, so line breaks can differ slightly from Office.
 - To change one, edit it in Office and publish the file again (same URL, new version). The viewer has no 「編輯」 for these.
 - An Office file may be up to 64 MB (other files 16 MB).

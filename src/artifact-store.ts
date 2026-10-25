@@ -74,7 +74,8 @@ export type VersionDiff = {
 }
 
 const DIFF_LIMITS = { bytes: 1024 * 1024, lines: 20_000, edits: 2000, shown: 1000, lineChars: 2000 }
-const isTextType = (type: string) => /^text\/|json|javascript|xml|svg/.test(type)
+// Office files are zips even though their types name XML ("openxmlformats"): only real XML counts as text.
+const isTextType = (type: string) => /^text\/|json|javascript|svg|^application\/xml/.test(type)
 
 export type ArtifactListing = ArtifactSummary & { snippet?: string | null }
 
@@ -278,7 +279,7 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
       throw new ArtifactError(400, 'invalid_entry', `Entry "${requested}" is not one of the published files.`)
     }
     if (!isPagePath(entry)) {
-      throw new ArtifactError(400, 'invalid_entry', 'The entry must be an .html, .md or .pptx file.')
+      throw new ArtifactError(400, 'invalid_entry', 'The entry must be an .html, .md, .pptx, .docx or .xlsx file.')
     }
     return entry
   }
@@ -287,9 +288,14 @@ function chooseEntry(files: FileMap, requested: string | undefined): string {
       return candidate
     }
   }
-  const pages = Object.keys(files).filter(isPagePath)
+  // A single HTML or Markdown page wins, as it did before Office files became pages: the Office files beside it are attachments.
+  const pages = Object.keys(files).filter((path) => isPagePath(path) && !isOfficePath(path))
   if (pages.length === 1) {
     return pages[0]
+  }
+  const office = Object.keys(files).filter(isOfficePath)
+  if (pages.length === 0 && office.length === 1) {
+    return office[0]
   }
   throw new ArtifactError(400, 'invalid_entry', 'Pass entry: no index.html/index.md and not exactly one page among the files.')
 }
