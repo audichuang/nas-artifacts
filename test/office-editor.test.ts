@@ -26,6 +26,7 @@ before(async () => {
   server = createServer((req, res) => {
     downloads++
     if (req.url === '/redirect') { res.writeHead(302, { location: 'http://other.test/secret' }); res.end(); return }
+    if (req.method === 'POST') { res.setHeader('content-type', 'application/json'); res.end('{"error":4}'); return }
     res.end(result)
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -136,5 +137,35 @@ test('capabilities granted during an edit prevent callback writes and preserve t
     const state = await (await f.app.request(`${f.root}/${sessionId}`)).json()
     assert.equal(state.status, 'conflict')
     assert.ok(state.downloadUrl)
+  } finally { f.close() }
+})
+
+test('a no-change disconnect followed by reconnect resumes the edit session', async () => {
+  const f = fixture()
+  try {
+    const { sessionId } = await (await f.start()).json()
+    await f.callback(sessionId, { key: sessionId, status: 4 })
+    await f.callback(sessionId, { key: sessionId, status: 1 })
+    const state = await (await f.app.request(`${f.root}/${sessionId}`)).json()
+    assert.equal(state.closed, false)
+    assert.equal((await f.app.request(`${f.root}/${sessionId}/config`)).status, 200)
+    assert.equal((await f.app.request(`${f.root}/${sessionId}/save`, { method: 'POST', headers: { 'x-artifact-client': 'viewer' } })).status, 200)
+  } finally { f.close() }
+})
+
+test('an Office save error preserves the supplied recovery file without publishing it', async () => {
+  const f = fixture()
+  try {
+    const { sessionId } = await (await f.start()).json()
+    for (const status of [3, 7]) {
+      await f.callback(sessionId, { key: sessionId, status, url: `${docsUrl}/recovery.pptx` })
+      const state = await (await f.app.request(`${f.root}/${sessionId}`)).json()
+      assert.equal(state.status, 'error')
+      assert.ok(state.downloadUrl)
+      assert.ok(Buffer.from(await (await f.app.request(state.downloadUrl)).arrayBuffer()).equals(result))
+      assert.equal(f.store.requireSummary(f.artifact.id).currentVersion, 1)
+    }
+    await f.callback(sessionId, { key: sessionId, status: 6, url: `${docsUrl}/recovery.pptx` })
+    assert.equal(f.store.requireSummary(f.artifact.id).currentVersion, 2)
   } finally { f.close() }
 })

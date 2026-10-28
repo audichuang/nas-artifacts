@@ -132,9 +132,20 @@ class OfficeEdits {
     const session = this.read(id)
     if (payload.key !== id || ![1, 2, 3, 4, 6, 7].includes(Number(payload.status))) throw new ArtifactError(400, 'office_callback_invalid', 'Office 回呼內容無效。')
     const status = Number(payload.status)
-    if (status === 1) return
-    if (status === 4) { session.closed = true; if (session.status === 'editing') session.status = 'closed'; this.remember(session); return }
-    if (status === 3 || status === 7) { session.status = 'error'; session.message = 'Office 回報保存失敗，請保留編輯頁。'; this.remember(session); return }
+    if (status === 1) {
+      // ONLYOFFICE sends 4 on a no-change disconnect, then 1 if that client reconnects.
+      if (session.status === 'closed') { session.closed = false; session.status = 'editing'; this.remember(session) }
+      return
+    }
+    if (status === 4) { session.closed = true; if (!['conflict', 'error'].includes(session.status)) session.status = 'closed'; this.remember(session); return }
+    const saveError = status === 3 || status === 7
+    if (saveError) {
+      session.status = 'error'
+      session.closed ||= status === 3
+      session.message = 'Office 回報保存失敗，請取回編輯結果並保留編輯頁。'
+      this.remember(session)
+      if (typeof payload.url !== 'string') return
+    }
     let url: URL
     try { url = new URL(String(payload.url)) } catch { throw new ArtifactError(400, 'office_callback_invalid', 'Office 未提供有效的保存網址。') }
     if (![this.settings.url, this.settings.internalUrl].includes(url.origin) || url.username || url.password) throw new ArtifactError(403, 'office_download_forbidden', '保存結果必須來自設定的 Office 服務。')
@@ -168,15 +179,16 @@ class OfficeEdits {
     // Preserve the result before committing, including conflicts and a crash between the two writes.
     this.write(id, 'result.pptx', bytes)
     session.closed ||= status === 2
+    if (saveError) { session.resultHash = resultHash; this.remember(session); return }
     try {
       const current = this.store.requireSummary(session.artifactId)
       if (session.status === 'conflict') throw new ArtifactError(409, 'version_conflict', '這次編輯已有版本衝突。')
       if (current.capabilities.length || current.entry !== session.entry) throw new ArtifactError(409, 'office_not_editable', '簡報的能力或入口已變更。')
       const latest = this.store.requireVersion(session.artifactId, current.currentVersion)
-      if (session.resultHash !== resultHash && latest.files[session.entry]?.sha256 !== resultHash) {
+      if (latest.files[session.entry]?.sha256 !== resultHash) {
         const saved = this.store.update(session.artifactId, { baseVersion: session.baseVersion, files: { [session.entry]: { content: bytes } }, label: 'PowerPoint 網頁編輯' })
         session.baseVersion = saved.currentVersion
-      } else if (session.resultHash !== resultHash) session.baseVersion = current.currentVersion
+      } else session.baseVersion = current.currentVersion
       session.savedVersion = session.baseVersion
       session.status = 'saved'
       delete session.message
