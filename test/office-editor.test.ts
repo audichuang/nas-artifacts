@@ -61,6 +61,7 @@ test('Office editing requires the viewer header and is restricted to current cap
     assert.equal(cfg.documentType, 'slide')
     assert.equal(cfg.editorConfig.lang, 'zh-TW')
     assert.equal(cfg.document.permissions.edit, true)
+    assert.equal(cfg.editorConfig.customization.forcesave, true)
     const source = await f.app.request(cfg.document.url)
     assert.ok(Buffer.from(await source.arrayBuffer()).equals(pptx('original')))
     f.store.update(f.artifact.id, { capabilities: ['db'], baseVersion: 1 })
@@ -149,7 +150,6 @@ test('a no-change disconnect followed by reconnect resumes the edit session', as
     const state = await (await f.app.request(`${f.root}/${sessionId}`)).json()
     assert.equal(state.closed, false)
     assert.equal((await f.app.request(`${f.root}/${sessionId}/config`)).status, 200)
-    assert.equal((await f.app.request(`${f.root}/${sessionId}/save`, { method: 'POST', headers: { 'x-artifact-client': 'viewer' } })).status, 200)
   } finally { f.close() }
 })
 

@@ -31,16 +31,15 @@ async function client() {
   return { get, calls, events, tick, redirects, requests, state(value: Record<string, unknown>) { state = value } }
 }
 
-test('close is disabled during loading and asks the SDK to flush edits before destroying it', async () => {
+test('return is disabled during loading and uses the SDK close guard even with unsynchronized edits', async () => {
   const c = await client()
   assert.equal(c.get('office-close').disabled, true)
   c.events.onDocumentReady()
   assert.equal(c.get('office-close').disabled, false)
   c.events.onDocumentStateChange({ data: true })
   c.get('office-close').onclick!()
-  assert.deepEqual(c.calls, [])
-  c.events.onDocumentStateChange({ data: false })
   assert.deepEqual(c.calls, ['requestClose'])
+  assert.equal(c.get('office-close').disabled, false)
   c.events.onRequestClose()
   assert.deepEqual(c.calls, ['requestClose', 'destroyEditor'])
   c.state({ status: 'saved', closed: true, savedVersion: 2 })
@@ -48,14 +47,15 @@ test('close is disabled during loading and asks the SDK to flush edits before de
   assert.deepEqual(c.redirects, ['/a/a?v=2'])
 })
 
-test('save waits for the SDK to synchronize the last local keystrokes', async () => {
+test('cancelling an SDK close prompt leaves return available in manual-save mode', async () => {
   const c = await client()
   c.events.onDocumentReady()
   c.events.onDocumentStateChange({ data: true })
-  c.get('office-save').onclick!()
-  assert.equal(c.requests.some((url) => url.endsWith('/save')), false)
-  c.events.onDocumentStateChange({ data: false })
-  assert.equal(c.requests.filter((url) => url.endsWith('/save')).length, 1)
+  c.get('office-close').onclick!()
+  await c.tick()
+  c.get('office-close').onclick!()
+  assert.deepEqual(c.calls, ['requestClose', 'requestClose'])
+  assert.equal(c.get('office-close').disabled, false)
 })
 
 test('polling survives a temporary closed status and resumes after reconnection', async () => {
@@ -65,6 +65,8 @@ test('polling survives a temporary closed status and resumes after reconnection'
   await c.tick()
   c.state({ status: 'editing', closed: false })
   await c.tick()
-  assert.equal(c.get('office-save').disabled, false)
+  assert.equal(c.get('office-close').disabled, false)
+  c.get('office-close').onclick!()
+  assert.deepEqual(c.calls, ['requestClose'])
   assert.deepEqual(c.redirects, [])
 })

@@ -108,19 +108,6 @@ class OfficeEdits {
     }
     return { ...config, token: sign(config, this.settings.secret) }
   }
-  async forceSave(id: string): Promise<boolean> {
-    const session = this.read(id)
-    if (session.closed || session.status === 'conflict') throw new ArtifactError(409, 'office_session_closed', '請取回編輯結果，並從檢視頁重新開啟。')
-    const command = { c: 'forcesave', key: id }
-    try {
-      const res = await fetch(`${this.settings.internalUrl}/coauthoring/CommandService.ashx`, { method: 'POST',
-        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...command, token: sign({ ...command, operation: 'command' }, this.settings.secret) }),
-        redirect: 'error', signal: AbortSignal.timeout(15_000) })
-      const value = await res.json() as { error: number }
-      if (!res.ok || ![0, 4].includes(value.error)) throw new Error()
-      return value.error === 0
-    } catch { throw new ArtifactError(400, 'office_save_failed', '無法要求 Office 保存，請保留編輯頁並稍後再試。') }
-  }
   async callback(id: string, payload: Record<string, unknown>): Promise<void> {
     // Force-save and close callbacks can overlap. Fetch and commit each session in arrival order.
     const previous = this.saves.get(id) ?? Promise.resolve()
@@ -228,11 +215,6 @@ export function mountOfficeEditor(app: Hono, store: ArtifactStore, config: Confi
   app.get('/api/artifacts/:id/office-edits/:session', (c) => c.json(publicState(edits.read(c.req.param('session'), c.req.param('id')))))
   app.get('/api/artifacts/:id/office-edits/:session/config', (c) => c.json(edits.config(edits.read(c.req.param('session'), c.req.param('id')))))
   app.get('/api/artifacts/:id/office-edits/:session/result', (c) => { edits.read(c.req.param('session'), c.req.param('id')); return download(c, edits.result(c.req.param('session'))) })
-  app.post('/api/artifacts/:id/office-edits/:session/save', async (c) => {
-    requireCaller(c, c.req.param('id'))
-    edits.read(c.req.param('session'), c.req.param('id'))
-    return c.json({ queued: await edits.forceSave(c.req.param('session')) })
-  })
   app.get('/api/office/source/:session', (c) => {
     const value = verify(c.req.query('token') ?? '', settings.secret)
     if (value.scope !== 'source' || value.sessionId !== c.req.param('session')) throw new ArtifactError(401, 'office_unauthorized', 'Office 來源授權無效。')

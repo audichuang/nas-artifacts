@@ -795,6 +795,7 @@ test('PPTX editing has a separate trusted page while artifact frames cannot crea
   await viewer.locator('#edit').click()
   await viewer.waitForURL(/\/edit\//)
   assert.equal(await viewer.locator('#frame').count(), 0)
+  assert.equal(await viewer.locator('#office-close').isDisabled(), true)
   const editorCsp = (await viewer.request.get(viewer.url())).headers()['content-security-policy']
   assert.ok(editorCsp.includes(`frame-src ${config.office.url}`))
   assert.ok(!editorCsp.includes("'unsafe-eval'"))
