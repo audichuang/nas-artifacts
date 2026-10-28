@@ -162,3 +162,7 @@ textarea { resize: vertical; }
 .diff-lines .gap { color: var(--muted); background: var(--surface-2); text-align: center; }
 .toast { display: flex; align-items: center; gap: 12px; }
 .toast-action { color: inherit; text-decoration: underline; font-size: 13px; }
+/* The trusted Office editor is a separate page; artifact frames keep their existing sandbox. */
+.office-title { font-size: 16px; margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.office-workspace { height: calc(100dvh - 64px); min-height: 360px; }
+#office-editor { height: 100%; }

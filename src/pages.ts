@@ -127,9 +127,27 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     {
       appOrigin: config.appOrigin,
       contentOrigin: config.contentOrigin,
+      officeEnabled: Boolean(config.office),
       artifact: detail,
       version,
       path
     }
+  )
+}
+
+export function officeEditorPage(session: { id: string; artifactId: string; title: string }, officeUrl: string): string {
+  return shell(
+    `編輯 · ${session.title}`,
+    `<header class="topbar">
+  <button id="office-close" class="button" type="button">儲存並返回</button>
+  <h1 class="office-title">${escapeHtml(session.title)}</h1>
+  <span id="office-status" class="muted small" role="status">正在開啟編輯器…</span>
+  <a id="office-result" class="button" hidden download>下載編輯結果</a>
+  <a id="office-back" class="button" href="/a/${session.artifactId}" hidden>返回檢視</a>
+  <button id="office-save" class="button primary" type="button" disabled>儲存版本</button>
+</header>
+<main class="office-workspace"><div id="office-editor"></div></main>`,
+    'office-editor.js',
+    { artifactId: session.artifactId, sessionId: session.id, officeUrl }
   )
 }
