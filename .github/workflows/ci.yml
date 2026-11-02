@@ -11,7 +11,8 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Playwright 1.56 cannot install Chromium deps on ubuntu-26.04 (the current ubuntu-latest).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
