@@ -51,7 +51,7 @@
 
 ONLYOFFICE Docs 以獨立服務執行；部署設定仍放 nas-ops。開啟 JWT、使用相同秘密，並讓它能連到上述 callback origin；內部位址可能需要 Document Server 的 `ALLOW_PRIVATE_IP_ADDRESS=true`。不要使用公開試用站處理私人文件。瀏覽器與 app 只信任設定的 Office origin，保存下載不跟隨 redirect，回呼只採用簽章涵蓋的內容。
 
-`DATA_DIR/office-edits/` 保存編輯來源與尚待提交的結果，服務重啟後仍可取回。衝突副本不自動刪除；已完成且保存成功（或無修改）的副本在一天後可清理，每次開啟新編輯時執行，上限 200 次工作階段。這個目錄也應納入資料備份。成功保存仍使用原本的版本／blob 提交流程；舊版 CLI 不需更新。
+`DATA_DIR/office-edits/` 保存編輯來源與尚待提交的結果，服務重啟後仍可取回。衝突副本不自動刪除；已完成且保存成功（或無修改）的副本，以及 Office 從未開啟的副本，在一天後可清理；開啟途中中斷留下的殘缺資料夾直接清除。清理在每次開啟新編輯時執行，上限 200 次工作階段。這個目錄也應納入資料備份。成功保存仍使用原本的版本／blob 提交流程；舊版 CLI 不需更新。
 
 Image:`ghcr.io/audichuang/nas-artifacts`(CI 在 main 每次 push 時建置,標籤 `sha-<完整 sha>`;部署時釘 digest)。健康檢查:`/healthz`。實際部署設定在 nas-ops repo 的 `hosts/ttnas/artifacts/`。
 

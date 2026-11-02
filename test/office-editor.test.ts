@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type Server } from 'node:http'
@@ -167,5 +167,47 @@ test('an Office save error preserves the supplied recovery file without publishi
     }
     await f.callback(sessionId, { key: sessionId, status: 6, url: `${docsUrl}/recovery.pptx` })
     assert.equal(f.store.requireSummary(f.artifact.id).currentVersion, 2)
+  } finally { f.close() }
+})
+
+test('leftovers from a crashed start or stray files do not block new edits', async () => {
+  const f = fixture()
+  try {
+    const edits = join(f.config.dataDir, 'office-edits')
+    const leftover = join(edits, 'A'.repeat(43))
+    // A start interrupted while copying the source leaves a folder without session.json.
+    mkdirSync(leftover)
+    writeFileSync(join(leftover, 'source.pptx.tmp'), 'partial')
+    writeFileSync(join(edits, '.DS_Store'), '')
+    assert.equal((await f.start()).status, 201)
+    assert.equal(existsSync(leftover), false)
+  } finally { f.close() }
+})
+
+test('sessions Office never opened are cleaned after a day; opened ones are kept', async () => {
+  const f = fixture()
+  try {
+    const age = (sid: string) => {
+      const file = join(f.config.dataDir, 'office-edits', sid, 'session.json')
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), createdAt: Date.now() - 2 * 86_400_000 }))
+    }
+    const abandoned = (await (await f.start()).json()).sessionId
+    const opened = (await (await f.start()).json()).sessionId
+    const cfg = await (await f.app.request(`${f.root}/${opened}/config`)).json()
+    assert.equal((await f.app.request(cfg.document.url)).status, 200)
+    age(abandoned)
+    age(opened)
+    await f.start()
+    assert.equal((await f.app.request(`${f.root}/${abandoned}`)).status, 404)
+    assert.equal((await f.app.request(`${f.root}/${opened}`)).status, 200)
+  } finally { f.close() }
+})
+
+test('a malformed callback body is rejected as unauthorized, not a server error', async () => {
+  const f = fixture()
+  try {
+    const { sessionId } = await (await f.start()).json()
+    const response = await f.app.request(`/api/office/callback/${sessionId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' })
+    assert.equal(response.status, 401)
   } finally { f.close() }
 })

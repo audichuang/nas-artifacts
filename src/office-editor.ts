@@ -12,6 +12,8 @@ type Session = {
   id: string; artifactId: string; entry: string; title: string; baseVersion: number
   status: 'editing' | 'saved' | 'conflict' | 'error' | 'closed'; closed: boolean
   savedVersion?: number; resultHash?: string; message?: string; createdAt: number
+  /** Set once Office fetched the source; a session it never opened holds no edits. */
+  opened?: boolean
 }
 type Settings = NonNullable<Config['office']>
 const DAY = 86_400_000
@@ -73,12 +75,8 @@ class OfficeEdits {
     if (summary.capabilities.length) throw new ArtifactError(403, 'office_not_editable', '宣告互動能力的簡報只能由發佈端更新。')
     if (!/\.pptx$/i.test(summary.entry)) throw new ArtifactError(409, 'office_not_editable', '網頁物件編輯只支援 .pptx。')
     if (baseVersion !== summary.currentVersion) throw new ArtifactError(409, 'version_conflict', '簡報已有新版，請回檢視頁重新開啟編輯。')
-    // Completed copies may be discarded after a day: the published versions already contain their bytes.
-    for (const id of readdirSync(this.root)) {
-      const session = JSON.parse(readFileSync(this.file(id, 'session.json'), 'utf8')) as Session
-      if (session.closed && ['saved', 'closed'].includes(session.status) && Date.now() - session.createdAt > DAY) rmSync(join(this.root, id), { recursive: true })
-    }
-    if (readdirSync(this.root).length >= 200) throw new ArtifactError(409, 'office_sessions_full', '編輯副本已達上限，請先由管理者取回並清理未保存的結果。')
+    this.prune()
+    if (this.sessionDirs().length >= 200) throw new ArtifactError(409, 'office_sessions_full', '編輯副本已達上限，請先由管理者取回並清理未保存的結果。')
     const row = this.store.requireVersion(artifactId, summary.currentVersion)
     const id = randomBytes(32).toString('base64url')
     const session: Session = { id, artifactId, entry: row.entry, title: row.title, baseVersion: row.version, status: 'editing', closed: false, createdAt: Date.now() }
@@ -89,7 +87,31 @@ class OfficeEdits {
     } catch (error) { rmSync(join(this.root, id), { recursive: true }); throw error }
     return session
   }
-  source(id: string): Buffer { this.read(id); return readFileSync(this.file(id, 'source.pptx')) }
+  private sessionDirs(): string[] {
+    return readdirSync(this.root, { withFileTypes: true }).filter((entry) => entry.isDirectory() && /^[A-Za-z0-9_-]{43}$/.test(entry.name)).map((entry) => entry.name)
+  }
+  /** Copies may go after a day once nothing in them is unpublished: saved, closed unchanged, or never opened by Office. */
+  private prune(): void {
+    for (const id of this.sessionDirs()) {
+      const dir = join(this.root, id)
+      if (!existsSync(join(dir, 'session.json'))) {
+        // start() writes session.json last and before any result, so this is a start interrupted mid-copy.
+        if (!existsSync(join(dir, 'result.pptx'))) rmSync(dir, { recursive: true, force: true })
+        continue
+      }
+      let session: Session
+      try { session = JSON.parse(readFileSync(join(dir, 'session.json'), 'utf8')) as Session } catch { continue }
+      if (Date.now() - session.createdAt <= DAY) continue
+      const done = session.closed && ['saved', 'closed'].includes(session.status)
+      const neverOpened = session.status === 'editing' && !session.opened && !session.resultHash
+      if (done || neverOpened) rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  source(id: string): Buffer {
+    const session = this.read(id)
+    if (!session.opened) { session.opened = true; this.remember(session) }
+    return readFileSync(this.file(id, 'source.pptx'))
+  }
   result(id: string): Buffer {
     const session = this.read(id)
     if (!session.resultHash) throw new ArtifactError(404, 'office_result_not_found', '尚未收到編輯結果。')
@@ -221,7 +243,7 @@ export function mountOfficeEditor(app: Hono, store: ArtifactStore, config: Confi
     return download(c, edits.source(c.req.param('session')))
   })
   app.post('/api/office/callback/:session', async (c) => {
-    const body: unknown = await c.req.json()
+    const body: unknown = await c.req.json().catch(() => null)
     const token = c.req.header('authorization')?.replace(/^Bearer\s+/i, '') ?? (object(body) && typeof body.token === 'string' ? body.token : '')
     const verified = verify(token, settings.secret)
     if (verified.operation !== undefined && verified.operation !== 'callback') throw new ArtifactError(401, 'office_unauthorized', 'Office 回呼授權用途不符。')

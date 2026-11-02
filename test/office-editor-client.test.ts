@@ -15,6 +15,7 @@ async function client() {
   let state: Record<string, unknown> = { status: 'editing', closed: false }
   const redirects: string[] = []
   const requests: string[] = []
+  const clock = { now: 0 }
   await runInNewContext(`(async()=>{${readFileSync(new URL('../public/office-editor.js', import.meta.url), 'utf8')}\n})()`, {
     document: { getElementById: get, createElement: element, head: { append(script: Element) { queueMicrotask(() => script.onload?.()) } } },
     fetch: async (url: string) => { requests.push(url); return { ok: true, json: async () => url.endsWith('/config') ? {} : url.endsWith('/save') ? { queued: true } : state } },
@@ -24,11 +25,11 @@ async function client() {
       destroyEditor() { calls.push('destroyEditor') }
     } } },
     location: { assign(url: string) { redirects.push(url) } },
-    setTimeout: (fn: () => void) => { timers.push(fn) }, addEventListener() {}, queueMicrotask
+    setTimeout: (fn: () => void) => { timers.push(fn) }, addEventListener() {}, queueMicrotask, Date: { now: () => clock.now }
   })
   await new Promise<void>((resolve) => setImmediate(resolve))
   const tick = async () => { timers.shift()?.(); await new Promise<void>((resolve) => setImmediate(resolve)) }
-  return { get, calls, events, tick, redirects, requests, state(value: Record<string, unknown>) { state = value } }
+  return { clock, get, calls, events, tick, redirects, requests, state(value: Record<string, unknown>) { state = value } }
 }
 
 test('return is disabled during loading and uses the SDK close guard even with unsynchronized edits', async () => {
@@ -69,4 +70,23 @@ test('polling survives a temporary closed status and resumes after reconnection'
   c.get('office-close').onclick!()
   assert.deepEqual(c.calls, ['requestClose'])
   assert.deepEqual(c.redirects, [])
+})
+
+test('return offers a way back when Office never confirms the close', async () => {
+  const c = await client()
+  c.get('office-back').hidden = true // as rendered by officeEditorPage
+  c.events.onDocumentReady()
+  c.get('office-close').onclick!()
+  c.events.onRequestClose()
+  await c.tick()
+  assert.equal(c.get('office-back').hidden, true)
+  c.clock.now = 61_000
+  await c.tick()
+  assert.equal(c.get('office-back').hidden, false)
+  assert.match(c.get('office-status').textContent, /Office/)
+  assert.deepEqual(c.redirects, [])
+  // A late confirmation still finishes the return.
+  c.state({ status: 'saved', closed: true, savedVersion: 2 })
+  await c.tick()
+  assert.deepEqual(c.redirects, ['/a/a?v=2'])
 })

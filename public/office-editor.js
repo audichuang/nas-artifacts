@@ -9,6 +9,9 @@ let closing = false
 let changed = false
 let stopped = false
 let lastVersion
+let closingSince = 0
+// Office normally confirms a close within seconds; past this its callback is likely not reaching the app.
+const CLOSE_WAIT_MS = 60_000
 closeButton.disabled = true
 
 async function api(path = '') {
@@ -36,6 +39,9 @@ async function poll() {
       back.hidden = false
       statusEl.textContent = state.savedVersion ? `已儲存為 v${state.savedVersion}` : '編輯已結束'
       if (closing) location.assign(`/a/${data.artifactId}${state.savedVersion ? `?v=${state.savedVersion}` : ''}`)
+    } else if (closing && Date.now() - closingSince > CLOSE_WAIT_MS) {
+      statusEl.textContent = 'Office 尚未確認保存結果，可先返回檢視；保存完成後會出現新版本。'
+      back.hidden = false
     } else if (state.closed) {
       statusEl.textContent = 'Office 連線中斷，等待重新連線…'
     } else if (state.status === 'editing' && !closing) {
@@ -55,6 +61,7 @@ function finish() {
 }
 function closeReady() {
   closing = true
+  closingSince = Date.now()
   closeButton.disabled = true
   statusEl.textContent = '正在保存並返回，請稍候…'
   editor.destroyEditor()
