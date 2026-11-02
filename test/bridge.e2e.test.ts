@@ -766,3 +766,38 @@ test('a PowerPoint file shows as a deck at its own size: pictures load inside th
   assert.deepEqual(store.listErrors(id, 1), [])
   await viewer.close()
 })
+
+test('PPTX editing has a separate trusted page while artifact frames cannot create edit sessions', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const config = { dataDir: dir, appPort: 0, contentPort: CONTENT_PORT, appOrigin: '', contentOrigin: `http://127.0.0.1:${CONTENT_PORT}`, tokens: [TOKEN],
+    office: { url: `http://127.0.0.1:${SINK_PORT}`, internalUrl: `http://127.0.0.1:${SINK_PORT}`, callbackOrigin: 'http://internal.test', secret: 'office-e2e-test-secret-0123456789' } }
+  const app = createAppServer(store, config)
+  const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' })
+  servers.push(server)
+  await new Promise<void>((resolve) => server.listening ? resolve() : server.once('listening', resolve))
+  config.appOrigin = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+  const content = serve({ fetch: createContentServer(store, config).fetch, port: 0, hostname: '127.0.0.1' })
+  servers.push(content)
+  await new Promise<void>((resolve) => content.listening ? resolve() : content.once('listening', resolve))
+  config.contentOrigin = `http://127.0.0.1:${(content.address() as { port: number }).port}`
+  const pptx = new PptxGenJS()
+  pptx.addSlide().addText('可以編輯', { x: 1, y: 1, w: 5, h: 1 })
+  const { id } = store.publish({ title: '編輯測試', files: { 'deck.pptx': { content: await pptx.write({ outputType: 'nodebuffer' }) as Buffer } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`${config.appOrigin}/a/${id}`)
+  await viewer.locator('#edit').waitFor({ state: 'visible', timeout: 2000 })
+  const csp = (await viewer.request.get(`${config.appOrigin}/a/${id}`)).headers()['content-security-policy']
+  assert.equal(csp, `frame-src ${config.contentOrigin}/a/${id}/`)
+  await viewer.frameLocator('#frame').locator('.slide.active').waitFor()
+  const artifactFrame = viewer.frames().find((frame) => frame.url().startsWith(`${config.contentOrigin}/a/`))!
+  assert.equal(await artifactFrame.evaluate(async (url) => {
+    try { await fetch(url, { method: 'POST', headers: { 'x-artifact-client': 'viewer', 'content-type': 'application/json' }, body: '{"baseVersion":1}' }); return 'allowed' } catch { return 'blocked' }
+  }, `${config.appOrigin}/api/artifacts/${id}/office-edits`), 'blocked')
+  await viewer.locator('#edit').click()
+  await viewer.waitForURL(/\/edit\//)
+  assert.equal(await viewer.locator('#frame').count(), 0)
+  assert.equal(await viewer.locator('#office-close').isDisabled(), true)
+  const editorCsp = (await viewer.request.get(viewer.url())).headers()['content-security-policy']
+  assert.ok(editorCsp.includes(`frame-src ${config.office.url}`))
+  assert.ok(!editorCsp.includes("'unsafe-eval'"))
+  await viewer.close()
+})

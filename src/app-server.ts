@@ -16,6 +16,7 @@ import { decodeRequestPath, isPptxPath, normalizeFilePath } from './file-paths.t
 import { galleryPage, viewerPage } from './pages.ts'
 import { isSlidesPath, renderSlides } from './slides.ts'
 import { deckToPptx } from './slides-pptx.ts'
+import { mountOfficeEditor } from './office-editor.ts'
 
 /** The most a deck's source may be when edited from the viewer. */
 const SLIDES_SOURCE_BYTES = 1024 * 1024
@@ -126,6 +127,8 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
       onError: (c) => c.json({ error: { code: 'body_too_large', message: 'Request body too large.' } }, 413)
     })
   )
+
+  mountOfficeEditor(app, store, config, requireCaller)
 
   // Pages
 

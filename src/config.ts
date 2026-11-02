@@ -10,6 +10,7 @@ export type Config = {
   /** Public origin that serves artifact files; must differ from appOrigin (stored-XSS isolation). */
   contentOrigin: string
   tokens: string[]
+  office?: { url: string; internalUrl: string; callbackOrigin: string; secret: string }
 }
 
 function readTokens(env: NodeJS.ProcessEnv): string[] {
@@ -39,12 +40,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (appOrigin === contentOrigin) {
     throw new Error('APP_ORIGIN and CONTENT_ORIGIN must differ.')
   }
+  let office: Config['office']
+  if (env.ONLYOFFICE_URL) {
+    const url = origin(env.ONLYOFFICE_URL)
+    const internalUrl = origin(env.ONLYOFFICE_INTERNAL_URL ?? url)
+    const callbackOrigin = origin(env.ONLYOFFICE_CALLBACK_ORIGIN ?? appOrigin)
+    if ([appOrigin, contentOrigin].includes(url)) throw new Error('ONLYOFFICE_URL must use its own origin.')
+    if (!env.ONLYOFFICE_JWT_SECRET_FILE) throw new Error('Set ONLYOFFICE_JWT_SECRET_FILE when ONLYOFFICE_URL is enabled.')
+    const secret = readFileSync(env.ONLYOFFICE_JWT_SECRET_FILE, 'utf8').trim()
+    if (secret.length < 32) throw new Error('The ONLYOFFICE JWT secret must be at least 32 characters.')
+    office = { url, internalUrl, callbackOrigin, secret }
+  }
   return {
     dataDir: resolve(env.DATA_DIR ?? '/data'),
     appPort,
     contentPort,
     appOrigin,
     contentOrigin,
-    tokens: readTokens(env)
+    tokens: readTokens(env),
+    ...(office ? { office } : {})
   }
 }

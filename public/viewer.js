@@ -592,7 +592,8 @@ let cursorSlide = -1
 let previewSeq = 0
 let previewTimer
 
-const canEdit = () => isMarkdownDeck() && artifact.capabilities.length === 0
+const canEditPptx = () => data.officeEnabled && place.path === null && /\.pptx$/i.test(currentEntry()) && artifact.capabilities.length === 0 && version === artifact.currentVersion
+const canEdit = () => (isMarkdownDeck() || canEditPptx()) && artifact.capabilities.length === 0
 const exportLink = document.getElementById('export-pptx')
 function syncEditButton() {
   editButton.hidden = !canEdit()
@@ -760,7 +761,17 @@ async function saveDeck() {
   }
 }
 
-editButton.addEventListener('click', () => (editorPanel.hidden ? openEditor() : closeEditor()))
+editButton.addEventListener('click', async () => {
+  if (!canEditPptx()) return editorPanel.hidden ? openEditor() : closeEditor()
+  editButton.disabled = true
+  try {
+    const session = await api('/office-edits', { method: 'POST', json: { baseVersion: version } })
+    location.assign(session.editorUrl)
+  } catch (error) {
+    toast(error.message)
+    editButton.disabled = false
+  }
+})
 document.getElementById('close-editor').addEventListener('click', closeEditor)
 saveButton.addEventListener('click', saveDeck)
 sourceInput.addEventListener('keydown', (event) => {
