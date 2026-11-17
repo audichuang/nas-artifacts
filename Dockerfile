@@ -1,9 +1,9 @@
-FROM node:24.11.1-alpine3.22 AS deps
+FROM node:24.22.3-alpine3.24 AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN npm install -g pnpm@12.14.0 && pnpm install --prod --frozen-lockfile
+RUN npm install -g pnpm@12.21.0 && pnpm install --prod --frozen-lockfile
 
-FROM node:24.11.1-alpine3.22
+FROM node:24.22.3-alpine3.24
 ENV NODE_ENV=production DATA_DIR=/data APP_PORT=8790 CONTENT_PORT=8791
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules

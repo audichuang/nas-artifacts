@@ -240,7 +240,7 @@ describe('content origin', () => {
     const html = await response.text()
     assert.match(html, /<figure class="diagram"><svg [^>]*class="pele pele-flowchart"[^>]*>[\s\S]*寫檔[\s\S]*<\/svg><\/figure>/)
     assert.match(html, /var\(--pele-fg/)
-    assert.match(html, /<div class="diagram-failed"><p>Mermaid: [^<]*line 3/)
+    assert.match(html, /<div class="diagram-failed"><p>Mermaid: [^<]*line 2/)
     assert.match(html, /<pre><code>flowchart LR\n {2}A --&#62;\n<\/code><\/pre>/)
     assert.equal(html.match(/<script>/g)?.length, 1)
     assert.doesNotMatch(response.headers.get('content-security-policy') ?? '', /mermaid|pele/)

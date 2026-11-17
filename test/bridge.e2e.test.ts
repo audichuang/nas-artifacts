@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type Server } from 'node:http'
@@ -16,8 +16,13 @@ const PptxGenJS = ((pptxgen as unknown as { default?: typeof pptxgen.default }).
 // Set CHROMIUM_PATH, or keep a Playwright headless shell in its default cache.
 function findChromium(): string | undefined {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
+  // The newest headless shell in the cache, so a Playwright upgrade does not need this file edited.
+  const cache = join(homedir(), 'Library/Caches/ms-playwright')
+  const shells = existsSync(cache)
+    ? readdirSync(cache).filter((name) => name.startsWith('chromium_headless_shell-')).sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1]))
+    : []
   const candidates = [
-    join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell'),
+    ...shells.map((name) => join(cache, name, 'chrome-headless-shell-mac-arm64/chrome-headless-shell')),
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser'
   ]

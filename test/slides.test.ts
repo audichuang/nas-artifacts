@@ -255,8 +255,9 @@ describe('exporting decks', () => {
     const response = await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)
     assert.equal(response.status, 200)
     const entries = unzip(Buffer.from(await response.arrayBuffer()))
+    // Nothing XML 1.0 cannot hold. Marked turns the &#xD800; reference into U+FFFD, as CommonMark asks; that one is valid XML.
     for (const [name, xml] of entries) {
-      if (name.endsWith('.xml')) assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffd]/, name)
+      if (name.endsWith('.xml')) assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]|[\ud800-\udfff]/u, name)
     }
     const slide = entries.get('ppt/slides/slide1.xml')!
     assert.equal((slide.match(/<a:hlinkClick /g) ?? []).length, 1)
