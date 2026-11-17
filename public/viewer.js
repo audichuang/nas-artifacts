@@ -6,6 +6,15 @@ const id = artifact.id
 const frame = document.getElementById('frame')
 const versionSelect = document.getElementById('version')
 const titleEl = document.getElementById('title')
+const publicLink = document.getElementById('public-link')
+function syncPublicLink(url) {
+  publicLink.hidden = !url
+  if (url) {
+    publicLink.href = url
+    publicLink.title = `任何人拿到連結都能看(唯讀):${url}`
+  }
+}
+syncPublicLink(data.publicUrl)
 const fullscreenButton = document.getElementById('fullscreen')
 const pinButton = document.getElementById('pin')
 const toastEl = document.getElementById('toast')
@@ -227,6 +236,7 @@ function versionLabel(v) {
 
 async function refreshArtifact() {
   artifact = await api('')
+  syncPublicLink(artifact.publicUrl)
   renderVersions()
   syncChangesButton()
   pinButton.textContent = artifact.pinned ? '★' : '☆'

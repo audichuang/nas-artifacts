@@ -1118,3 +1118,24 @@ for (const [name, body] of Object.entries(EXFIL_PAGES)) {
     }
   })
 }
+
+test('the tailnet gallery and viewer show which artifacts are public, with the public link', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const shared = store.publish({ title: '已公開的報告', files: { 'index.md': { content: Buffer.from('# x\n') } } })
+  store.setVisibility(shared.id, 'public')
+  const hidden = store.publish({ title: '私人報告', files: { 'index.md': { content: Buffer.from('# y\n') } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/`)
+  const card = viewer.locator('.card', { hasText: '已公開的報告' })
+  await card.locator('.public-mark').waitFor({ timeout: 5000 })
+  assert.equal(await viewer.locator('.card', { hasText: '私人報告' }).locator('.public-mark').count(), 0)
+
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${shared.id}`)
+  const link = viewer.locator('#public-link')
+  await link.waitFor({ state: 'visible', timeout: 5000 })
+  assert.equal(await link.getAttribute('href'), `http://localhost:${PUBLIC_APP_PORT}/a/${shared.id}`)
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${hidden.id}`)
+  await viewer.locator('#title').waitFor({ state: 'attached' })
+  assert.equal(await viewer.locator('#public-link').isHidden(), true)
+  await viewer.close()
+})
