@@ -8,17 +8,29 @@ const mode = card.dataset.mode
 const code = mode === 'enroll' ? location.hash.slice(1) : ''
 if (code) history.replaceState(null, '', location.pathname)
 
+// Options are fetched before the tap, so the passkey prompt opens straight from the tap: Safari refuses one
+// that follows a network round trip.
+let ready = null
+function prepare() {
+  const startedAt = Date.now()
+  const options = mode === 'enroll' ? post('/auth/register/options', { code }) : post('/auth/login/options')
+  ready = { startedAt, options }
+  options.catch(() => {})
+}
+
 async function run() {
   button.disabled = true
   status.textContent = mode === 'enroll' ? '等待裝置建立 passkey…' : '等待 passkey…'
   try {
+    if (mode === 'enroll' && !code) throw new Error('連結不完整，請重新產生註冊連結。')
+    // A ceremony lives five minutes on the server.
+    if (!ready || Date.now() - ready.startedAt > 4 * 60_000) prepare()
+    const { flow, options } = await ready.options
+    ready = null
     if (mode === 'enroll') {
-      if (!code) throw new Error('連結不完整，請重新產生註冊連結。')
-      const { flow, options } = await post('/auth/register/options', { code })
       const response = await createPasskey(options)
       await post('/auth/register/verify', { flow, response, name: document.getElementById('name').value })
     } else {
-      const { flow, options } = await post('/auth/login/options')
       const response = await getPasskey(options)
       await post('/auth/login/verify', { flow, response })
     }
@@ -27,7 +39,9 @@ async function run() {
   } catch (error) {
     status.textContent = describe(error)
     button.disabled = false
+    if (mode !== 'enroll' || code) prepare()
   }
 }
 
+if (mode !== 'enroll' || code) prepare()
 button.addEventListener('click', run)

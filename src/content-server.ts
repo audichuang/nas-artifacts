@@ -106,6 +106,9 @@ export function createContentServer(
   // lets through only the current version: a page made public shares what it is now, not its drafts.
   if (options.publicOnly) {
     app.use('/a/:id/*', async (c, next) => {
+      // The gate reads the version from the raw path; routes match the decoded one. Ids, "v" and version
+      // numbers never need encoding, so an encoded one there is refused rather than read two ways.
+      if (new URL(c.req.url).pathname.split('/').slice(1, 5).some((segment) => segment.includes('%'))) return c.text('Not found', 404)
       const id = c.req.param('id')
       const grant = c.env?.contentGrant
       // The owner's token opens every version of the one artifact it was issued for.

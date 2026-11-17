@@ -85,6 +85,12 @@ async function api(path, options = {}) {
 let contentBase = data.contentBase || data.contentOrigin
 const TOKEN_PREFIX = /^\/t\/[^/]+(?=\/a\/)/
 
+// Asset URLs come without a token; under one, they get the frame's own, the one its CSP allows.
+function withFrameToken(asset) {
+  const prefix = `${data.contentOrigin}/a/`
+  return asset.url.startsWith(prefix) ? { ...asset, url: `${contentBase}/a/${asset.url.slice(prefix.length)}` } : asset
+}
+
 function contentUrl(v, path) {
   const base = `${contentBase}/a/${id}/v/${v}/`
   return path ? base + path.split('/').map(encodeURIComponent).join('/') : base
@@ -302,13 +308,13 @@ const methods = {
     capability('db')
     return (await api('/db/_batch', { method: 'POST', json: { ops } })).results
   },
-  'uploads.put': ({ name, bytes }) => {
+  'uploads.put': async ({ name, bytes }) => {
     capability('uploads')
-    return api(`/assets?name=${encodeURIComponent(name)}`, { method: 'POST', body: bytes })
+    return withFrameToken(await api(`/assets?name=${encodeURIComponent(name)}`, { method: 'POST', body: bytes }))
   },
   'uploads.list': async () => {
     capability('uploads')
-    return (await api('/assets')).assets.filter((asset) => asset.source === 'page')
+    return (await api('/assets')).assets.filter((asset) => asset.source === 'page').map(withFrameToken)
   }
 }
 

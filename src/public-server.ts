@@ -13,7 +13,10 @@ const SCRIPT_PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'self'
 
 /** Where to go after signing in: a path on this app only, never another host. */
 export function safeNext(value: string | undefined): string {
-  return value && /^\/(?![/\\])/.test(value) && value.length < 2000 ? value : '/'
+  // No backslash or control character anywhere: URL parsers drop tabs and newlines and read "\\" as "/".
+  if (!value || value.length >= 2000 || !value.startsWith('/') || value.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(value)) return '/'
+  const base = 'https://next.invalid'
+  return new URL(value, base).origin === base ? value : '/'
 }
 
 function scriptPage(title: string, body: string, script: string): string {

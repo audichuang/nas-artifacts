@@ -94,12 +94,11 @@ export function createAppServer(store: ArtifactStore, config: Config, options: A
   const owner = options.owner
   const tokenDigests = owner ? [] : config.tokens.map(digest)
   const staticRoot = new URL('../public/', import.meta.url)
-  /** Where an artifact's files are read from: on the owner's public app, under a content token. */
-  const contentBase = (id: string): string => (owner ? `${config.contentOrigin}/t/${owner.auth.contentToken(id).token}` : config.contentOrigin)
 
   const urls = (summary: ArtifactSummary) => ({
     url: `${config.appOrigin}/a/${summary.id}`,
-    contentUrl: `${contentBase(summary.id)}/a/${summary.id}/v/${summary.currentVersion}/`,
+    // The owner's API hands out no content tokens (the viewer page carries its own), so a listing is no token harvest.
+    contentUrl: owner ? null : `${config.contentOrigin}/a/${summary.id}/v/${summary.currentVersion}/`,
     // Where anyone may open it, once the publisher made it public and the public listeners are on.
     publicUrl: config.public && summary.visibility === 'public' && summary.capabilities.length === 0 ? `${config.public.appOrigin}/a/${summary.id}` : null
   })
@@ -387,7 +386,8 @@ export function createAppServer(store: ArtifactStore, config: Config, options: A
 
   const presentAsset = (id: string, asset: ReturnType<ArtifactStore['getAsset']>) => ({
     ...asset,
-    url: `${contentBase(id)}/a/${id}/assets/${asset.id}/${encodeURIComponent(asset.name)}`
+    // Without a token even on the owner's public app: the viewer puts its frame's own token in front.
+    url: `${config.contentOrigin}/a/${id}/assets/${asset.id}/${encodeURIComponent(asset.name)}`
   })
 
   app.get('/api/artifacts/:id/assets', (c) => {

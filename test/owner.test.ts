@@ -60,6 +60,17 @@ describe('content tokens', () => {
     assert.ok(!auth.verifyContentToken('', 'abc'))
   })
 
+  test('an encoded path segment does not get an anonymous visitor past the current-version gate', async () => {
+    const { id } = store.publish({ title: 'Old', entry: 'docs/index.html', files: { 'docs/index.html': { content: Buffer.from('<p>v1</p>') }, '1/secret.txt': { content: Buffer.from('OLD SECRET') } } })
+    store.update(id, { files: { '1/secret.txt': null }, baseVersion: 1 })
+    store.setVisibility(id, 'public')
+    for (const path of [`/a/${id}/%76/1/secret.txt`, `/a/${id}/%76/1`, `/a/${id}/%76/1/`, `/%61/${id}/v/1/1/secret.txt`, `/a/${id}/v/%31/1/secret.txt`]) {
+      const response = await publicContent.request(`${PUBLIC_CONTENT}${path}`)
+      assert.equal(response.status, 404, `${path} → ${response.status} ${response.headers.get('location') ?? ''}`)
+    }
+    assert.equal((await publicContent.request(`${PUBLIC_CONTENT}/a/${id}/v/2/docs/index.html`)).status, 200)
+  })
+
   test('a valid token opens any version of a private artifact; the public gate is unchanged without one', async () => {
     const { id } = store.publish({ title: 'Draft', files: { 'index.md': { content: Buffer.from('# v1\n') } } })
     store.update(id, { files: { 'index.md': { content: Buffer.from('# v2\n') } }, baseVersion: 1 })
@@ -132,8 +143,11 @@ describe('the public app gate', () => {
     const html = await viewer.text()
     assert.match(html, new RegExp(`"contentBase":"${PUBLIC_CONTENT}/t/[0-9a-z]+\\.[A-Za-z0-9_-]+"`))
     assert.doesNotMatch(html, /"officeEnabled":true/)
-    const detail = (await (await publicApp.request(`${PUBLIC_APP}/api/artifacts/${id}`, { headers: { cookie } })).json()) as { contentUrl: string }
-    assert.match(detail.contentUrl, new RegExp(`^${PUBLIC_CONTENT}/t/[^/]+/a/${id}/v/1/$`))
+    // The API hands out no tokens: one stolen session must not harvest a token for every artifact.
+    const detail = (await (await publicApp.request(`${PUBLIC_APP}/api/artifacts/${id}`, { headers: { cookie } })).json()) as { contentUrl: string | null }
+    assert.equal(detail.contentUrl, null)
+    const list = await (await publicApp.request(`${PUBLIC_APP}/api/artifacts`, { headers: { cookie } })).text()
+    assert.doesNotMatch(list, /\/t\//)
   })
 
   test('sign-in calls need the viewer header; enrolment needs a live link', async () => {
@@ -163,6 +177,34 @@ describe('the public app gate', () => {
   })
 })
 
+describe('enrolment while signed in', () => {
+  test('a link opened on a signed-in device is still spent by the passkey it enrols', async () => {
+    const { code } = auth.createLoginLink()
+    const options = await publicApp.request(`${PUBLIC_APP}/auth/register/options`, { method: 'POST', headers: { cookie, 'content-type': 'application/json', 'x-artifact-client': 'viewer' }, body: JSON.stringify({ code }) })
+    assert.equal(options.status, 200)
+    // The ceremony is tied to the link: it carries the link, so finishing it would spend it.
+    const { flow } = (await options.json()) as { flow: string }
+    assert.equal((auth as unknown as { challenges: Map<string, { linkHash?: string }> }).challenges.get(flow)?.linkHash !== undefined, true)
+  })
+})
+
+describe('ending sessions', () => {
+  test('logging out everywhere or removing a passkey also ends every content token', async () => {
+    const { id } = store.publish({ title: 'Revoke', files: { 'index.md': { content: Buffer.from('# r\n') } } })
+    const open = (token: string) => publicContent.request(`${PUBLIC_CONTENT}/t/${token}/a/${id}/v/1/`)
+    const before = auth.contentToken(id).token
+    assert.equal((await open(before)).status, 200)
+    auth.endAllSessions()
+    assert.equal((await open(before)).status, 404)
+    cookie = `${SESSION_COOKIE}=${auth.createSession()}`
+    const second = auth.contentToken(id).token
+    auth.db.prepare("INSERT INTO passkeys (id, public_key, counter, name, created_at) VALUES ('k1', x'00', 0, 'old', '2026-01-01')").run()
+    auth.removePasskey('k1')
+    assert.equal((await open(second)).status, 404)
+    assert.equal((await open(auth.contentToken(id).token)).status, 200)
+  })
+})
+
 describe('enrolment links', () => {
   test('only the publisher on the tailnet issues them, as a public URL with the code in the fragment', async () => {
     assert.equal((await app.request('http://app.test/api/login-links', { method: 'POST' })).status, 401)
@@ -181,5 +223,7 @@ describe('sign-in redirects', () => {
     assert.equal(safeNext('/\\evil.test'), '/')
     assert.equal(safeNext('https://evil.test/'), '/')
     assert.equal(safeNext(undefined), '/')
+    // Browsers drop tabs and newlines while parsing a URL: "/\t/evil" would become "//evil".
+    for (const sneaky of ['/\t/evil.test', '/\n/evil.test', '/\r\\evil.test', '/\t\\evil.test']) assert.equal(safeNext(sneaky), '/', JSON.stringify(sneaky))
   })
 })

@@ -39,7 +39,7 @@ export class OwnerAuth {
   readonly db: DatabaseSync
   readonly rpID: string
   readonly origin: string
-  private readonly contentKey: Buffer
+  private contentKey: Buffer
   private readonly challenges = new Map<string, Challenge>()
 
   constructor(dataDir: string, publicAppOrigin: string) {
@@ -75,6 +75,13 @@ export class OwnerAuth {
       key = this.db.prepare("SELECT value FROM settings WHERE key = 'content_token_key'").get()!.value as string
     }
     this.contentKey = Buffer.from(key, 'base64')
+  }
+
+  /** A new key ends every content token at once: signing out everywhere must not leave a 12-hour tail. */
+  private rotateContentKey(): void {
+    const key = randomBytes(32)
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('content_token_key', ?)").run(key.toString('base64'))
+    this.contentKey = key
   }
 
   close(): void {
@@ -124,6 +131,7 @@ export class OwnerAuth {
 
   endAllSessions(): void {
     this.db.prepare('DELETE FROM sessions').run()
+    this.rotateContentKey()
   }
 
   sessionCount(): number {
@@ -158,6 +166,8 @@ export class OwnerAuth {
   removePasskey(id: string): void {
     const result = this.db.prepare('DELETE FROM passkeys WHERE id = ?').run(id)
     if (result.changes === 0) throw new ArtifactError(404, 'not_found', 'No such passkey.')
+    // A removed passkey may belong to a lost device: whatever it opened ends with it.
+    this.endAllSessions()
   }
 
   private takeChallenge(flow: unknown, kind: Challenge['kind']): Challenge {
@@ -180,7 +190,8 @@ export class OwnerAuth {
   /** Registration needs a live enrolment link or a signed-in session; the caller checks the session. */
   async registrationOptions(link: { code?: string; signedIn: boolean }) {
     let linkHash: string | undefined
-    if (!link.signedIn) {
+    // A link is spent by the passkey it enrols even on a signed-in device; only the account page enrols without one.
+    if (link.code !== undefined || !link.signedIn) {
       if (!this.isLoginLink(link.code)) throw new ArtifactError(403, 'link_expired', '這個註冊連結無效或已過期，請重新產生。')
       linkHash = sha256(link.code!)
     }
@@ -201,6 +212,9 @@ export class OwnerAuth {
   async register(flow: unknown, response: unknown, name: unknown, signedIn: boolean): Promise<void> {
     const challenge = this.takeChallenge(flow, 'register')
     if (!signedIn && !challenge.linkHash) throw new ArtifactError(403, 'link_expired', '這個註冊連結無效或已過期，請重新產生。')
+    if (challenge.linkHash && !this.db.prepare('SELECT 1 FROM login_links WHERE hash = ? AND expires_at > ?').get(challenge.linkHash, Date.now())) {
+      throw new ArtifactError(403, 'link_expired', '這個註冊連結無效或已過期，請重新產生。')
+    }
     const verification = await verifyRegistrationResponse({
       response: response as RegistrationResponseJSON,
       expectedChallenge: challenge.challenge,
@@ -210,9 +224,9 @@ export class OwnerAuth {
     }).catch(() => ({ verified: false as const }))
     if (!verification.verified) throw new ArtifactError(400, 'passkey_rejected', '無法驗證這把 passkey。')
     const { credential } = verification.registrationInfo
-    if (!signedIn) {
+    if (challenge.linkHash) {
       // The link is spent by the first passkey it enrols.
-      const spent = this.db.prepare('DELETE FROM login_links WHERE hash = ? AND expires_at > ?').run(challenge.linkHash!, Date.now())
+      const spent = this.db.prepare('DELETE FROM login_links WHERE hash = ? AND expires_at > ?').run(challenge.linkHash, Date.now())
       if (spent.changes === 0) throw new ArtifactError(403, 'link_expired', '這個註冊連結無效或已過期，請重新產生。')
     }
     const label = typeof name === 'string' && name.trim() ? name.trim().slice(0, 60) : `passkey ${this.listPasskeys().length + 1}`
