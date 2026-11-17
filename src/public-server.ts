@@ -28,31 +28,23 @@ export function createPublicAppServer(store: ArtifactStore, config: Config): Hon
     }
   })
 
-  // Only an artifact the publisher made public, and the version and file it actually has.
+  // Only an artifact the publisher made public, and only its current version (drafts stay on the tailnet).
   const publicVersion = (id: string, raw: string | undefined) => {
     if (!store.isPublic(id)) throw new ArtifactError(404, 'not_found', 'Not found.')
     const summary = store.requireSummary(id)
-    const version = raw === undefined ? summary.currentVersion : Number(raw)
-    if (!Number.isInteger(version) || version < 1) throw new ArtifactError(404, 'not_found', 'Not found.')
-    return { summary, row: store.requireVersion(id, version) }
+    if (raw !== undefined && raw !== String(summary.currentVersion)) throw new ArtifactError(404, 'not_found', 'Not found.')
+    return { summary, row: store.requireVersion(id, summary.currentVersion) }
   }
 
   app.get('/a/:id', (c) => {
     const id = c.req.param('id')
     const { summary, row } = publicVersion(id, c.req.query('v'))
-    const versions = store.detail(id).versions.map((entry) => ({ version: entry.version, date: entry.createdAt.slice(0, 10) }))
     // A file of this version the reader was on (sent here by the content origin's redirect); anything else is ignored.
     const requested = c.req.query('path')
     const path = requested !== undefined && Object.hasOwn(row.files, requested) ? requested : row.entry
     const encode = (value: string) => value.split('/').map(encodeURIComponent).join('/')
     const frameSrc = `${pair.contentOrigin}/a/${id}/v/${row.version}/${path === row.entry && !path.includes('/') ? '' : encode(path)}`
     const original = /\.(md|markdown)$/i.test(row.entry) && !/\.slides\.md$/i.test(row.entry) ? 'MD' : isOfficePath(row.entry) ? row.entry.split('.').pop()!.toUpperCase() : null
-    const current = versions.find((entry) => entry.version === row.version)
-    const list = versions
-      .slice()
-      .reverse()
-      .map((entry) => `<li><a href="/a/${id}?v=${entry.version}"${entry.version === row.version ? ' aria-current="page"' : ''}>v${entry.version} · ${entry.date}${entry.version === summary.currentVersion ? ' · 最新' : ''}</a></li>`)
-      .join('')
     c.header('Content-Security-Policy', `default-src 'none'; style-src 'self'; img-src 'self'; frame-src ${pair.contentOrigin}/a/${id}/; script-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`)
     return c.html(`<!doctype html>
 <html lang="zh-Hant">
@@ -70,10 +62,7 @@ export function createPublicAppServer(store: ArtifactStore, config: Config): Hon
     <span class="artifact-icon" aria-hidden="true">${escapeHtml(summary.icon ?? '')}</span>
     <h1>${escapeHtml(row.title)}</h1>
   </div>
-  <details class="public-versions">
-    <summary class="button">v${row.version} · ${current?.date ?? ''}</summary>
-    <ol>${list}</ol>
-  </details>
+  <span class="public-updated">更新於 ${row.createdAt.slice(0, 10)}</span>
   ${original ? `<a class="button" href="/api/artifacts/${id}/files/${encode(row.entry)}?v=${row.version}" download>${original}</a>` : ''}
 </header>
 <iframe class="public-frame" title="${escapeHtml(row.title)}" src="${escapeHtml(frameSrc)}"

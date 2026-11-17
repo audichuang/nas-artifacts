@@ -317,6 +317,7 @@ async function publish(target, values) {
   reportWarnings(warnings)
   const hashes = hashFiles(paths)
   const capabilities = values.cap === undefined ? undefined : values.cap.split(',').map((cap) => cap.trim()).filter(Boolean)
+  if (values.public && capabilities?.length) fail('a page with --cap cannot be --public: public pages are read-only')
   const common = {
     description: values.description,
     icon: values.icon,
@@ -331,6 +332,8 @@ async function publish(target, values) {
   let result
   if (knownId) {
     const id = encodeURIComponent(knownId)
+    // Closing it first means the new content never shows on the public URL, not even for a moment.
+    if (values.private) await api(`/api/artifacts/${id}`, { method: 'PATCH', auth: true, json: { visibility: 'private' }, allowNotFound: true })
     let body
     if (recorded) {
       const files = encode(Object.keys(paths).filter((path) => recorded.files[path] !== hashes[path]))
@@ -356,13 +359,14 @@ async function publish(target, values) {
     const title = values.title ?? guessTitle(paths, values.entry) ?? basename(source).replace(/\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|docx|docm|dotx|dotm|doc|xlsx|xlsm|xltx|xltm|xls)$/i, '')
     result = await api('/api/artifacts', { method: 'POST', auth: true, json: { ...common, title, files: encode(Object.keys(paths)) } })
   }
-  if (values.public || values.private) {
-    result = await api(`/api/artifacts/${encodeURIComponent(result.id)}`, { method: 'PATCH', auth: true, json: { visibility: values.public ? 'public' : 'private' } })
-  }
   const recordedNow = { id: result.id, url: result.url, version: result.currentVersion, files: hashes }
   updateState((latest) => {
     latest[source] = recordedNow
   })
+  // After the state is saved: a refused change must not make the next publish start a new artifact.
+  if (values.public || (values.private && result.visibility !== 'private')) {
+    result = await api(`/api/artifacts/${encodeURIComponent(result.id)}`, { method: 'PATCH', auth: true, json: { visibility: values.public ? 'public' : 'private' } })
+  }
   print(values.json ? { ...result, warnings } : result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})${r.publicUrl ? `\npublic: ${r.publicUrl}` : ''}`)
 }
 

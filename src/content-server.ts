@@ -66,11 +66,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
 
   app.use('*', async (c, next) => {
     const id = /^\/a\/([A-Za-z0-9_-]+)\//.exec(new URL(c.req.url).pathname)?.[1]
-    if (options.publicOnly && id !== undefined && !store.isPublic(id)) {
-      c.res = c.text('Not found', 404)
-    } else {
-      await next()
-    }
+    await next()
     if (options.publicOnly) {
       c.header('Cache-Control', 'private, no-cache')
       c.header('X-Robots-Tag', 'noindex, nofollow')
@@ -81,6 +77,25 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     c.header('X-Content-Type-Options', 'nosniff')
     c.header('Referrer-Policy', 'no-referrer')
   })
+
+  // The public gate reads the id the routes below read (decoded), so an encoded id cannot pass it, and it
+  // lets through only the current version: a page made public shares what it is now, not its drafts.
+  if (options.publicOnly) {
+    app.use('/a/:id/*', async (c, next) => {
+      const id = c.req.param('id')
+      const version = /^\/a\/[^/]+\/v\/([^/]+)/.exec(new URL(c.req.url).pathname)?.[1]
+      const summary = store.isPublic(id) ? store.requireSummary(id) : null
+      if (!summary || (version !== undefined && version !== String(summary.currentVersion))) {
+        return c.text('Not found', 404)
+      }
+      await next()
+    })
+    app.all('/a/*', async (c, next) => {
+      // Anything under /a/ the gate above did not see (no id segment) is not served either.
+      if (!/^\/a\/[^/]+\//.test(new URL(c.req.url).pathname)) return c.text('Not found', 404)
+      await next()
+    })
+  }
 
   app.get(BRIDGE_PATH, (c) => {
     c.header('Cache-Control', 'no-cache')

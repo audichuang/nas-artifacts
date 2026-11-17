@@ -91,6 +91,49 @@ describe('visibility', () => {
   })
 })
 
+describe('visibility with a publish that cannot be public', () => {
+  test('--cap with --public stops before publishing anything', async () => {
+    const folder = mkdtempSync(join(dir, 'capub-'))
+    writeFileSync(join(folder, 'index.html'), '<p>x</p>')
+    const before = store.list().total
+    const run = await cli(['publish', folder, '--cap', 'db', '--public'])
+    assert.notEqual(run.code, 0)
+    assert.match(run.stderr, /--public/)
+    assert.equal(store.list().total, before)
+  })
+
+  test('a refused visibility change still remembers the version just published', async () => {
+    const folder = mkdtempSync(join(dir, 'refused-'))
+    writeFileSync(join(folder, 'index.html'), '<p>x</p>')
+    const first = await cli(['publish', folder, '--cap', 'db'])
+    assert.equal(first.code, 0, first.stderr)
+    const id = /\/a\/([A-Za-z0-9_-]+)/.exec(first.stdout)![1]
+    writeFileSync(join(folder, 'index.html'), '<p>y</p>')
+    const refused = await cli(['publish', folder, '--public'])
+    assert.notEqual(refused.code, 0)
+    assert.equal(store.requireSummary(id).currentVersion, 2)
+    writeFileSync(join(folder, 'index.html'), '<p>z</p>')
+    const again = await cli(['publish', folder])
+    assert.equal(again.code, 0, again.stderr)
+    assert.match(again.stdout, new RegExp(`/a/${id}`))
+    assert.equal(store.requireSummary(id).currentVersion, 3)
+  })
+
+  test('--private on a public artifact closes it before the new content goes up', async () => {
+    const folder = mkdtempSync(join(dir, 'close-'))
+    writeFileSync(join(folder, 'index.md'), '# a\n')
+    const first = await cli(['publish', folder, '--public'])
+    const id = /\/a\/([A-Za-z0-9_-]+)/.exec(first.stdout)![1]
+    const seen: string[] = []
+    const stop = store.subscribe(id, (change) => { if (change.kind === 'version') seen.push(store.requireSummary(id).visibility) })
+    writeFileSync(join(folder, 'index.md'), '# b\n')
+    const closed = await cli(['publish', folder, '--private'])
+    stop()
+    assert.equal(closed.code, 0, closed.stderr)
+    assert.deepEqual(seen, ['private'])
+  })
+})
+
 describe('comments', () => {
   test('--open lists only unresolved threads, with their replies', async () => {
     const { id } = page()

@@ -127,6 +127,31 @@ describe('visibility', () => {
   })
 })
 
+describe('public content gate', () => {
+  test('a percent-encoded id does not slip past the check on a private artifact', async () => {
+    const { id } = store.publish({ title: 'Secret', files: { 'index.md': { content: Buffer.from('# secret\n') }, 'sub/page.html': { content: Buffer.from('<p>secret</p>') } } })
+    const asset = store.addAsset(id, 'secret.png', PNG, 'publisher')
+    const encoded = `%${id.charCodeAt(0).toString(16).toUpperCase()}${id.slice(1)}`
+    for (const path of [`/a/${encoded}/v/1`, `/a/${encoded}/v/1/`, `/a/${encoded}/v/1/sub/page.html`, `/a/${encoded}/assets/${asset.id}/secret.png`, `/a/${id}/assets/${asset.id}/secret.png`]) {
+      const response = await publicContent.request(`${PUBLIC_CONTENT}${path}`)
+      assert.equal(response.status, 404, path)
+    }
+  })
+
+  test('only the current version of a public artifact is public', async () => {
+    const { id } = store.publish({ title: 'Draft', files: { 'index.md': { content: Buffer.from('# internal draft\n') } } })
+    store.update(id, { files: { 'index.md': { content: Buffer.from('# shared\n') } }, baseVersion: 1 })
+    await setVisibility(id, 'public')
+    assert.equal((await publicContent.request(`${PUBLIC_CONTENT}/a/${id}/v/1/`)).status, 404)
+    assert.match(await (await publicContent.request(`${PUBLIC_CONTENT}/a/${id}/v/2/`)).text(), /shared/)
+    assert.equal((await publicApp.request(`${PUBLIC_APP}/a/${id}?v=1`)).status, 404)
+    assert.equal((await publicApp.request(`${PUBLIC_APP}/api/artifacts/${id}/files/index.md?v=1`)).status, 404)
+    const html = await (await publicApp.request(`${PUBLIC_APP}/a/${id}`)).text()
+    assert.doesNotMatch(html, /v1|\?v=1/)
+    assert.match(html, new RegExp(`/a/${id}/v/2/`))
+  })
+})
+
 describe('public app', () => {
   test('the public viewer shows the page and nothing about where it came from', async () => {
     const { id } = store.publish({
@@ -150,10 +175,10 @@ describe('public app', () => {
     assert.equal(response.headers.get('cache-control'), 'private, no-cache')
     assert.match(response.headers.get('x-robots-tag') ?? '', /noindex/)
 
-    // An older version and a file inside it, by query, as the content origin's redirect sends them.
-    const older = await publicApp.request(`${PUBLIC_APP}/a/${id}?v=1&path=nope.html`)
-    assert.equal(older.status, 200)
-    assert.doesNotMatch(await older.text(), /nope\.html/)
+    // A file of the version, by query, as the content origin's redirect sends it; one it lacks is ignored.
+    const other = await publicApp.request(`${PUBLIC_APP}/a/${id}?v=1&path=nope.html`)
+    assert.equal(other.status, 200)
+    assert.doesNotMatch(await other.text(), /nope\.html/)
 
     const download = await publicApp.request(`${PUBLIC_APP}/api/artifacts/${id}/files/index.md`)
     assert.equal(download.status, 200)
