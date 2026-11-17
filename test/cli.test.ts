@@ -7,11 +7,13 @@ import { after, before, describe, test } from 'node:test'
 import { serve, type ServerType } from '@hono/node-server'
 import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
+import { OwnerAuth } from '../src/owner-auth.ts'
 
 const CLI = new URL('../skill/nas-artifacts/scripts/artifact.mjs', import.meta.url).pathname
 const TOKEN = 'cli-test-token-0123456789'
 let dir: string
 let store: ArtifactStore
+let auth: OwnerAuth
 let server: ServerType
 let url: string
 
@@ -35,6 +37,7 @@ function page(html = '<!doctype html><title>x</title><p>x</p>') {
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'artifacts-cli-'))
   store = new ArtifactStore(join(dir, 'data'))
+  auth = new OwnerAuth(join(dir, 'data'), 'https://pub.test')
   const app = createAppServer(store, {
     dataDir: dir,
     appPort: 0,
@@ -43,7 +46,7 @@ before(async () => {
     contentOrigin: 'http://content.test',
     tokens: [TOKEN],
     public: { appPort: 0, contentPort: 0, appOrigin: 'https://pub.test', contentOrigin: 'https://pub-content.test' }
-  })
+  }, { auth })
   await new Promise<void>((resolve) => {
     server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info) => {
       url = `http://127.0.0.1:${info.port}`
@@ -55,7 +58,19 @@ before(async () => {
 after(() => {
   server.close()
   store.close()
+  auth.close()
   rmSync(dir, { recursive: true, force: true })
+})
+
+describe('login-link', () => {
+  test('prints a one-time enrolment link on the public address; needs the token', async () => {
+    const run = await cli(['login-link'])
+    assert.equal(run.code, 0, run.stderr)
+    const code = /^https:\/\/pub\.test\/enroll#([A-Za-z0-9_-]+)$/m.exec(run.stdout)?.[1]
+    assert.ok(code && auth.isLoginLink(code), run.stdout)
+    const refused = await cli(['login-link'], { ARTIFACTS_TOKEN: '' })
+    assert.notEqual(refused.code, 0)
+  })
 })
 
 describe('visibility', () => {

@@ -10,6 +10,7 @@ import pptxgen from 'pptxgenjs'
 import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
+import { OwnerAuth } from '../src/owner-auth.ts'
 import { createPublicAppServer, publicContentConfig } from '../src/public-server.ts'
 
 const PptxGenJS = ((pptxgen as unknown as { default?: typeof pptxgen.default }).default ?? pptxgen) as typeof pptxgen.default
@@ -39,6 +40,7 @@ const PUBLIC_APP_PORT = 18792
 const PUBLIC_CONTENT_PORT = 18793
 let dir: string
 let store: ArtifactStore
+let auth: OwnerAuth
 let servers: ServerType[] = []
 let browser: Browser
 
@@ -67,11 +69,12 @@ before(async () => {
     tokens: [TOKEN],
     public: { appPort: PUBLIC_APP_PORT, contentPort: PUBLIC_CONTENT_PORT, appOrigin: `http://localhost:${PUBLIC_APP_PORT}`, contentOrigin: `http://127.0.0.1:${PUBLIC_CONTENT_PORT}` }
   }
+  auth = new OwnerAuth(dir, config.public.appOrigin)
   servers = [
-    serve({ fetch: createAppServer(store, config).fetch, port: APP_PORT, hostname: '127.0.0.1' }),
+    serve({ fetch: createAppServer(store, config, { auth }).fetch, port: APP_PORT, hostname: '127.0.0.1' }),
     serve({ fetch: createContentServer(store, config).fetch, port: CONTENT_PORT, hostname: '127.0.0.1' }),
-    serve({ fetch: createPublicAppServer(store, config).fetch, port: PUBLIC_APP_PORT, hostname: '127.0.0.1' }),
-    serve({ fetch: createContentServer(store, publicContentConfig(config), { publicOnly: true }).fetch, port: PUBLIC_CONTENT_PORT, hostname: '127.0.0.1' })
+    serve({ fetch: createPublicAppServer(store, config, auth).fetch, port: PUBLIC_APP_PORT, hostname: '127.0.0.1' }),
+    serve({ fetch: createContentServer(store, publicContentConfig(config), { publicOnly: true, contentTokens: auth }).fetch, port: PUBLIC_CONTENT_PORT, hostname: '127.0.0.1' })
   ]
   browser = await chromium.launch({ executablePath: chromiumPath })
 })
@@ -81,6 +84,7 @@ after(async () => {
   await browser.close()
   for (const server of servers) server.close()
   store.close()
+  auth.close()
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -1138,4 +1142,150 @@ test('the tailnet gallery and viewer show which artifacts are public, with the p
   await viewer.locator('#title').waitFor({ state: 'attached' })
   assert.equal(await viewer.locator('#public-link').isHidden(), true)
   await viewer.close()
+})
+
+// The owner on the public app: a passkey (Chromium's virtual authenticator), a session, and private pages
+// served by the public content listener under a content token.
+
+const PUBLIC_APP = `http://localhost:${PUBLIC_APP_PORT}`
+const PUBLIC_CONTENT = `http://127.0.0.1:${PUBLIC_CONTENT_PORT}`
+const ONE_PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+
+async function withAuthenticator(page: import('playwright-core').Page) {
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('WebAuthn.enable')
+  await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true }
+  })
+}
+
+async function enrolOwner(page: import('playwright-core').Page) {
+  await withAuthenticator(page)
+  const link = await fetch(`http://localhost:${APP_PORT}/api/login-links`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` } }).then((r) => r.json()) as { url: string }
+  assert.ok(link.url.startsWith(`${PUBLIC_APP}/enroll#`))
+  await page.goto(link.url)
+  await page.locator('#name').fill('測試裝置')
+  await page.locator('#go').click()
+  await page.waitForURL(`${PUBLIC_APP}/`, { timeout: 10_000 })
+  return link.url.split('#')[1]
+}
+
+test('the owner enrols a passkey from a one-time link, signs out, and signs in again with it', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const code = await enrolOwner(page)
+  // Signed in: the gallery of every artifact, with the account link.
+  await page.locator('a[href="/account"]').waitFor({ timeout: 5000 })
+  const cookie = (await context.cookies()).find((c) => c.name === '__Host-artifacts_session')!
+  assert.ok(cookie.httpOnly && cookie.secure && cookie.sameSite === 'Lax' && cookie.path === '/' && !cookie.domain.startsWith('.'))
+
+  // The link is spent, and without it (or a session) nobody can start enrolling.
+  for (const tried of [code, 'x']) {
+    const again = await fetch(`${PUBLIC_APP}/auth/register/options`, { method: 'POST', headers: { 'x-artifact-client': 'viewer', 'content-type': 'application/json' }, body: JSON.stringify({ code: tried }) })
+    assert.equal(again.status, 403)
+  }
+
+  await page.goto(`${PUBLIC_APP}/account`)
+  await page.locator('#passkeys li', { hasText: '測試裝置' }).waitFor({ timeout: 5000 })
+  await page.locator('#logout').click()
+  await page.waitForURL(`${PUBLIC_APP}/login`)
+  assert.equal((await page.goto(`${PUBLIC_APP}/`))!.status(), 404)
+
+  await page.goto(`${PUBLIC_APP}/login?next=/account`)
+  await page.locator('#go').click()
+  await page.waitForURL(`${PUBLIC_APP}/account`, { timeout: 10_000 })
+  await page.locator('#passkeys li', { hasText: '測試裝置' }).waitFor({ timeout: 5000 })
+  await context.close()
+})
+
+test('signed in, the owner reads a private page on the public origins under a content token: relative links, CSS, Office pictures, lazy images, comments', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const pptx = new PptxGenJS()
+  pptx.addSlide().addImage({ data: `image/png;base64,${ONE_PIXEL.toString('base64')}`, x: 1, y: 1, w: 2, h: 2 })
+  const deck = (await pptx.write({ outputType: 'nodebuffer' })) as Buffer
+  const html = `<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body>
+<h1 id="t">私人頁</h1><div id="bg"></div>
+<a id="next" href="sub/two.html">下一頁</a>
+<div style="height:3000px"></div><img id="lazy" src="pic.png" loading="lazy" width="10" height="10">
+<img id="missing" src="missing.png">
+</body></html>`
+  const { id } = store.publish({
+    title: '私人頁',
+    entry: 'docs/index.html',
+    files: {
+      'docs/index.html': { content: Buffer.from(html) },
+      'docs/style.css': { content: Buffer.from('#bg { width: 10px; height: 10px; background-image: url(pic.png) }') },
+      'docs/pic.png': { content: ONE_PIXEL },
+      'docs/sub/two.html': { content: Buffer.from('<!doctype html><h1 id="two">第二頁</h1>') },
+      'deck.pptx': { content: deck }
+    }
+  })
+  const other = store.publish({ title: '另一份', files: { 'index.html': { content: Buffer.from('<p>secret</p>') } } })
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  await enrolOwner(page)
+
+  // Anonymous visitors still see nothing: same page as an id that does not exist.
+  const anonymous = await browser.newContext()
+  const stranger = await anonymous.newPage()
+  const missing = await stranger.request.get(`${PUBLIC_APP}/a/${id}`)
+  const nothing = await stranger.request.get(`${PUBLIC_APP}/a/no-such-id`)
+  assert.equal(missing.status(), 404)
+  assert.equal((await missing.text()).replace(id, 'ID'), (await nothing.text()).replace('no-such-id', 'ID'))
+  assert.equal((await stranger.request.get(`${PUBLIC_CONTENT}/a/${id}/v/1/docs/index.html`)).status(), 404)
+  await anonymous.close()
+
+  await page.goto(`${PUBLIC_APP}/a/${id}`)
+  const frame = page.frameLocator('#frame')
+  await frame.locator('#t').waitFor({ timeout: 5000 })
+  const pageFrame = () => page.frames().find((f) => f.url().startsWith(`${PUBLIC_CONTENT}/t/`))!
+  // The nested entry's redirect kept the token; the page is still sandboxed.
+  assert.match(pageFrame().url(), new RegExp(`^${PUBLIC_CONTENT}/t/[^/]+/a/${id}/v/1/docs/index.html$`))
+  assert.equal(await pageFrame().evaluate(() => origin), 'null')
+  // CSS and its url() load under the token.
+  await pageFrame().waitForFunction(() => getComputedStyle(document.getElementById('bg')!).backgroundImage.includes('/t/'))
+  // A lazy image far down loads once scrolled to.
+  await frame.locator('#lazy').scrollIntoViewIfNeeded()
+  await pageFrame().waitForFunction(() => (document.getElementById('lazy') as HTMLImageElement).naturalWidth > 0, undefined, { timeout: 5000 })
+  // The missing picture is logged without the token.
+  await page.waitForFunction(() => !(document.getElementById('errors') as HTMLElement).hidden, undefined, { timeout: 5000 })
+  const logged = JSON.stringify(store.listErrors(id, 1))
+  assert.match(logged, /missing\.png/)
+  assert.doesNotMatch(logged, /\/t\//)
+  // Relative links navigate inside the frame, and the address bar names the file.
+  await frame.locator('#next').click()
+  await frame.locator('#two').waitFor({ timeout: 5000 })
+  await page.waitForURL(/path=docs%2Fsub%2Ftwo\.html/)
+
+  // Comments work for the signed-in owner.
+  await page.locator('#toggle-comments').click()
+  page.once('dialog', (dialog) => dialog.accept('擁有者'))
+  await page.locator('#comment-body').fill('外網留言')
+  await page.locator('#comment-form button[type="submit"]').click()
+  await page.locator('#threads', { hasText: '外網留言' }).waitFor({ timeout: 5000 })
+
+  // This artifact's token does not open another artifact.
+  const token = /\/t\/([^/]+)\//.exec(pageFrame().url())![1]
+  assert.equal((await page.request.get(`${PUBLIC_CONTENT}/t/${token}/a/${other.id}/v/1/`)).status(), 404)
+  assert.equal((await page.request.get(`${PUBLIC_CONTENT}/t/${token}x/a/${id}/v/1/docs/pic.png`)).status(), 404)
+  // No referrer leaves with the token.
+  assert.equal((await page.request.get(`${PUBLIC_CONTENT}/t/${token}/a/${id}/v/1/docs/pic.png`)).headers()['referrer-policy'], 'no-referrer')
+
+  // A renewed token is a path the viewer's frame-src allows.
+  const renewed = await page.evaluate(async (artifactId) => (await fetch(`/api/artifacts/${artifactId}/content-token`)).json(), id)
+  assert.match(renewed.contentBase, new RegExp(`^${PUBLIC_CONTENT}/t/`))
+
+  // The PowerPoint file's pictures come from inside the file, under the token.
+  const deckFrame = await page.goto(`${PUBLIC_APP}/a/${id}?path=deck.pptx`)
+  assert.equal(deckFrame!.status(), 200)
+  await frame.locator('.slide.active img').waitFor({ timeout: 5000 })
+  await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => (img.complete ? null : new Promise((done) => img.addEventListener('load', done, { once: true }))))
+  assert.ok((await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => img.naturalWidth)) > 0)
+  assert.match(await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => img.currentSrc), /\/t\/[^/]+\/a\/.*~office/)
+
+  // The token page opened top-level goes back into the viewer, without the token in the address.
+  const top = await context.newPage()
+  await top.goto(pageFrame().url())
+  await top.waitForURL(new RegExp(`^${PUBLIC_APP}/a/${id}\\?`))
+  await top.close()
+  await context.close()
 })

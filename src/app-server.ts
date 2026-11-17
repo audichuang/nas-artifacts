@@ -17,6 +17,7 @@ import { galleryPage, viewerPage } from './pages.ts'
 import { isSlidesPath, renderSlides } from './slides.ts'
 import { deckToPptx } from './slides-pptx.ts'
 import { mountOfficeEditor } from './office-editor.ts'
+import type { OwnerAuth } from './owner-auth.ts'
 
 /** The most a deck's source may be when edited from the viewer. */
 const SLIDES_SOURCE_BYTES = 1024 * 1024
@@ -72,14 +73,33 @@ async function jsonBody(c: Context): Promise<Record<string, unknown>> {
   return body as Record<string, unknown>
 }
 
-export function createAppServer(store: ArtifactStore, config: Config): Hono {
+/** Page errors carry file URLs; a content token in them would outlive its purpose in the log. */
+function withoutContentTokens(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value).replace(/\/t\/[A-Za-z0-9._-]+\/a\//g, '/a/'))
+}
+
+export type AppServerOptions = {
+  /** The tailnet app: lets the publisher issue one-time passkey enrolment links for the public app. */
+  auth?: OwnerAuth
+  /**
+   * The same app behind the public listener's session gate, for the signed-in owner. It has no
+   * publisher-token path (publishing is the tailnet CLI's or the MCP's), and its frames load private
+   * files from the public content listener with a content token in the path.
+   */
+  owner?: { auth: OwnerAuth }
+}
+
+export function createAppServer(store: ArtifactStore, config: Config, options: AppServerOptions = {}): Hono {
   const app = new Hono()
-  const tokenDigests = config.tokens.map(digest)
+  const owner = options.owner
+  const tokenDigests = owner ? [] : config.tokens.map(digest)
   const staticRoot = new URL('../public/', import.meta.url)
+  /** Where an artifact's files are read from: on the owner's public app, under a content token. */
+  const contentBase = (id: string): string => (owner ? `${config.contentOrigin}/t/${owner.auth.contentToken(id).token}` : config.contentOrigin)
 
   const urls = (summary: ArtifactSummary) => ({
     url: `${config.appOrigin}/a/${summary.id}`,
-    contentUrl: `${config.contentOrigin}/a/${summary.id}/v/${summary.currentVersion}/`,
+    contentUrl: `${contentBase(summary.id)}/a/${summary.id}/v/${summary.currentVersion}/`,
     // Where anyone may open it, once the publisher made it public and the public listeners are on.
     publicUrl: config.public && summary.visibility === 'public' && summary.capabilities.length === 0 ? `${config.public.appOrigin}/a/${summary.id}` : null
   })
@@ -130,22 +150,42 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
     })
   )
 
-  mountOfficeEditor(app, store, config, requireCaller)
+  if (!owner) mountOfficeEditor(app, store, config, requireCaller)
+
+  // A one-time link that enrols a passkey on the public app; the code rides in the fragment, never in a log.
+  if (options.auth && config.public) {
+    const auth = options.auth
+    app.post('/api/login-links', (c) => {
+      requirePublisher(c)
+      const link = auth.createLoginLink()
+      return c.json({ url: `${config.public!.appOrigin}/enroll#${link.code}`, expiresAt: link.expiresAt }, 201)
+    })
+  }
+
+  if (owner) {
+    app.get('/api/artifacts/:id/content-token', (c) => {
+      const id = store.requireSummary(c.req.param('id')).id
+      const { token, expiresAt } = owner.auth.contentToken(id)
+      return c.json({ contentBase: `${config.contentOrigin}/t/${token}`, expiresAt })
+    })
+  }
 
   // Pages
 
   app.get('/', (c) => {
     c.header('Content-Security-Policy', "frame-src 'none'")
-    return c.html(galleryPage(config))
+    return c.html(galleryPage(config, { account: Boolean(owner) }))
   })
   app.get('/a/:id', (c) => {
     const detail = store.detail(c.req.param('id'))
     const requested = Number(c.req.query('v') ?? detail.currentVersion)
     const version = detail.versions.find((row) => row.version === requested)?.version ?? detail.currentVersion
-    c.header('Content-Security-Policy', `frame-src ${config.contentOrigin}/a/${detail.id}/`)
+    // Under content tokens the frame may move to a renewed token's path; each token still opens only this artifact.
+    c.header('Content-Security-Policy', `frame-src ${owner ? `${config.contentOrigin}/t/` : `${config.contentOrigin}/a/${detail.id}/`}`)
     const requestedPath = normalizeFilePath(c.req.query('path') ?? '')
     const path = requestedPath && store.requireVersion(detail.id, version).files[requestedPath] ? requestedPath : undefined
-    return c.html(viewerPage(config, detail, version, path))
+    const grant = owner ? owner.auth.contentToken(detail.id) : null
+    return c.html(viewerPage(config, detail, version, path, grant ? { contentBase: `${config.contentOrigin}/t/${grant.token}`, expiresAt: grant.expiresAt } : undefined))
   })
   app.get('/static/:name', (c) => {
     const name = c.req.param('name')
@@ -347,7 +387,7 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
 
   const presentAsset = (id: string, asset: ReturnType<ArtifactStore['getAsset']>) => ({
     ...asset,
-    url: `${config.contentOrigin}/a/${id}/assets/${asset.id}/${encodeURIComponent(asset.name)}`
+    url: `${contentBase(id)}/a/${id}/assets/${asset.id}/${encodeURIComponent(asset.name)}`
   })
 
   app.get('/api/artifacts/:id/assets', (c) => {
@@ -475,7 +515,7 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
   app.post('/api/artifacts/:id/errors', async (c) => {
     const id = c.req.param('id')
     requireCaller(c, id)
-    store.recordErrors(id, await jsonBody(c))
+    store.recordErrors(id, withoutContentTokens(await jsonBody(c)))
     return c.body(null, 204)
   })
 

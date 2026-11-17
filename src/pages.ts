@@ -24,7 +24,7 @@ ${body}
 </html>`
 }
 
-export function galleryPage(config: Config): string {
+export function galleryPage(config: Config, options: { account?: boolean } = {}): string {
   return shell(
     'Artifacts',
     `<header class="topbar">
@@ -32,7 +32,7 @@ export function galleryPage(config: Config): string {
   <label class="search">
     <span class="visually-hidden">搜尋</span>
     <input id="search" type="search" placeholder="搜尋標題、內文或來源資料夾" autocomplete="off">
-  </label>
+  </label>${options.account ? '\n  <a class="button" href="/account" title="passkey、登出">帳號</a>' : ''}
 </header>
 <main class="gallery">
   <p id="status" class="muted" role="status"></p>
@@ -44,7 +44,8 @@ export function galleryPage(config: Config): string {
   )
 }
 
-export function viewerPage(config: Config, detail: ArtifactDetail, version: number, path?: string): string {
+/** `grant`: on the owner's public app, where the frame reads files (under a content token) and until when. */
+export function viewerPage(config: Config, detail: ArtifactDetail, version: number, path?: string, grant?: { contentBase: string; expiresAt: number }): string {
   const row = detail.versions.find((candidate) => candidate.version === version)
   return shell(
     row?.title ?? detail.title,
@@ -129,6 +130,10 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     {
       appOrigin: config.appOrigin,
       contentOrigin: config.contentOrigin,
+      contentBase: grant?.contentBase ?? config.contentOrigin,
+      contentExpiresAt: grant?.expiresAt ?? null,
+      // Signed in on the public app: deleting needs the publish token, which only the tailnet takes.
+      canDelete: !grant,
       officeEnabled: Boolean(config.office),
       artifact: detail,
       // Where anyone may open it, when the publisher made it public and the public listeners are on.

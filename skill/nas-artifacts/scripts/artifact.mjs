@@ -27,6 +27,8 @@ const USAGE = `artifact <command> [options]
                          so the next publish from dir sends only your changes; --force reuses a non-empty dir
   list [--q TEXT]        list artifacts ([public] marks the ones anyone with the link may open)
   visibility <id> public|private  open an artifact to anyone with its link, or close it again
+  login-link             one-time link (10 minutes) that registers a passkey for the owner's sign-in on
+                         the public address; open it on the device that should hold the passkey
   get <id>               metadata and version history
   read <id> [path] [--v N] [--out FILE]  print a published file (default: the entry); a binary one (an Office file, a picture) needs --out
   check <file|dir>       report what the page sandbox will block or cannot find (publish runs it too)
@@ -532,6 +534,10 @@ async function main() {
       if (!id || !['public', 'private'].includes(visibility)) fail('usage: visibility <id> public|private')
       const data = await api(`/api/artifacts/${enc(id)}`, { method: 'PATCH', auth: true, json: { visibility } })
       return print(data, json, (d) => (d.visibility === 'public' ? `${d.id} is public: ${d.publicUrl ?? '(the server has no public address configured)'}` : `${d.id} is private`))
+    }
+    case 'login-link': {
+      const data = await api('/api/login-links', { method: 'POST', auth: true, hints: { not_found: 'this server has no public address, so there is nothing to sign in to.' } })
+      return print(data, json, (d) => `${d.url}\n(valid until ${d.expiresAt.slice(0, 16).replace('T', ' ')} UTC, once)`)
     }
     case 'check': {
       if (!args[0]) fail('check needs a file or directory')

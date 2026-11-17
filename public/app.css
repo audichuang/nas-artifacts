@@ -191,3 +191,15 @@ body.public-view { display: flex; flex-direction: column; height: 100dvh; overfl
 .public-chip { color: #1a7f37; text-decoration: none; }
 @media (prefers-color-scheme: dark) { .public-mark, .public-chip { color: #3fb950; } }
 .public-bar .artifact-icon:empty { display: none; }
+
+/* Sign-in and account pages (public app) */
+body.auth-page { display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 32px; height: auto; min-height: 100%; }
+.auth-card { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+.auth-card h1 { margin: 0; font-size: 20px; }
+.auth-card h2 { margin: 12px 0 0; font-size: 15px; }
+.auth-card p { margin: 0; }
+.auth-card .field { display: flex; flex-direction: column; gap: 4px; }
+.auth-card input[type="text"] { font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
+.auth-card.account { max-width: 560px; }
+.plain-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.row-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
