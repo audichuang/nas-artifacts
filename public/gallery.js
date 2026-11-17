@@ -29,6 +29,13 @@ function card(artifact) {
   title.className = 'card-title'
   title.textContent = artifact.title
   head.append(icon, title)
+  if (artifact.visibility === 'public') {
+    const badge = document.createElement('span')
+    badge.className = 'public-mark'
+    badge.textContent = '公開'
+    badge.title = '任何人拿到連結都能看(唯讀)'
+    head.append(badge)
+  }
   if (artifact.pinned) {
     const pin = document.createElement('span')
     pin.className = 'pinned-mark'

@@ -59,6 +59,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     <select id="version"></select>
   </label>
   <div class="bar-actions">
+    <a id="public-link" class="button public-chip" href="#" target="_blank" rel="noopener" title="任何人拿到連結都能看(唯讀)" hidden>公開</a>
     <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
     <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
     <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
@@ -130,6 +131,8 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
       contentOrigin: config.contentOrigin,
       officeEnabled: Boolean(config.office),
       artifact: detail,
+      // Where anyone may open it, when the publisher made it public and the public listeners are on.
+      publicUrl: config.public && detail.visibility === 'public' && detail.capabilities.length === 0 ? `${config.public.appOrigin}/a/${detail.id}` : null,
       version,
       path
     }
