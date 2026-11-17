@@ -130,6 +130,11 @@ export class OAuthServer {
     }
     const name = typeof input.client_name === 'string' && input.client_name.trim() ? input.client_name.trim().slice(0, 100) : '未命名的應用程式'
     this.forgetUnusedClients()
+    // Registration is open to anyone: when full, the oldest registration nobody ever signed in with makes room,
+    // so a flood cannot lock out a real client.
+    if (Number(this.db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get()!.n) >= MAX_CLIENTS) {
+      this.db.prepare('DELETE FROM oauth_clients WHERE id = (SELECT id FROM oauth_clients WHERE last_used_at IS NULL ORDER BY created_at LIMIT 1)').run()
+    }
     if (Number(this.db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get()!.n) >= MAX_CLIENTS) {
       throw new OAuthError(400, 'invalid_client_metadata', 'Too many registered clients; revoke unused ones in the account page.')
     }

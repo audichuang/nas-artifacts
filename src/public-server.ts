@@ -86,7 +86,8 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
     c.header('Referrer-Policy', 'no-referrer')
     c.header('X-Frame-Options', 'DENY')
     if (!c.res.headers.has('Content-Security-Policy')) {
-      c.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+      // Its own stylesheet and icon (the not-found and error pages use them), never a script.
+      c.header('Content-Security-Policy', "default-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
     }
   })
 

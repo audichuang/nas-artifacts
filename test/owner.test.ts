@@ -103,6 +103,23 @@ describe('content tokens', () => {
 })
 
 describe('the public app gate', () => {
+  test('the not-found page and the OAuth error page may load their own stylesheet and icon, and still no script', async () => {
+    for (const path of ['/a/nothing-here', '/oauth/authorize?client_id=nope']) {
+      const response = await publicApp.request(`${PUBLIC_APP}${path}`, { headers: { cookie } })
+      if (path.startsWith('/a/')) {
+        // Signed in, an unknown id goes through the owner app; signed out it is the sign-in 404 page.
+        const anonymous = await publicApp.request(`${PUBLIC_APP}${path}`)
+        const csp = anonymous.headers.get('content-security-policy')!
+        assert.match(csp, /style-src 'self'/)
+        assert.match(csp, /img-src 'self'/)
+        assert.doesNotMatch(csp, /script-src/)
+      } else {
+        assert.equal(response.status, 400)
+        assert.match(response.headers.get('content-security-policy')!, /style-src 'self'/)
+      }
+    }
+  })
+
   test('signed out: no gallery, list or writes; signed in: the full app', async () => {
     assert.equal((await publicApp.request(`${PUBLIC_APP}/api/artifacts`)).status, 404)
     const gallery = await publicApp.request(`${PUBLIC_APP}/`)

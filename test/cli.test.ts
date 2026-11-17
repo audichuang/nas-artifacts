@@ -81,6 +81,11 @@ describe('visibility', () => {
     assert.equal(first.code, 0, first.stderr)
     const id = /\/a\/([A-Za-z0-9_-]+)/.exec(first.stdout)![1]
     assert.match(first.stdout, new RegExp(`public: https://pub\\.test/a/${id}`))
+    // A private one names where the owner reads it from anywhere, signed in.
+    const hidden = mkdtempSync(join(dir, 'priv-'))
+    writeFileSync(join(hidden, 'index.md'), '# 私人\n')
+    const own = await cli(['publish', hidden])
+    assert.match(own.stdout, /anywhere \(sign in\): https:\/\/pub\.test\/a\/[A-Za-z0-9]+/)
     assert.equal(store.requireSummary(id).visibility, 'public')
 
     // A later publish without the flag leaves it as it is.

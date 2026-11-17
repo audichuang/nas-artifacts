@@ -369,7 +369,7 @@ async function publish(target, values) {
   if (values.public || (values.private && result.visibility !== 'private')) {
     result = await api(`/api/artifacts/${encodeURIComponent(result.id)}`, { method: 'PATCH', auth: true, json: { visibility: values.public ? 'public' : 'private' } })
   }
-  print(values.json ? { ...result, warnings } : result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})${r.publicUrl ? `\npublic: ${r.publicUrl}` : ''}`)
+  print(values.json ? { ...result, warnings } : result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})${r.publicUrl ? `\npublic: ${r.publicUrl}` : r.signInUrl ? `\nanywhere (sign in): ${r.signInUrl}` : ''}`)
 }
 
 async function checkout(target, dirArg, values) {
