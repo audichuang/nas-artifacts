@@ -120,14 +120,15 @@
   // Hand-written pages are left alone: their pictures may already do something when clicked.
   const ZOOMABLE = '.markdown-body img, .slide-inner img, .pp-pic img, .dx-img, .xl-pic, .xl-cellpic'
   const LIGHTBOX_CSS = `
-.artifact-lightbox { box-sizing: border-box; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; overflow: auto; display: grid; place-items: center; }
+.artifact-lightbox { box-sizing: border-box; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; overflow: auto; }
+.artifact-lightbox[open] { display: grid; place-items: center; }
 .artifact-lightbox::backdrop { background: rgba(0, 0, 0, 0.82); }
 .artifact-lightbox img { display: block; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); width: auto; height: auto; object-fit: contain; background: #fff; cursor: zoom-in; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5); }
-.artifact-lightbox.actual { place-items: start; }
+.artifact-lightbox.actual[open] { place-items: start; }
 .artifact-lightbox.actual img { max-width: none; max-height: none; margin: 16px; cursor: zoom-out; }
 .artifact-lightbox button { position: fixed; top: 10px; right: 12px; width: 36px; height: 36px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; font: 22px/36px system-ui, sans-serif; cursor: pointer; }
 ${ZOOMABLE} { cursor: zoom-in; }
-body.overview .slide-inner img, body.overview .pp-pic img { cursor: inherit; }`
+a[href] :is(${ZOOMABLE}), button :is(${ZOOMABLE}), label :is(${ZOOMABLE}), body.overview .slide-inner img, body.overview .pp-pic img { cursor: inherit; }`
   let lightbox = null
 
   function openLightbox(source) {

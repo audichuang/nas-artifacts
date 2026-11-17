@@ -766,6 +766,13 @@ test('a PowerPoint file shows as a deck at its own size: pictures load inside th
   // The picture comes from inside the file, through the version's own path the CSP allows.
   await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => (img.complete ? null : new Promise((done) => img.addEventListener('load', done, { once: true }))))
   assert.ok((await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => img.naturalWidth)) > 0)
+  // A click on the picture opens it large, and the deck stays on this slide meanwhile.
+  await frame.locator('.slide.active .pp-pic img').click()
+  await frame.locator('dialog.artifact-lightbox[open] img').waitFor({ timeout: 5000 })
+  await viewer.keyboard.press('ArrowLeft')
+  assert.equal(await frame.locator('#deck-counter').textContent(), '2 / 2')
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
   assert.equal(await viewer.locator('#edit').isHidden(), true)
   assert.equal(await viewer.locator('#export-pptx').isVisible(), true)
   assert.deepEqual(store.listErrors(id, 1), [])
