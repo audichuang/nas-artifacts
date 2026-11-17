@@ -35,7 +35,16 @@ node "$A" publish <file-or-dir> --icon 📊 --description "<one sentence>" [--ca
 - Publish also checks the files and prints what the sandbox will block or cannot find (remote images, scripts from other hosts, `fetch`, `localStorage`, missing relative files, unpinned CDN versions). It publishes anyway; fix what it names and republish. `node "$A" check <file-or-dir>` runs the same check alone (exit 1 when it finds something).
 - Done when the command prints the URL; give the user that URL.
 
-Credentials: `ARTIFACTS_TOKEN`, or `~/.config/nas-artifacts/config.json` (set once with `node "$A" config --token-stdin`). The token lives in the 1Password `Agent` vault, item `nas-artifacts publish token`. Pipe it, never print it. Reads (list, get, read, comments, checkout) need no token.
+## Remote MCP (any machine, no tailnet needed)
+
+The same server is a remote MCP server at `https://artifacts.audichuang.app/mcp` (Streamable HTTP, OAuth: the first call opens a browser where the owner signs in with a passkey and allows the client). When its tools (`publish`, `update`, `get`, `read`, `list`, `comments`, `reply`, `set_visibility`, `delete`, `errors`) are available to you, use them instead of the CLI; it works from machines outside the tailnet too. The rules below (templates, page contract, private by default) are the same.
+
+- Files go in as a list of `{ path, content, encoding }`: `utf8` for text, `base64` for pictures and Office files.
+- To change an artifact: `get` its `currentVersion`, then `update` with `baseVersion` set to it, sending only changed files (`delete: true` removes one). A `version_conflict` error lists `changedFiles`: `read` them, merge, retry. `force: true` only when the user wants their version to win.
+- The returned `url` opens for the signed-in owner on any device; `publicUrl` is set only for a public artifact.
+- If the MCP is not connected and the user wants it, the connection is: add a remote (HTTP) MCP server named `artifacts` with that URL in the agent's MCP settings; the sign-in happens on first use.
+
+Credentials (CLI): `ARTIFACTS_TOKEN`, or `~/.config/nas-artifacts/config.json` (set once with `node "$A" config --token-stdin`). The token lives in the 1Password `Agent` vault, item `nas-artifacts publish token`. Pipe it, never print it. Reads (list, get, read, comments, checkout) need no token.
 
 ## Page contract
 

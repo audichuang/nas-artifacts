@@ -15,6 +15,7 @@
 - **PowerPoint 物件編輯**:選配自架 ONLYOFFICE Docs。最新、未宣告互動能力的 `.pptx` 顯示「編輯」，可直接改文字、拖曳／縮放物件，使用 Office 工具列的「儲存」或 ⌘/Ctrl+S。「返回檢視」會先由 Office 確認未儲存的修改，再結束編輯並等待回存版本；若關閉自動儲存，請先使用原生儲存，或在 Office 提示中選擇繼續編輯。引擎的保存回呼會建立新版本；保存遇到其他人先發佈時不覆寫，提供「下載編輯結果」供合併。編輯引擎獨立於 artifact 沙箱，不會把頁面升權。未設定時維持原來的唯讀預覽。
 - **公開分享**:每個 artifact 預設私人(只有 tailnet 內看得到);`publish --public` 或 `artifact visibility <id> public` 後,任何人拿到公開網址都能看(唯讀、不列入任何清單、`noindex`),改回私人後公開網址立刻 404。公開面是另外兩個 listener,只有檢視頁與下載原檔,沒有任何寫入;宣告了互動能力的頁面不能公開。
 - **擁有者登入**:在公開網址用 passkey 登入後可看私人頁(所有版本)、留言、釘選、用互動能力。第一把 passkey 用 `artifact login-link` 印出的一次性連結註冊(10 分鐘內有效),之後在 `/account` 管理 passkey 與登出所有裝置。瀏覽器登入不能發佈、刪除或改可見性。
+- **遠端 MCP**:`https://artifacts.audichuang.app/mcp`(Streamable HTTP),Claude Code、Codex、claude.ai 都用同一套 OAuth 登入(授權頁就是 passkey 登入)。工具:`publish`、`update`(要帶 `baseVersion`)、`get`、`read`、`list`、`comments`、`reply`、`set_visibility`、`delete`、`errors`。已授權的應用程式可在 `/account` 撤銷。
 - **圖庫**:首頁列出全部 artifact,可釘選;搜尋比對標題、說明、目前版本的內文(中文兩個字也找得到,附命中的那段文字)與發佈來源的機器和資料夾。
 - **留言**:每個 artifact 都有留言串(回覆、解決)。Agent 用 `artifact comments <id> --open` 讀未解決的回饋,`--wait` 等新留言,`artifact comment reply … --resolve` 回覆並結案。
 - **頁面錯誤**:頁面執行時的腳本錯誤、載入失敗的檔案與被沙箱擋下的請求會記在該版本底下,檢視頁顯示 ⚠ 數量,agent 用 `artifact errors <id>` 讀。發佈前 CLI 也會先靜態檢查一次(`artifact check`)。
