@@ -166,6 +166,15 @@ function framePath(pathname) {
   }
 }
 
+// Phones: reading down slides the bar away, scrolling up (or reaching the top) brings it back. Panels keep it.
+const phone = matchMedia('(max-width: 720px)')
+function slideBar(delta, scrollY) {
+  const keep = !phone.matches || scrollY < 80 || !commentsPanel.hidden || !editorPanel.hidden
+  if (keep || delta < -24) document.body.classList.remove('bar-away')
+  else if (delta > 24) document.body.classList.add('bar-away')
+}
+phone.addEventListener('change', () => document.body.classList.remove('bar-away'))
+
 // The page is untrusted: its report only picks which of this version's files the address bar names.
 function onPlaceReport(report) {
   const path = framePath(report.path)
@@ -173,6 +182,7 @@ function onPlaceReport(report) {
   const next = path === currentEntry() ? null : path
   const hash = validHash(report.hash)
   const moved = next !== place.path || hash !== place.hash
+  slideBar(next === place.path ? report.scrollY - place.scrollY : 0, report.scrollY)
   place = { path: next, hash, scrollY: Math.max(0, report.scrollY) }
   if (moved) {
     syncUrl()
@@ -595,15 +605,22 @@ let previewTimer
 const canEditPptx = () => data.officeEnabled && place.path === null && /\.pptx$/i.test(currentEntry()) && artifact.capabilities.length === 0 && version === artifact.currentVersion
 const canEdit = () => (isMarkdownDeck() || canEditPptx()) && artifact.capabilities.length === 0
 const exportLink = document.getElementById('export-pptx')
+const printButton = document.getElementById('print')
+printButton.addEventListener('click', () => notifyPage({ type: 'print' }))
 function syncEditButton() {
   editButton.hidden = !canEdit()
   // A Markdown deck exports to PowerPoint; an Office file downloads as it was published.
   const entry = currentEntry()
+  // A Markdown page offers its source the same way.
   const office = place.path === null && /\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|docx|docm|dotx|dotm|doc|xlsx|xlsm|xltx|xltm|xls)$/i.test(entry)
-  exportLink.hidden = !isDeck() && !office
-  exportLink.textContent = office ? entry.split('.').pop().toUpperCase() : 'PPTX'
-  exportLink.title = office ? '下載原始檔' : '下載成 PowerPoint(.pptx)'
-  exportLink.href = office
+  const markdown = place.path === null && !isDeck() && /\.(md|markdown)$/i.test(entry)
+  const original = office || markdown
+  exportLink.hidden = !isDeck() && !original
+  exportLink.textContent = markdown ? 'MD' : office ? entry.split('.').pop().toUpperCase() : 'PPTX'
+  exportLink.title = original ? '下載原始檔' : '下載成 PowerPoint(.pptx)'
+  // Decks print from their own bar (one slide per page).
+  printButton.hidden = isDeck()
+  exportLink.href = original
     ? `/api/artifacts/${id}/files/${entry.split('/').map(encodeURIComponent).join('/')}?v=${version}`
     : `/api/artifacts/${id}/export.pptx?v=${version}`
 }

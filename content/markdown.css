@@ -53,7 +53,8 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .markdown-body pre code { background: none; padding: 0; }
 .markdown-body blockquote { margin: 0; padding: 0 1em; color: var(--muted); border-left: 0.25em solid var(--border); }
 .markdown-body table { border-collapse: collapse; display: block; overflow: auto; }
-.markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 6px 12px; }
+/* A floor on cell width keeps short labels on one line at phone width; a table that then needs more room scrolls. */
+.markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 6px 12px; min-width: 4em; }
 .markdown-body img { max-width: 100%; }
 .markdown-body hr { border: 0; border-top: 1px solid var(--border); margin: 24px 0; }
 
@@ -101,3 +102,40 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 }
 .markdown-body .diagram-failed { margin: 16px 0; border: 1px solid var(--danger); border-radius: 8px; padding: 0 12px 2px; }
 .markdown-body .diagram-failed p { white-space: pre-wrap; color: var(--danger); font-size: 14px; }
+
+/* GitHub-style alerts (> [!NOTE] …), on pages and slides alike, and footnotes. */
+.markdown-alert { margin: 16px 0; padding: 8px 16px; border-left: 0.25em solid var(--alert, var(--border)); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--alert, var(--border)) 8%, transparent); }
+.markdown-alert > :last-child { margin-bottom: 0.4em; }
+.markdown-alert-title { margin: 0.2em 0 0.3em; font-weight: 600; color: var(--alert); }
+.markdown-alert-note { --alert: #0969da; }
+.markdown-alert-tip { --alert: #1a7f37; }
+.markdown-alert-important { --alert: #8250df; }
+.markdown-alert-warning { --alert: #9a6700; }
+.markdown-alert-caution { --alert: #cf222e; }
+@media (prefers-color-scheme: dark) {
+  .markdown-alert-note { --alert: #4493f8; }
+  .markdown-alert-tip { --alert: #3fb950; }
+  .markdown-alert-important { --alert: #ab7df8; }
+  .markdown-alert-warning { --alert: #d29922; }
+  .markdown-alert-caution { --alert: #f85149; }
+}
+.markdown-body .footnotes { margin-top: 40px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 14px; color: var(--muted); }
+.markdown-body .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.markdown-body sup a[data-footnote-ref] { text-decoration: none; padding: 0 2px; }
+
+/* Print: the text only, on white. */
+@media print {
+  :root {
+    color-scheme: light; --bg: #fff; --text: #000; --muted: #444; --border: #d1d9e0; --code-bg: #f6f8fa; --link: #0969da;
+    --surface: #f6f8fa; --surface-alt: #eaeef2; --danger: #cf222e;
+    --hl-keyword: #cf222e; --hl-string: #0a3069; --hl-number: #0550ae; --hl-title: #8250df; --hl-comment: #6e7781; --hl-attr: #953800; --hl-built: #116329;
+  }
+  .markdown-alert-note { --alert: #0969da; } .markdown-alert-tip { --alert: #1a7f37; } .markdown-alert-important { --alert: #8250df; }
+  .markdown-alert-warning { --alert: #9a6700; } .markdown-alert-caution { --alert: #cf222e; }
+  .toc, .toc-inline, .markdown-body .anchor { display: none !important; }
+  .markdown-layout.has-toc { display: block !important; }
+  .markdown-body { max-width: none; padding: 0; }
+  .markdown-body pre, .markdown-body table, .markdown-body img, .markdown-body .diagram, .markdown-body .markdown-alert { break-inside: avoid; }
+  .markdown-body table { display: table; }
+  .markdown-body h1, .markdown-body h2, .markdown-body h3 { break-after: avoid; }
+}

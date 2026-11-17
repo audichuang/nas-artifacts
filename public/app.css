@@ -135,12 +135,17 @@ textarea { resize: vertical; }
   .editor textarea { font-size: 16px; }
   .comments { position: fixed; inset: var(--bar-h) 0 0 auto; width: min(100%, 360px); z-index: 3; }
   .search { max-width: none; }
-  #fullscreen, #copy { display: none; }
+  #fullscreen, #copy, #print { display: none; }
   :root { --bar-h: 92px; }
   .viewer-bar { flex-wrap: wrap; align-content: center; gap: 6px 8px; padding: 6px 12px; }
   .viewer-bar .viewer-title { flex: 1 0 calc(100% - 40px); }
   .viewer-bar .version-picker { flex: 1 1 0; min-width: 0; }
   .viewer-bar .version-picker select { width: 100%; }
+  /* Reading down a page, the bar slides away and the frame takes its room; scrolling up brings it back. */
+  .viewer-bar { transition: margin-top 0.2s ease; }
+  .viewer { transition: height 0.2s ease; }
+  body.bar-away .viewer-bar { position: relative; margin-top: calc(-1 * var(--bar-h)); }
+  body.bar-away .viewer { height: 100%; }
 }
 .error-dialog { width: min(560px, calc(100vw - 32px)); max-height: 70vh; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 .error-dialog[open] { display: flex; flex-direction: column; }

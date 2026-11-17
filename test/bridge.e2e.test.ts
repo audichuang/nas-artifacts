@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type Server } from 'node:http'
@@ -16,8 +16,13 @@ const PptxGenJS = ((pptxgen as unknown as { default?: typeof pptxgen.default }).
 // Set CHROMIUM_PATH, or keep a Playwright headless shell in its default cache.
 function findChromium(): string | undefined {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH
+  // The newest headless shell in the cache, so a Playwright upgrade does not need this file edited.
+  const cache = join(homedir(), 'Library/Caches/ms-playwright')
+  const shells = existsSync(cache)
+    ? readdirSync(cache).filter((name) => name.startsWith('chromium_headless_shell-')).sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1]))
+    : []
   const candidates = [
-    join(homedir(), 'Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell'),
+    ...shells.map((name) => join(cache, name, 'chrome-headless-shell-mac-arm64/chrome-headless-shell')),
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser'
   ]
@@ -761,6 +766,13 @@ test('a PowerPoint file shows as a deck at its own size: pictures load inside th
   // The picture comes from inside the file, through the version's own path the CSP allows.
   await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => (img.complete ? null : new Promise((done) => img.addEventListener('load', done, { once: true }))))
   assert.ok((await frame.locator('.slide.active img').evaluate((img: HTMLImageElement) => img.naturalWidth)) > 0)
+  // A click on the picture opens it large, and the deck stays on this slide meanwhile.
+  await frame.locator('.slide.active .pp-pic img').click()
+  await frame.locator('dialog.artifact-lightbox[open] img').waitFor({ timeout: 5000 })
+  await viewer.keyboard.press('ArrowLeft')
+  assert.equal(await frame.locator('#deck-counter').textContent(), '2 / 2')
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
   assert.equal(await viewer.locator('#edit').isHidden(), true)
   assert.equal(await viewer.locator('#export-pptx').isVisible(), true)
   assert.deepEqual(store.listErrors(id, 1), [])
@@ -799,5 +811,244 @@ test('PPTX editing has a separate trusted page while artifact frames cannot crea
   const editorCsp = (await viewer.request.get(viewer.url())).headers()['content-security-policy']
   assert.ok(editorCsp.includes(`frame-src ${config.office.url}`))
   assert.ok(!editorCsp.includes("'unsafe-eval'"))
+  await viewer.close()
+})
+
+const WIDE_PICTURE = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1200"><rect width="2400" height="1200" fill="#4a7"/></svg>')
+
+test('clicking a picture opens it large in a dialog; pictures in links keep their clicks', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = '# 圖\n\n![大圖](pic.svg)\n\n[![連結圖](pic.svg)](other.md)\n'
+  const { id } = store.publish({ title: 'Pictures', files: { 'index.md': { content: Buffer.from(md) }, 'other.md': { content: Buffer.from('# 另一頁\n') }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('img[alt="大圖"]').click()
+  const dialog = frame.locator('dialog.artifact-lightbox[open]')
+  await dialog.waitFor({ timeout: 5000 })
+  assert.match((await dialog.locator('img').getAttribute('src'))!, /pic\.svg$/)
+  // Fitted to the frame at first, then a click shows it at full size.
+  const fitted = await dialog.locator('img').boundingBox()
+  assert.ok(fitted!.width <= 1200 && fitted!.height <= 800, JSON.stringify(fitted))
+  await dialog.locator('img').click()
+  await frame.locator('dialog.artifact-lightbox.zoomed[open]').waitFor()
+  assert.equal(Math.round((await dialog.locator('img').boundingBox())!.width), 2400)
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  // Reopen; two fingers spreading apart zoom in, a trackpad pinch (ctrl + wheel) zooms back out.
+  await frame.locator('img[alt="大圖"]').click()
+  await dialog.waitFor()
+  const before = (await dialog.locator('img').boundingBox())!.width
+  await dialog.evaluate((d) => {
+    const fire = (type: string, id: number, x: number) => d.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: 'touch', clientX: x, clientY: 300, bubbles: true }))
+    fire('pointerdown', 1, 500); fire('pointerdown', 2, 600)
+    fire('pointermove', 1, 400); fire('pointermove', 2, 700)
+    fire('pointerup', 1, 400); fire('pointerup', 2, 700)
+  })
+  const pinched = (await dialog.locator('img').boundingBox())!.width
+  assert.ok(pinched > before * 2.5, `${before} -> ${pinched}`)
+  await viewer.mouse.move(600, 400)
+  await viewer.keyboard.down('Control')
+  await viewer.mouse.wheel(0, 400)
+  await viewer.keyboard.up('Control')
+  await viewer.waitForTimeout(100)
+  assert.ok((await dialog.locator('img').boundingBox())!.width < pinched, 'ctrl+wheel zooms out')
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  // Reopen, then close by clicking outside the picture.
+  await frame.locator('img[alt="大圖"]').click()
+  await dialog.waitFor()
+  // The fitted picture is centred, so the strip just under the viewer bar is backdrop.
+  await viewer.mouse.click(600, 60)
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+
+  // A picture inside a link still follows the link.
+  await frame.locator('img[alt="連結圖"]').click()
+  await frame.locator('h1', { hasText: '另一頁' }).waitFor({ timeout: 5000 })
+  assert.equal(await frame.locator('dialog.artifact-lightbox[open]').count(), 0)
+  await viewer.close()
+
+  await viewer.close()
+})
+
+test('hand-written pages zoom their pictures too, except icons, opted-out pictures and pictures that do something', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const html = `<!doctype html><body style="margin:0">
+<img id="shot" src="pic.svg" width="300">
+<img id="icon" src="pic.svg" width="24" height="24">
+<img id="opt" src="pic.svg" width="300" data-no-zoom>
+<div onclick="document.title='clicked'"><img id="handled" src="pic.svg" width="300"></div>
+<span role="button"><img id="rolebtn" src="pic.svg" width="300"></span>
+<img id="pointer" src="pic.svg" width="300" style="cursor:pointer">
+<style>figure.own img { cursor: zoom-in }</style><figure class="own"><img id="ownzoom" src="pic.svg" width="300"></figure>
+</body>`
+  const { id } = store.publish({ title: 'Own', files: { 'index.html': { content: Buffer.from(html) }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  for (const skipped of ['#icon', '#opt', '#handled', '#rolebtn', '#pointer', '#ownzoom']) {
+    await frame.locator(skipped).click()
+    await viewer.waitForTimeout(150)
+    assert.equal(await frame.locator('dialog.artifact-lightbox').count(), 0, skipped)
+  }
+  await frame.locator('#shot').click()
+  await frame.locator('dialog.artifact-lightbox[open] img').waitFor({ timeout: 5000 })
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  await viewer.close()
+})
+
+test('mermaid diagrams and wide tables open large too', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const columns = Array.from({ length: 14 }, (_, i) => `欄位${i}`)
+  const table = `| ${columns.join(' | ')} |\n|${columns.map(() => '---').join('|')}|\n| ${columns.map((_, i) => `value-${i}-0123456789`).join(' | ')} |\n`
+  const md = `# 圖表\n\n\`\`\`mermaid\nflowchart LR\n  A[寫檔] --> B[發布]\n\`\`\`\n\n${table}\n| 短 | 表 |\n|---|---|\n| a | b |\n`
+  const { id } = store.publish({ title: 'Diagram zoom', files: { 'index.md': { content: Buffer.from(md) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 800, height: 700 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('figure.diagram svg').click()
+  const dialog = frame.locator('dialog.artifact-lightbox[open]')
+  await dialog.locator('svg', { hasText: '寫檔' }).waitFor({ timeout: 5000 })
+  // Still themed: the node fill resolves through the page's colour variables.
+  assert.notEqual(await dialog.locator('svg rect').first().evaluate((r) => getComputedStyle(r).fill), 'rgb(0, 0, 0)')
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  // Only a table wider than the page gets the button.
+  assert.equal(await frame.locator('.table-zoom:visible').count(), 1)
+  await frame.locator('.table-zoom:visible').click()
+  await dialog.locator('table th', { hasText: '欄位13' }).waitFor({ timeout: 5000 })
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  await viewer.close()
+})
+
+test('a picture opened large on a slide holds the deck still until it closes', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const deck = ['# Pic', '![大圖](pic.svg)', '---', '## Two', 'text'].join('\n')
+  const { id } = store.publish({ title: 'Deck pictures', files: { 'index.slides.md': { content: Buffer.from(deck) }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active#slide-1 img').click()
+  await frame.locator('dialog.artifact-lightbox[open]').waitFor({ timeout: 5000 })
+  for (const key of ['ArrowRight', ' ', 'Enter']) await viewer.keyboard.press(key)
+  assert.equal(await frame.locator('#deck-counter').textContent(), '1 / 2')
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  await viewer.keyboard.press('ArrowRight')
+  await frame.locator('.slide.active#slide-2').waitFor()
+  await viewer.close()
+})
+
+test('on a phone the viewer bar slides away while reading down and comes back on scrolling up', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = `# 長文\n\n| 項目 | 內容 |\n|---|---|\n| 受測版本 | ${'很長的說明文字'.repeat(8)} |\n\n${'段落文字。\n\n'.repeat(150)}`
+  const { id } = store.publish({ title: '手機閱讀', files: { 'index.md': { content: Buffer.from(md) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const pageFrame = async () => { await viewer.frameLocator('#frame').locator('h1').waitFor(); return viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))! }
+  const frame = await pageFrame()
+  // A short label column keeps its words on one line instead of one character per line.
+  const lines = await frame.locator('td', { hasText: '受測版本' }).evaluate((td) => {
+    const range = document.createRange()
+    range.selectNodeContents(td)
+    return new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size
+  })
+  assert.equal(lines, 1, 'label cell lines')
+  const barTop = () => viewer.locator('.viewer-bar').evaluate((bar) => bar.getBoundingClientRect().bottom)
+  assert.ok((await barTop()) > 40)
+  await frame.evaluate(() => scrollTo(0, 1500))
+  await viewer.waitForFunction(() => document.querySelector('.viewer-bar')!.getBoundingClientRect().bottom <= 1, null, { timeout: 3000 })
+  // The frame takes the room the bar gave up.
+  assert.ok((await viewer.locator('#frame').boundingBox())!.height > 740)
+  await frame.evaluate(() => scrollTo(0, 1200))
+  await viewer.waitForFunction(() => document.querySelector('.viewer-bar')!.getBoundingClientRect().bottom > 40, null, { timeout: 3000 })
+  // Wide screens keep the bar where it is.
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await frame.evaluate(() => scrollTo(0, 3000))
+  await viewer.waitForTimeout(600)
+  assert.ok((await barTop()) > 40)
+  await viewer.close()
+})
+
+test('a report page prints from the viewer bar, and a Markdown page offers its source file', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: '列印', files: { 'index.md': { content: Buffer.from('# 報告\n\n內容\n') } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('h1').waitFor()
+  const pageFrame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  await pageFrame.evaluate(() => { window.print = () => { document.body.dataset.printed = 'yes' } })
+  await viewer.locator('#print').click()
+  await pageFrame.waitForFunction(() => document.body.dataset.printed === 'yes', null, { timeout: 3000 })
+  const source = viewer.locator('#export-pptx')
+  assert.equal(await source.textContent(), 'MD')
+  assert.match((await source.getAttribute('href'))!, new RegExp(`/api/artifacts/${id}/files/index\\.md\\?v=1$`))
+  await viewer.close()
+
+  // A deck prints from its own bar, so the viewer's print button stays out of the way.
+  const deck = store.publish({ title: 'Deck print', files: { 'index.slides.md': { content: Buffer.from('# A\n---\n## B') } } })
+  const second = await browser.newPage()
+  await second.setViewportSize({ width: 1200, height: 800 })
+  await second.goto(`http://localhost:${APP_PORT}/a/${deck.id}`)
+  await second.frameLocator('#frame').locator('.slide.active').waitFor()
+  assert.equal(await second.locator('#print').isHidden(), true)
+  await second.close()
+})
+
+test('on a phone the first tap on a full-width picture already shows it larger', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: '手機點圖', files: { 'index.md': { content: Buffer.from('# 圖\n\n![寬圖](pic.svg)\n') }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  const inline = (await frame.locator('img[alt="寬圖"]').boundingBox())!.width
+  await frame.locator('img[alt="寬圖"]').click()
+  const shown = frame.locator('dialog.artifact-lightbox[open] img')
+  await shown.waitFor({ timeout: 5000 })
+  const width = (await shown.boundingBox())!.width
+  assert.ok(width > inline * 1.5, `inline ${inline}, dialog ${width}`)
+  // A tap brings it back to the fitted size.
+  await shown.click({ position: { x: 20, y: 20 } })
+  await frame.locator('dialog.artifact-lightbox:not(.zoomed)[open]').waitFor({ timeout: 3000 })
+  await viewer.close()
+})
+
+test('on a phone the bar stays away at the bottom of a page instead of bouncing', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = `# 長文\n\n${'段落文字。\n\n'.repeat(120)}<div style="min-height:100vh">結尾</div>\n`
+  const { id } = store.publish({ title: '頁尾', files: { 'index.md': { content: Buffer.from(md) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('h1').waitFor()
+  const frame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  for (let y = 400; y <= 20000; y += 600) await frame.evaluate((top) => scrollTo(0, top), y)
+  await frame.evaluate(() => scrollTo(0, document.documentElement.scrollHeight))
+  await viewer.waitForTimeout(1500)
+  const state = async () => ({
+    bar: await viewer.locator('.viewer-bar').evaluate((bar) => Math.round(bar.getBoundingClientRect().bottom)),
+    gap: await frame.evaluate(() => Math.round(document.documentElement.scrollHeight - innerHeight - scrollY))
+  })
+  const first = await state()
+  await viewer.waitForTimeout(1000)
+  const second = await state()
+  assert.ok(first.bar <= 1 && second.bar <= 1, `bar ${first.bar} -> ${second.bar}`)
+  assert.ok(second.gap <= 2, `not at the bottom: ${second.gap}`)
+
+  // A page barely taller than the frame, read to the end in one move: the bar giving its room back
+  // pulls the page up by that much, which must not read as scrolling up.
+  const short = store.publish({ title: '短頁', files: { 'index.html': { content: Buffer.from('<!doctype html><body style="margin:0"><div style="height:calc(100vh + 160px);background:linear-gradient(#eee,#999)"></div></body>') } } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${short.id}`)
+  await viewer.frameLocator('#frame').locator('div').waitFor()
+  const shortFrame = viewer.frames().find((f) => f.url().includes(`/a/${short.id}/`))!
+  await shortFrame.evaluate(() => scrollTo(0, document.documentElement.scrollHeight))
+  await viewer.waitForTimeout(1500)
+  const bars: number[] = []
+  for (let i = 0; i < 5; i++) {
+    bars.push(await viewer.locator('.viewer-bar').evaluate((bar) => Math.round(bar.getBoundingClientRect().bottom)))
+    await viewer.waitForTimeout(250)
+  }
+  assert.equal(new Set(bars).size, 1, `bar moved: ${bars.join(',')}`)
   await viewer.close()
 })

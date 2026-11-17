@@ -249,16 +249,29 @@ describe('exporting decks', () => {
     assert.ok([...entries].some(([name, xml]) => name.startsWith('ppt/notesSlides/') && xml.includes('開場白')))
   })
 
+  test('a GitHub alert exports with its title, not the bracket marker', async () => {
+    const { id } = store.publish({ title: 'Alert', files: { 'index.slides.md': { content: Buffer.from('## A\n\n> [!WARNING]\n> 會刪資料\n') } } })
+    const entries = unzip(Buffer.from(await (await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)).arrayBuffer()))
+    const slide = entries.get('ppt/slides/slide1.xml')!
+    assert.match(slide, /<a:t>警告　<\/a:t>[\s\S]*<a:t>會刪資料<\/a:t>/)
+    assert.doesNotMatch(slide, /\[!WARNING\]/)
+  })
+
   test('odd Markdown still exports: empty and relative links, control characters, lone surrogates', async () => {
     const source = '## A [empty]() [rel](other.md) [web](https://example.com)\n\nbell\u0007 &#xD800; esc\u001b\n???\nnote\u0001'
     const { id } = store.publish({ title: 'Odd\u0002', files: { 'index.slides.md': { content: Buffer.from(source) } } })
     const response = await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)
     assert.equal(response.status, 200)
     const entries = unzip(Buffer.from(await response.arrayBuffer()))
-    for (const [name, xml] of entries) {
-      if (name.endsWith('.xml')) assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffd]/, name)
-    }
+    // Nothing XML 1.0 cannot hold. unzip decodes UTF-8, so a stray surrogate would show up as U+FFFD; the one
+    // U+FFFD allowed is marked's own reading of &#xD800; (CommonMark asks for it), in place of that reference.
     const slide = entries.get('ppt/slides/slide1.xml')!
+    for (const [name, xml] of entries) {
+      if (!name.endsWith('.xml')) continue
+      assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/, name)
+      assert.equal(xml.split('\ufffd').length - 1, xml === slide ? 1 : 0, name)
+    }
+    assert.match(slide, /<a:t>bell \ufffd esc<\/a:t>/)
     assert.equal((slide.match(/<a:hlinkClick /g) ?? []).length, 1)
   })
 

@@ -240,10 +240,23 @@ describe('content origin', () => {
     const html = await response.text()
     assert.match(html, /<figure class="diagram"><svg [^>]*class="pele pele-flowchart"[^>]*>[\s\S]*寫檔[\s\S]*<\/svg><\/figure>/)
     assert.match(html, /var\(--pele-fg/)
-    assert.match(html, /<div class="diagram-failed"><p>Mermaid: [^<]*line 3/)
+    assert.match(html, /<div class="diagram-failed"><p>Mermaid: [^<]*line 2/)
     assert.match(html, /<pre><code>flowchart LR\n {2}A --&#62;\n<\/code><\/pre>/)
     assert.equal(html.match(/<script>/g)?.length, 1)
     assert.doesNotMatch(response.headers.get('content-security-policy') ?? '', /mermaid|pele/)
+  })
+
+  test('GitHub alerts and footnotes render as such, not as literal brackets', async () => {
+    const md = '> [!WARNING]\n> 會刪資料\n\n> [!NOTE]\n> 補充\n\n> 一般引用\n\n結論[^src]。\n\n[^src]: 來源說明\n'
+    const { id } = await publish({ 'index.md': md })
+    const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
+    assert.match(html, /<div class="markdown-alert markdown-alert-warning"[\s\S]*會刪資料/)
+    assert.match(html, /markdown-alert-note[\s\S]*補充/)
+    assert.doesNotMatch(html, /\[!WARNING\]|\[!NOTE\]/)
+    assert.match(html, /<blockquote>\s*<p>一般引用<\/p>/)
+    assert.match(html, /<sup><a[^>]*href="#footnote-src"[^>]*>1<\/a><\/sup>/)
+    assert.match(html, /<section class="footnotes"[\s\S]*來源說明/)
+    assert.doesNotMatch(html, /\[\^src\]/)
   })
 
   test('a renderer change revalidates markdown pages browsers already hold', async () => {
