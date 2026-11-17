@@ -20,6 +20,9 @@ const PENDING_SECONDS = 600
 const MAX_CLIENTS = 200
 const UNUSED_CLIENT_DAYS = 1
 
+/** SQL for "not mid-sign-in"; takes the two parameters busy() returns. */
+const NOT_BUSY = 'id NOT IN (SELECT client_id FROM oauth_codes WHERE expires_at > ?) AND id NOT IN (SELECT value FROM json_each(?))'
+
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex')
 const randomToken = (): string => randomBytes(32).toString('base64url')
 const nowIso = (): string => new Date().toISOString()
@@ -133,7 +136,9 @@ export class OAuthServer {
     // Registration is open to anyone: when full, the oldest registration nobody ever signed in with makes room,
     // so a flood cannot lock out a real client.
     if (Number(this.db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get()!.n) >= MAX_CLIENTS) {
-      this.db.prepare('DELETE FROM oauth_clients WHERE id = (SELECT id FROM oauth_clients WHERE last_used_at IS NULL ORDER BY created_at LIMIT 1)').run()
+      this.db
+        .prepare(`DELETE FROM oauth_clients WHERE id = (SELECT id FROM oauth_clients WHERE last_used_at IS NULL AND ${NOT_BUSY} ORDER BY created_at LIMIT 1)`)
+        .run(...this.busy())
     }
     if (Number(this.db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get()!.n) >= MAX_CLIENTS) {
       throw new OAuthError(400, 'invalid_client_metadata', 'Too many registered clients; revoke unused ones in the account page.')
@@ -159,7 +164,13 @@ export class OAuthServer {
    */
   private forgetUnusedClients(): void {
     const before = new Date(Date.now() - UNUSED_CLIENT_DAYS * 86400_000).toISOString()
-    this.db.prepare('DELETE FROM oauth_clients WHERE last_used_at IS NULL AND created_at < ?').run(before)
+    this.db.prepare(`DELETE FROM oauth_clients WHERE last_used_at IS NULL AND created_at < ? AND ${NOT_BUSY}`).run(before, ...this.busy())
+  }
+
+  /** Parameters for NOT_BUSY: a client mid-sign-in is on the consent page or holds a code not yet exchanged. */
+  private busy(): [number, string] {
+    const now = Date.now()
+    return [now, JSON.stringify([...this.pending.values()].filter((request) => request.expires > now).map((request) => request.clientId))]
   }
 
   grantedClients(): GrantedClient[] {
