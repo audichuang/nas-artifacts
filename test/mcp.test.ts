@@ -150,7 +150,37 @@ describe('authorization', () => {
     }
   })
 
-  test('no PKCE, another resource or another scope is refused back to the client', async () => {
+  test('CORS covers only the OAuth endpoints and metadata; /mcp answers its own preflight; the owner app stays closed', async () => {
+    const preflight = await app.request(MCP, { method: 'OPTIONS', headers: { origin: 'https://inspector.test', 'access-control-request-method': 'POST', 'access-control-request-headers': 'mcp-method' } })
+    assert.match(preflight.headers.get('access-control-allow-headers') ?? '', /mcp-method/)
+    const account = await app.request(`${APP}/api/account`, { method: 'OPTIONS', headers: { origin: 'https://evil.test', 'access-control-request-method': 'GET' } })
+    assert.equal(account.headers.get('access-control-allow-origin'), null)
+    assert.notEqual(account.status, 204)
+    const page = await app.request(`${APP}/api/account`, { headers: { cookie, origin: 'https://evil.test' } })
+    assert.equal(page.headers.get('access-control-allow-origin'), null)
+    assert.equal((await app.request(`${APP}/.well-known/oauth-authorization-server`)).headers.get('access-control-allow-origin'), '*')
+  })
+
+  test('a client registered long ago and never used again can still sign in', async () => {
+    const clientId = await register()
+    const old = new Date(Date.now() - 40 * 86400_000).toISOString()
+    auth.db.prepare('UPDATE oauth_clients SET created_at = ?, last_used_at = ? WHERE id = ?').run(old, old, clientId)
+    await register(['https://other.test/cb'])
+    const { verifier, challenge } = pkce()
+    const back = await authorize(clientId, challenge)
+    const tokens = await app.request(`${APP}/oauth/token`, form({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, redirect_uri: REDIRECT, client_id: clientId, code_verifier: verifier }))
+    assert.equal(tokens.status, 200)
+  })
+
+  test('a callback that is not the registered one, or not a URL, is a 400 page, never a redirect or a 500', async () => {
+    const clientId = await register([REDIRECT, 'https://app.test/cb'])
+    for (const uri of ['https://127.0.0.1:33418/callback', 'notaurl', 'http://127.0.0.1:33418/callback#x']) {
+      const response = await app.request(`${APP}/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(uri)}&code_challenge=${pkce().challenge}&code_challenge_method=S256`, { headers: { cookie } })
+      assert.equal(response.status, 400, uri)
+    }
+  })
+
+  test('no PKCE, another resource or another scope is refused on this site, not by a redirect to the client', async () => {
     const clientId = await register()
     const base = { response_type: 'code', client_id: clientId, redirect_uri: REDIRECT, code_challenge_method: 'S256', state: 'x' }
     for (const [params, error] of [
@@ -160,8 +190,9 @@ describe('authorization', () => {
       [{ ...base, code_challenge: pkce().challenge, code_challenge_method: 'plain' }, 'invalid_request']
     ] as const) {
       const response = await app.request(`${APP}/oauth/authorize?${new URLSearchParams(params as Record<string, string>)}`, { headers: { cookie } })
-      assert.equal(response.status, 302)
-      assert.equal(new URL(response.headers.get('location')!).searchParams.get('error'), error)
+      assert.equal(response.status, 400)
+      assert.equal(response.headers.get('location'), null)
+      assert.match(await response.text(), new RegExp(error))
     }
   })
 
@@ -196,10 +227,26 @@ describe('tokens', () => {
     const second = (await next.json()) as { access_token: string; refresh_token: string }
     assert.notEqual(second.refresh_token, first.refresh_token)
     assert.equal((await rpc(second.access_token, 'tools/list')).response.status, 200)
-    // Replay of the rotated-out token: everything of this sign-in stops working.
+    // Replay of the rotated-out token after the grace period: everything of this sign-in stops working.
+    auth.db.prepare('UPDATE oauth_tokens SET used_at = used_at - 120000 WHERE used_at IS NOT NULL').run()
     assert.equal((await refresh(first.refresh_token)).status, 400)
     assert.equal((await rpc(second.access_token, 'tools/list')).response.status, 401)
     assert.equal((await refresh(second.refresh_token)).status, 400)
+  })
+
+  test('a refresh retried within seconds (a lost response, two tabs) still works; a late replay ends the sign-in', async () => {
+    const first = await signIn()
+    const refresh = (token: string) => app.request(`${APP}/oauth/token`, form({ grant_type: 'refresh_token', refresh_token: token, client_id: first.clientId }))
+    const a = await refresh(first.refresh_token)
+    const b = await refresh(first.refresh_token)
+    assert.equal(a.status, 200)
+    assert.equal(b.status, 200)
+    const winner = (await a.json()) as { access_token: string }
+    assert.equal((await rpc(winner.access_token, 'tools/list')).response.status, 200)
+    // Past the grace period, the same old token is a replay.
+    auth.db.prepare('UPDATE oauth_tokens SET used_at = used_at - 120000 WHERE used_at IS NOT NULL').run()
+    assert.equal((await refresh(first.refresh_token)).status, 400)
+    assert.equal((await rpc(winner.access_token, 'tools/list')).response.status, 401)
   })
 
   test('revoking, or revoking the client from the account page, stops its tokens', async () => {
@@ -275,6 +322,13 @@ describe('tools', () => {
 
     assert.equal((await call(token, 'delete', { id })).value.deleted, id)
     assert.equal((await call(token, 'get', { id })).isError, true)
+  })
+
+  test('a file of several megabytes publishes (the request limit matches the API, not the SDK default)', async () => {
+    const { access_token: token } = await signIn()
+    const picture = Buffer.alloc(5 * 1024 * 1024, 7).toString('base64')
+    const result = await call(token, 'publish', { title: '大附件', files: [{ path: 'index.md', content: '# x' }, { path: 'big.bin', content: picture, encoding: 'base64' }] })
+    assert.equal(result.isError, false, JSON.stringify(result.value).slice(0, 200))
   })
 
   test('capabilities and public do not mix through the MCP either', async () => {

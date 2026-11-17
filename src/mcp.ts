@@ -313,7 +313,12 @@ export function mountMcp(app: Hono, store: ArtifactStore, config: Config, oauth:
       return c.body(null, 405, { ...cors, Allow: 'POST' })
     }
     const server = buildServer(store, config)
-    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+    // Files arrive base64 inside JSON: the same allowance as the publish API, not the SDK's 4 MiB default.
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+      maxRequestBodySize: Math.ceil(LIMITS.publishBytes * 1.4) + 1024 * 1024
+    })
     await server.connect(transport)
     try {
       const response = await transport.handleRequest(c.req.raw)

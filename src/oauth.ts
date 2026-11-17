@@ -16,9 +16,10 @@ export const SCOPE = 'artifacts'
 const ACCESS_SECONDS = 3600
 const REFRESH_DAYS = 30
 const CODE_SECONDS = 300
+const REFRESH_GRACE_MS = 30_000
 const PENDING_SECONDS = 600
 const MAX_CLIENTS = 200
-const UNUSED_CLIENT_DAYS = 30
+const UNUSED_CLIENT_DAYS = 1
 
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex')
 const randomToken = (): string => randomBytes(32).toString('base64url')
@@ -55,12 +56,13 @@ export function validRedirectUri(value: unknown): value is string {
   return /^[a-z][a-z0-9+.-]*\.[a-z0-9+.-]+:$/.test(url.protocol) && !['javascript:', 'data:', 'file:', 'blob:', 'vbscript:'].includes(url.protocol)
 }
 
-/** Loopback redirects may use any port (RFC 8252 7.3): native clients pick a free one per sign-in. */
+/** Loopback redirects may use any port (RFC 8252 7.3): native clients pick a free one per sign-in. Nothing else may differ. */
 function sameRedirect(registered: string, given: string): boolean {
   if (registered === given) return true
+  if (!validRedirectUri(given)) return false
   const a = new URL(registered)
   const b = new URL(given)
-  return a.protocol === 'http:' && LOOPBACK.has(a.hostname) && a.hostname === b.hostname && a.pathname === b.pathname && a.search === b.search
+  return a.protocol === 'http:' && b.protocol === 'http:' && LOOPBACK.has(a.hostname) && a.hostname === b.hostname && a.pathname === b.pathname && a.search === b.search
 }
 
 type Pending = { clientId: string; redirectUri: string; challenge: string; state: string | null; resource: string; scope: string; expires: number }
@@ -147,15 +149,13 @@ export class OAuthServer {
     }
   }
 
-  /** Registrations nobody finished signing in with, or not used for a month, go. */
+  /**
+   * Only registrations nobody ever finished signing in with go (after a day). A client that once had tokens
+   * keeps its id: clients reuse it to sign in again, and an id that vanished would leave them stuck.
+   */
   private forgetUnusedClients(): void {
     const before = new Date(Date.now() - UNUSED_CLIENT_DAYS * 86400_000).toISOString()
-    this.db
-      .prepare(
-        `DELETE FROM oauth_clients WHERE COALESCE(last_used_at, created_at) < ?
-         AND NOT EXISTS (SELECT 1 FROM oauth_tokens t WHERE t.client_id = oauth_clients.id AND t.expires_at > ?)`
-      )
-      .run(before, Date.now())
+    this.db.prepare('DELETE FROM oauth_clients WHERE last_used_at IS NULL AND created_at < ?').run(before)
   }
 
   grantedClients(): GrantedClient[] {
@@ -184,14 +184,15 @@ export class OAuthServer {
   // Authorization
 
   /** Checks an authorization request; errors the client can be told about come back as a redirect. */
-  authorizationRequest(query: Record<string, string | undefined>): { ok: true; requestId: string; client: ClientRow; redirectUri: string } | { ok: false; redirect?: string; message: string } {
+  authorizationRequest(query: Record<string, string | undefined>): { ok: true; requestId: string; client: ClientRow; redirectUri: string } | { ok: false; message: string } {
     const client = this.client(query.client_id)
     if (!client) return { ok: false, message: '不認得這個應用程式（client_id）。請從應用程式重新連線。' }
     const redirectUri = query.redirect_uri ?? (client.redirectUris.length === 1 ? client.redirectUris[0] : undefined)
     if (!redirectUri || !client.redirectUris.some((registered) => sameRedirect(registered, redirectUri))) {
       return { ok: false, message: '回呼網址（redirect_uri）和這個應用程式註冊的不同。' }
     }
-    const fail = (error: string, description: string) => ({ ok: false as const, message: description, redirect: this.redirectWith(redirectUri, { error, error_description: description, state: query.state }) })
+    // Shown here, not redirected: anyone may register a callback, and an error redirect would skip the consent page that names it.
+    const fail = (error: string, description: string) => ({ ok: false as const, message: `${description}（${error}）` })
     if (query.response_type !== 'code') return fail('unsupported_response_type', 'response_type must be code.')
     if (!query.code_challenge || query.code_challenge_method !== 'S256' || !/^[A-Za-z0-9_-]{43}$/.test(query.code_challenge)) {
       return fail('invalid_request', 'PKCE with code_challenge_method S256 is required.')
@@ -268,18 +269,20 @@ export class OAuthServer {
     const hash = sha256(form.refresh_token ?? '')
     const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE hash = ? AND kind = 'refresh'").get(hash)
     if (!row || Number(row.expires_at) <= Date.now()) throw new OAuthError(400, 'invalid_grant', 'The refresh token is invalid or expired.')
-    if (row.used_at !== null) {
+    if (row.used_at !== null && Date.now() - Number(row.used_at) > REFRESH_GRACE_MS) {
       // A rotated-out refresh token came back: someone holds a copy. End the whole sign-in.
       this.db.prepare('DELETE FROM oauth_tokens WHERE family = ?').run(row.family)
       throw new OAuthError(400, 'invalid_grant', 'The refresh token was already used; sign in again.')
     }
     if (form.client_id !== undefined && form.client_id !== row.client_id) throw new OAuthError(400, 'invalid_grant', 'The refresh token belongs to another client.')
     if (form.resource !== undefined && this.resourceFor(form.resource) !== row.resource) throw new OAuthError(400, 'invalid_target', `resource must be ${this.resource}.`)
-    this.db.prepare('UPDATE oauth_tokens SET used_at = ? WHERE hash = ?').run(Date.now(), hash)
+    // Within the grace period a repeat gets its own new pair: a response lost on the way, or two refreshes at once.
+    if (row.used_at === null) this.db.prepare('UPDATE oauth_tokens SET used_at = ? WHERE hash = ?').run(Date.now(), hash)
     return this.issue(String(row.client_id), String(row.family), String(row.resource), String(row.scope))
   }
 
   private issue(clientId: string, family: string, resource: string, scope: string): Record<string, unknown> {
+    if (!this.client(clientId)) throw new OAuthError(400, 'invalid_grant', 'The client is no longer registered; register again.')
     const access = randomToken()
     const refresh = randomToken()
     const now = Date.now()
@@ -379,8 +382,7 @@ function errorPage(message: string): string {
  */
 export function mountOAuth(app: Hono, oauth: OAuthServer, signedIn: (c: Context) => boolean): void {
   const routes = new Hono()
-  routes.use('*', async (c, next) => {
-    // Clients in a browser (MCP inspectors) may read these; none of them uses cookies.
+  const cors = async (c: Context, next: () => Promise<void>) => {
     if (c.req.method === 'OPTIONS') {
       return c.body(null, 204, {
         'Access-Control-Allow-Origin': '*',
@@ -391,7 +393,9 @@ export function mountOAuth(app: Hono, oauth: OAuthServer, signedIn: (c: Context)
     }
     await next()
     c.header('Access-Control-Allow-Origin', '*')
-  })
+  }
+  // Clients in a browser read these; none uses cookies. The consent page and every other route get no CORS.
+  for (const path of ['/.well-known/*', '/oauth/token', '/oauth/register', '/oauth/revoke']) routes.use(path, cors)
   routes.use('/oauth/*', bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.json({ error: 'invalid_request', error_description: 'Request body too large.' }, 413) }))
 
   for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
@@ -424,10 +428,7 @@ export function mountOAuth(app: Hono, oauth: OAuthServer, signedIn: (c: Context)
       return c.redirect(`/login?next=${encodeURIComponent(here.pathname + here.search)}`, 302)
     }
     const request = oauth.authorizationRequest(c.req.query())
-    if (!request.ok) {
-      if (request.redirect) return c.redirect(request.redirect, 302)
-      return c.html(errorPage(request.message), 400)
-    }
+    if (!request.ok) return c.html(errorPage(request.message), 400)
     c.header('Content-Security-Policy', CONSENT_CSP)
     return c.html(consentPage(request.client.name, request.redirectUri, request.requestId))
   })
