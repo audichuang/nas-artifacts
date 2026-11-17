@@ -12,6 +12,24 @@ async function load() {
   }
   const account = await response.json()
   sessions.textContent = String(account.sessions)
+  const clients = document.getElementById('clients')
+  clients.replaceChildren(...(account.clients.length ? account.clients.map((client) => {
+    const item = document.createElement('li')
+    const label = document.createElement('span')
+    label.textContent = `${client.name}${client.lastUsedAt ? ` · 上次使用 ${client.lastUsedAt.slice(0, 10)}` : ''}`
+    const revoke = document.createElement('button')
+    revoke.className = 'link-button danger'
+    revoke.type = 'button'
+    revoke.textContent = '撤銷'
+    revoke.addEventListener('click', async () => {
+      if (!confirm(`撤銷「${client.name}」?它要重新授權才能再使用。`)) return
+      const result = await fetch(`/api/account/clients/${encodeURIComponent(client.id)}`, { method: 'DELETE', headers: { 'x-artifact-client': 'viewer' } })
+      status.textContent = result.ok ? '已撤銷。' : '撤銷失敗。'
+      load()
+    })
+    item.append(label, ' ', revoke)
+    return item
+  }) : [Object.assign(document.createElement('li'), { className: 'muted', textContent: '(沒有)' })]))
   list.replaceChildren(...account.passkeys.map((key) => {
     const item = document.createElement('li')
     const label = document.createElement('span')
