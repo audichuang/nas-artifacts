@@ -100,7 +100,9 @@ export function createAppServer(store: ArtifactStore, config: Config, options: A
     // The owner's API hands out no content tokens (the viewer page carries its own), so a listing is no token harvest.
     contentUrl: owner ? null : `${config.contentOrigin}/a/${summary.id}/v/${summary.currentVersion}/`,
     // Where anyone may open it, once the publisher made it public and the public listeners are on.
-    publicUrl: config.public && summary.visibility === 'public' && summary.capabilities.length === 0 ? `${config.public.appOrigin}/a/${summary.id}` : null
+    publicUrl: config.public && summary.visibility === 'public' && summary.capabilities.length === 0 ? `${config.public.appOrigin}/a/${summary.id}` : null,
+    // Where the owner opens it from any device, signed in with a passkey.
+    signInUrl: config.public ? `${config.public.appOrigin}/a/${summary.id}` : null
   })
   const present = (summary: ArtifactSummary) => ({ ...summary, ...urls(summary) })
 

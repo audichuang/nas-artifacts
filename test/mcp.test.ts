@@ -208,6 +208,24 @@ describe('authorization', () => {
     }
   })
 
+  test('a flood of registrations cannot lock out a new client: the oldest never-used one makes room', async () => {
+    const before = Number(auth.db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get()!.n)
+    for (let i = before; i < 200; i++) await register([`https://flood.test/${i}`])
+    const used = await signIn()
+    // A client mid-sign-in (code issued, not yet exchanged) survives the flood too.
+    auth.db.prepare('DELETE FROM oauth_clients WHERE id = (SELECT id FROM oauth_clients WHERE last_used_at IS NULL ORDER BY created_at LIMIT 1)').run()
+    const midway = await register()
+    const { verifier, challenge } = pkce()
+    auth.db.prepare('UPDATE oauth_clients SET created_at = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', midway)
+    const back = await authorize(midway, challenge)
+    const fresh = await register()
+    const late = await app.request(`${APP}/oauth/token`, form({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, redirect_uri: REDIRECT, client_id: midway, code_verifier: verifier }))
+    assert.equal(late.status, 200)
+    assert.ok(fresh)
+    assert.ok(auth.db.prepare('SELECT 1 FROM oauth_clients WHERE id = ?').get(used.clientId), 'a client that signed in stays')
+    assert.ok(Number(auth.db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get()!.n) <= 200)
+  })
+
   test('registration takes only public clients with safe redirects', async () => {
     assert.ok(validRedirectUri('https://claude.ai/api/mcp/auth_callback'))
     assert.ok(validRedirectUri('http://localhost:8080/cb'))

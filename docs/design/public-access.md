@@ -39,7 +39,7 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 - `artifacts.visibility TEXT NOT NULL DEFAULT 'private'`；既有 artifact 全部是私人，部署後外網看不到任何東西，直到擁有者把某頁設為公開。
 - 設定方式：CLI `publish --public`／`--private`、`artifact visibility <id> public|private`（需 token，走 tailnet）；tailnet 檢視頁的 ⋯ 選單也能切換。登入狀態與公開開關不放在手機上會自動收起的工具列。
 - **宣告了互動能力（`--cap db,uploads`）的 artifact 不能設為公開**：那些頁面依賴寫入，公開面又不開放任何寫入。正式站目前 38 個 artifact 中 0 個有宣告。
-- CLI 發佈後印的網址：公開頁印公開網址；階段 2 上線後全部印公開網址（私人頁開啟時會要求登入）。
+- CLI 發佈後印的網址：tailnet 網址照舊；公開頁另印 `public:`，私人頁另印 `anywhere (sign in):`（公開網域，開啟時要 passkey 登入）。
 - 公開的只有**目前版本**：報告常是先寫內部草稿、修過才分享，舊版本只留在 tailnet。發新版後公開網址自動顯示新版，舊版的 content 網址回 404。
 
 ## 公開面的路由白名單
@@ -136,7 +136,7 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 ## 安全面的改變
 
 - 一上公開網域，發佈、刪除只剩 publish token 一道牆（tailnet 不再是外圈）。token 維持 32 bytes 以上隨機值，只存摘要。
-- 公開面要加：每個 IP 的請求速率上限（`/auth/*`、`/oauth/*`、`/mcp`），用 Cloudflare 速率規則（`cf`；zone 已有 `http_ratelimit` ruleset，只加 rule、不整份取代）；request body 上限沿用現有值；所有回應帶 `X-Robots-Tag: noindex`。
+- 公開面要加：每個 IP 的請求速率上限（`/auth/*`、`/oauth/*`、`/mcp`）。**現況：沒有**。zone 是 Free 方案，`http_ratelimit` 只能有 1 條，已被 okibus 用掉（2026-11-18 加第二條被拒：`[50001] exceeded the maximum number of rules in the phase http_ratelimit: 2 out of 1`）；程式也不能依 IP 限（區網可直連公開 port、偽造 `CF-Connecting-IP`）。匿名可塞的東西（登入 ceremony、OAuth 註冊）都有上限，滿了淘汰最舊、沒用過的；request body 上限沿用現有值；所有回應帶 `X-Robots-Tag: noindex`。
 - AGENTS.md 第一段（「只給一個人在 tailnet 上看」）、memory「個人使用不做防禦」改寫：公開面的輸入上限、速率限制屬信任邊界，必須做。
 - 每條公開面路由、可見性切換、匿名寫入被拒、私人頁 404、內容 token 範圍，都要有先紅後綠的 real-Chromium e2e。
 

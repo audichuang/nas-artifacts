@@ -33,7 +33,7 @@ node "$A" publish <file-or-dir> --icon 📊 --description "<one sentence>" [--ca
 - `--title` sets the gallery title; without it a first publish takes the page's `<title>` or first `#`, else the file or folder name, and later publishes keep the title. `--id <id>` publishes into that artifact; `--new` starts a new one from a path published before.
 - Publishing a path from before the version tracking existed sends one full snapshot and prints a note. That is expected.
 - Publish also checks the files and prints what the sandbox will block or cannot find (remote images, scripts from other hosts, `fetch`, `localStorage`, missing relative files, unpinned CDN versions). It publishes anyway; fix what it names and republish. `node "$A" check <file-or-dir>` runs the same check alone (exit 1 when it finds something).
-- Done when the command prints the URL; give the user that URL.
+- Done when the command prints the URL; give the user that URL. For a private artifact it also prints `anywhere (sign in):`, the same page on the public address for the owner signed in with a passkey; give that one too when the user may read it off the tailnet.
 
 Credentials: `ARTIFACTS_TOKEN`, or `~/.config/nas-artifacts/config.json` (set once with `node "$A" config --token-stdin`). The token lives in the 1Password `Agent` vault, item `nas-artifacts publish token`. Pipe it, never print it. Reads (list, get, read, comments, checkout) need no token.
 
