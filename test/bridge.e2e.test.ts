@@ -806,3 +806,66 @@ test('PPTX editing has a separate trusted page while artifact frames cannot crea
   assert.ok(!editorCsp.includes("'unsafe-eval'"))
   await viewer.close()
 })
+
+const WIDE_PICTURE = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1200"><rect width="2400" height="1200" fill="#4a7"/></svg>')
+
+test('clicking a picture on a rendered page opens it large in a dialog; links and hand-written pages keep their clicks', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = '# 圖\n\n![大圖](pic.svg)\n\n[![連結圖](pic.svg)](other.md)\n'
+  const { id } = store.publish({ title: 'Pictures', files: { 'index.md': { content: Buffer.from(md) }, 'other.md': { content: Buffer.from('# 另一頁\n') }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('img[alt="大圖"]').click()
+  const dialog = frame.locator('dialog.artifact-lightbox[open]')
+  await dialog.waitFor({ timeout: 5000 })
+  assert.match((await dialog.locator('img').getAttribute('src'))!, /pic\.svg$/)
+  // Fitted to the frame at first, then a click shows it at full size.
+  const fitted = await dialog.locator('img').boundingBox()
+  assert.ok(fitted!.width <= 1200 && fitted!.height <= 800, JSON.stringify(fitted))
+  await dialog.locator('img').click()
+  await frame.locator('dialog.artifact-lightbox.actual[open]').waitFor()
+  assert.equal(Math.round((await dialog.locator('img').boundingBox())!.width), 2400)
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  // Reopen, then close by clicking outside the picture.
+  await frame.locator('img[alt="大圖"]').click()
+  await dialog.waitFor()
+  // The fitted picture is centred, so the strip just under the viewer bar is backdrop.
+  await viewer.mouse.click(600, 60)
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+
+  // A picture inside a link still follows the link.
+  await frame.locator('img[alt="連結圖"]').click()
+  await frame.locator('h1', { hasText: '另一頁' }).waitFor({ timeout: 5000 })
+  assert.equal(await frame.locator('dialog.artifact-lightbox[open]').count(), 0)
+  await viewer.close()
+
+  // A page the agent wrote itself decides what its pictures do.
+  const own = store.publish({ title: 'Own', files: { 'index.html': { content: Buffer.from('<!doctype html><body><img id="p" src="pic.svg" width="300"></body>') }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const second = await browser.newPage()
+  await second.goto(`http://localhost:${APP_PORT}/a/${own.id}`)
+  const ownFrame = second.frameLocator('#frame')
+  await ownFrame.locator('#p').click()
+  await second.waitForTimeout(300)
+  assert.equal(await ownFrame.locator('dialog.artifact-lightbox').count(), 0)
+  await second.close()
+})
+
+test('a picture opened large on a slide holds the deck still until it closes', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const deck = ['# Pic', '![大圖](pic.svg)', '---', '## Two', 'text'].join('\n')
+  const { id } = store.publish({ title: 'Deck pictures', files: { 'index.slides.md': { content: Buffer.from(deck) }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active#slide-1 img').click()
+  await frame.locator('dialog.artifact-lightbox[open]').waitFor({ timeout: 5000 })
+  for (const key of ['ArrowRight', ' ', 'Enter']) await viewer.keyboard.press(key)
+  assert.equal(await frame.locator('#deck-counter').textContent(), '1 / 2')
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  await viewer.keyboard.press('ArrowRight')
+  await frame.locator('.slide.active#slide-2').waitFor()
+  await viewer.close()
+})

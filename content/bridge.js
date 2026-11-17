@@ -34,6 +34,11 @@
     }
     // Deck controls (slide decks only); the page is the only one listening, so a plain DOM event will do.
     if (typeof message.event?.type === 'string' && message.event.type.startsWith('deck-')) {
+      // A picture shown large holds the deck still; anything else from the viewer closes it first.
+      if (lightbox) {
+        if (message.event.type === 'deck-key') return
+        lightbox.close()
+      }
       dispatchEvent(new CustomEvent('artifact-deck', { detail: message.event }))
       return
     }
@@ -110,6 +115,70 @@
     addEventListener('hashchange', reportPlace)
     addEventListener('scroll', () => { reportTimer ??= setTimeout(reportPlace, 250) }, { passive: true })
   }
+
+  // Pictures on the pages drawn here (Markdown, slides, Word, Excel, PowerPoint) open large on a click.
+  // Hand-written pages are left alone: their pictures may already do something when clicked.
+  const ZOOMABLE = '.markdown-body img, .slide-inner img, .pp-pic img, .dx-img, .xl-pic, .xl-cellpic'
+  const LIGHTBOX_CSS = `
+.artifact-lightbox { box-sizing: border-box; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; overflow: auto; display: grid; place-items: center; }
+.artifact-lightbox::backdrop { background: rgba(0, 0, 0, 0.82); }
+.artifact-lightbox img { display: block; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); width: auto; height: auto; object-fit: contain; background: #fff; cursor: zoom-in; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5); }
+.artifact-lightbox.actual { place-items: start; }
+.artifact-lightbox.actual img { max-width: none; max-height: none; margin: 16px; cursor: zoom-out; }
+.artifact-lightbox button { position: fixed; top: 10px; right: 12px; width: 36px; height: 36px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; font: 22px/36px system-ui, sans-serif; cursor: pointer; }
+${ZOOMABLE} { cursor: zoom-in; }
+body.overview .slide-inner img, body.overview .pp-pic img { cursor: inherit; }`
+  let lightbox = null
+
+  function openLightbox(source) {
+    const dialog = document.createElement('dialog')
+    dialog.className = 'artifact-lightbox'
+    dialog.setAttribute('aria-label', source.alt || '圖片')
+    const image = document.createElement('img')
+    image.src = source.currentSrc || source.src
+    image.alt = source.alt
+    const close = document.createElement('button')
+    close.type = 'button'
+    close.textContent = '×'
+    close.setAttribute('aria-label', '關閉')
+    dialog.append(image, close)
+    // Fitted first; a click shows a picture that was shrunk at its own size, scrollable.
+    image.addEventListener('click', () => {
+      if (dialog.classList.contains('actual') || image.naturalWidth > image.width + 1 || image.naturalHeight > image.height + 1) {
+        dialog.classList.toggle('actual')
+      } else {
+        dialog.close()
+      }
+    })
+    close.addEventListener('click', () => dialog.close())
+    // A click on the dark area around the picture lands on the dialog itself.
+    dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close() })
+    dialog.addEventListener('close', () => {
+      dialog.remove()
+      if (lightbox === dialog) lightbox = null
+    })
+    document.body.append(dialog)
+    lightbox = dialog
+    dialog.showModal()
+  }
+
+  addEventListener('DOMContentLoaded', () => {
+    const style = document.createElement('style')
+    style.textContent = LIGHTBOX_CSS
+    document.head.append(style)
+  })
+  addEventListener('click', (event) => {
+    if (event.defaultPrevented || event.button !== 0 || lightbox) return
+    const image = event.target instanceof Element ? event.target.closest('img') : null
+    if (!image || !image.matches(ZOOMABLE) || !image.complete || image.naturalWidth === 0) return
+    if (image.closest('a[href], button, label, body.overview')) return
+    event.preventDefault()
+    openLightbox(image)
+  })
+  // Keys stay with the picture while it is open (the deck turns pages on window keydown); Escape still closes it.
+  addEventListener('keydown', (event) => {
+    if (lightbox) event.stopImmediatePropagation()
+  }, true)
 
   const on = (type) => (listener) => {
     listeners[type].add(listener)
