@@ -227,26 +227,19 @@ describe('tokens', () => {
     const second = (await next.json()) as { access_token: string; refresh_token: string }
     assert.notEqual(second.refresh_token, first.refresh_token)
     assert.equal((await rpc(second.access_token, 'tools/list')).response.status, 200)
-    // Replay of the rotated-out token after the grace period: everything of this sign-in stops working.
-    auth.db.prepare('UPDATE oauth_tokens SET used_at = used_at - 120000 WHERE used_at IS NOT NULL').run()
+    // Replay of the rotated-out token: everything of this sign-in stops working.
     assert.equal((await refresh(first.refresh_token)).status, 400)
     assert.equal((await rpc(second.access_token, 'tools/list')).response.status, 401)
     assert.equal((await refresh(second.refresh_token)).status, 400)
   })
 
-  test('a refresh retried within seconds (a lost response, two tabs) still works; a late replay ends the sign-in', async () => {
+  test('a refresh token used twice ends the sign-in at once, the winner of a race included', async () => {
     const first = await signIn()
     const refresh = (token: string) => app.request(`${APP}/oauth/token`, form({ grant_type: 'refresh_token', refresh_token: token, client_id: first.clientId }))
     const a = await refresh(first.refresh_token)
-    const b = await refresh(first.refresh_token)
     assert.equal(a.status, 200)
-    assert.equal(b.status, 200)
-    const winner = (await a.json()) as { access_token: string }
-    assert.equal((await rpc(winner.access_token, 'tools/list')).response.status, 200)
-    // Past the grace period, the same old token is a replay.
-    auth.db.prepare('UPDATE oauth_tokens SET used_at = used_at - 120000 WHERE used_at IS NOT NULL').run()
     assert.equal((await refresh(first.refresh_token)).status, 400)
-    assert.equal((await rpc(winner.access_token, 'tools/list')).response.status, 401)
+    assert.equal((await rpc(((await a.json()) as { access_token: string }).access_token, 'tools/list')).response.status, 401)
   })
 
   test('revoking, or revoking the client from the account page, stops its tokens', async () => {

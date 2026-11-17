@@ -16,7 +16,6 @@ export const SCOPE = 'artifacts'
 const ACCESS_SECONDS = 3600
 const REFRESH_DAYS = 30
 const CODE_SECONDS = 300
-const REFRESH_GRACE_MS = 30_000
 const PENDING_SECONDS = 600
 const MAX_CLIENTS = 200
 const UNUSED_CLIENT_DAYS = 1
@@ -269,15 +268,15 @@ export class OAuthServer {
     const hash = sha256(form.refresh_token ?? '')
     const row = this.db.prepare("SELECT * FROM oauth_tokens WHERE hash = ? AND kind = 'refresh'").get(hash)
     if (!row || Number(row.expires_at) <= Date.now()) throw new OAuthError(400, 'invalid_grant', 'The refresh token is invalid or expired.')
-    if (row.used_at !== null && Date.now() - Number(row.used_at) > REFRESH_GRACE_MS) {
+    if (row.used_at !== null) {
       // A rotated-out refresh token came back: someone holds a copy. End the whole sign-in.
       this.db.prepare('DELETE FROM oauth_tokens WHERE family = ?').run(row.family)
       throw new OAuthError(400, 'invalid_grant', 'The refresh token was already used; sign in again.')
     }
     if (form.client_id !== undefined && form.client_id !== row.client_id) throw new OAuthError(400, 'invalid_grant', 'The refresh token belongs to another client.')
     if (form.resource !== undefined && this.resourceFor(form.resource) !== row.resource) throw new OAuthError(400, 'invalid_target', `resource must be ${this.resource}.`)
-    // Within the grace period a repeat gets its own new pair: a response lost on the way, or two refreshes at once.
-    if (row.used_at === null) this.db.prepare('UPDATE oauth_tokens SET used_at = ? WHERE hash = ?').run(Date.now(), hash)
+    // No grace period: a second use is a replay. Claude Code serializes refreshes across its processes.
+    this.db.prepare('UPDATE oauth_tokens SET used_at = ? WHERE hash = ?').run(Date.now(), hash)
     return this.issue(String(row.client_id), String(row.family), String(row.resource), String(row.scope))
   }
 
