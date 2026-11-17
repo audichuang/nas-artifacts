@@ -936,6 +936,8 @@ test('a picture opened large on a slide holds the deck still until it closes', {
   await viewer.setViewportSize({ width: 1200, height: 800 })
   await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
   const frame = viewer.frameLocator('#frame')
+  // A picture still loading is not zoomed, so wait for it as a reader's eye would.
+  await frame.locator('.slide.active#slide-1 img').evaluate((img: HTMLImageElement) => (img.complete && img.naturalWidth ? null : new Promise((done) => img.addEventListener('load', done, { once: true }))))
   await frame.locator('.slide.active#slide-1 img').click()
   await frame.locator('dialog.artifact-lightbox[open]').waitFor({ timeout: 5000 })
   for (const key of ['ArrowRight', ' ', 'Enter']) await viewer.keyboard.press(key)
