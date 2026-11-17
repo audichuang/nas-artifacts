@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -185,6 +186,47 @@ describe('enrolment while signed in', () => {
     // The ceremony is tied to the link: it carries the link, so finishing it would spend it.
     const { flow } = (await options.json()) as { flow: string }
     assert.equal((auth as unknown as { challenges: Map<string, { linkHash?: string }> }).challenges.get(flow)?.linkHash !== undefined, true)
+  })
+})
+
+/** A software passkey: a P-256 key, its COSE public key, and assertions signed the way an authenticator does. */
+function softwarePasskey(rpID: string, origin: string) {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' })
+  const jwk = publicKey.export({ format: 'jwk' }) as { x: string; y: string }
+  const cose = Buffer.concat([Buffer.from([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]), Buffer.from(jwk.x, 'base64url'), Buffer.from([0x22, 0x58, 0x20]), Buffer.from(jwk.y, 'base64url')])
+  const id = Buffer.from('software-passkey').toString('base64url')
+  return {
+    id,
+    cose,
+    assert(challenge: string, counter: number) {
+      const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge, origin }))
+      const authenticatorData = Buffer.concat([createHash('sha256').update(rpID).digest(), Buffer.from([0x05]), Buffer.from([0, 0, 0, counter])])
+      const signature = sign('sha256', Buffer.concat([authenticatorData, createHash('sha256').update(clientDataJSON).digest()]), privateKey)
+      return {
+        id,
+        rawId: id,
+        type: 'public-key',
+        clientExtensionResults: {},
+        response: { clientDataJSON: clientDataJSON.toString('base64url'), authenticatorData: authenticatorData.toString('base64url'), signature: signature.toString('base64url') }
+      }
+    }
+  }
+}
+
+describe('passkey sign-in', () => {
+  test('signs in with a registered passkey, but not with one removed while it was being verified', async () => {
+    const key = softwarePasskey('pub-app.test', PUBLIC_APP)
+    const insert = () => auth.db.prepare('INSERT INTO passkeys (id, public_key, counter, name, created_at) VALUES (?, ?, 0, ?, ?)').run(key.id, key.cose, 'soft', '2026-01-01')
+    insert()
+    const first = await auth.loginOptions()
+    await auth.login(first.flow, key.assert(first.options.challenge, 1))
+    // Removed mid-verification: the verification is async, so the removal lands before it finishes.
+    const second = await auth.loginOptions()
+    const pending = auth.login(second.flow, key.assert(second.options.challenge, 2))
+    await new Promise((resolve) => setImmediate(resolve))
+    auth.removePasskey(key.id)
+    await assert.rejects(pending, /已被移除/)
+    cookie = `${SESSION_COOKIE}=${auth.createSession()}`
   })
 })
 

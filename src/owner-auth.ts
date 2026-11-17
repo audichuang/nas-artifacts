@@ -77,12 +77,6 @@ export class OwnerAuth {
     this.contentKey = Buffer.from(key, 'base64')
   }
 
-  /** A new key ends every content token at once: signing out everywhere must not leave a 12-hour tail. */
-  private rotateContentKey(): void {
-    const key = randomBytes(32)
-    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('content_token_key', ?)").run(key.toString('base64'))
-    this.contentKey = key
-  }
 
   close(): void {
     this.db.close()
@@ -129,9 +123,20 @@ export class OwnerAuth {
     if (raw) this.db.prepare('DELETE FROM sessions WHERE hash = ?').run(sha256(raw))
   }
 
+  /** Ends every session and, with a new content key, every content token: no 12-hour tail after signing out everywhere. */
   endAllSessions(): void {
-    this.db.prepare('DELETE FROM sessions').run()
-    this.rotateContentKey()
+    // One transaction: a crash in between must not end the sessions yet keep the old content tokens valid.
+    const key = randomBytes(32)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('DELETE FROM sessions').run()
+      this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('content_token_key', ?)").run(key.toString('base64'))
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    this.contentKey = key
   }
 
   sessionCount(): number {
@@ -260,7 +265,9 @@ export class OwnerAuth {
       requireUserVerification: true
     }).catch(() => ({ verified: false, authenticationInfo: null }))
     if (!verification.verified || !verification.authenticationInfo) throw new ArtifactError(400, 'passkey_rejected', '無法驗證這把 passkey。')
-    this.db.prepare('UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?').run(verification.authenticationInfo.newCounter, nowIso(), row.id)
+    // Verification awaited: the passkey may have been removed meanwhile, and a removed passkey signs nobody in.
+    const still = this.db.prepare('UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?').run(verification.authenticationInfo.newCounter, nowIso(), row.id)
+    if (still.changes === 0) throw new ArtifactError(400, 'passkey_rejected', '這把 passkey 已被移除。')
   }
 }
 
