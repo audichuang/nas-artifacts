@@ -605,15 +605,22 @@ let previewTimer
 const canEditPptx = () => data.officeEnabled && place.path === null && /\.pptx$/i.test(currentEntry()) && artifact.capabilities.length === 0 && version === artifact.currentVersion
 const canEdit = () => (isMarkdownDeck() || canEditPptx()) && artifact.capabilities.length === 0
 const exportLink = document.getElementById('export-pptx')
+const printButton = document.getElementById('print')
+printButton.addEventListener('click', () => notifyPage({ type: 'print' }))
 function syncEditButton() {
   editButton.hidden = !canEdit()
   // A Markdown deck exports to PowerPoint; an Office file downloads as it was published.
   const entry = currentEntry()
+  // A Markdown page offers its source the same way.
   const office = place.path === null && /\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|docx|docm|dotx|dotm|doc|xlsx|xlsm|xltx|xltm|xls)$/i.test(entry)
-  exportLink.hidden = !isDeck() && !office
-  exportLink.textContent = office ? entry.split('.').pop().toUpperCase() : 'PPTX'
-  exportLink.title = office ? '下載原始檔' : '下載成 PowerPoint(.pptx)'
-  exportLink.href = office
+  const markdown = place.path === null && !isDeck() && /\.(md|markdown)$/i.test(entry)
+  const original = office || markdown
+  exportLink.hidden = !isDeck() && !original
+  exportLink.textContent = markdown ? 'MD' : office ? entry.split('.').pop().toUpperCase() : 'PPTX'
+  exportLink.title = original ? '下載原始檔' : '下載成 PowerPoint(.pptx)'
+  // Decks print from their own bar (one slide per page).
+  printButton.hidden = isDeck()
+  exportLink.href = original
     ? `/api/artifacts/${id}/files/${entry.split('/').map(encodeURIComponent).join('/')}?v=${version}`
     : `/api/artifacts/${id}/export.pptx?v=${version}`
 }

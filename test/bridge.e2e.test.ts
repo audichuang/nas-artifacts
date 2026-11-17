@@ -969,3 +969,28 @@ test('on a phone the viewer bar slides away while reading down and comes back on
   assert.ok((await barTop()) > 40)
   await viewer.close()
 })
+
+test('a report page prints from the viewer bar, and a Markdown page offers its source file', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: '列印', files: { 'index.md': { content: Buffer.from('# 報告\n\n內容\n') } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('h1').waitFor()
+  const pageFrame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  await pageFrame.evaluate(() => { window.print = () => { document.body.dataset.printed = 'yes' } })
+  await viewer.locator('#print').click()
+  await pageFrame.waitForFunction(() => document.body.dataset.printed === 'yes', null, { timeout: 3000 })
+  const source = viewer.locator('#export-pptx')
+  assert.equal(await source.textContent(), 'MD')
+  assert.match((await source.getAttribute('href'))!, new RegExp(`/api/artifacts/${id}/files/index\\.md\\?v=1$`))
+  await viewer.close()
+
+  // A deck prints from its own bar, so the viewer's print button stays out of the way.
+  const deck = store.publish({ title: 'Deck print', files: { 'index.slides.md': { content: Buffer.from('# A\n---\n## B') } } })
+  const second = await browser.newPage()
+  await second.setViewportSize({ width: 1200, height: 800 })
+  await second.goto(`http://localhost:${APP_PORT}/a/${deck.id}`)
+  await second.frameLocator('#frame').locator('.slide.active').waitFor()
+  assert.equal(await second.locator('#print').isHidden(), true)
+  await second.close()
+})

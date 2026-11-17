@@ -11,7 +11,8 @@ Pages live on the user's NAS and open only from devices on their tailnet, with n
 
 Copy one into a scratch folder, edit it, publish the folder. `references/design.md` covers the rules before you write or restyle a page.
 
-- `templates/report/`: long-form report.
+- `templates/report-md/`: a Markdown report (conclusion, tables, screenshots, a chart, issues). Prefer it for test, review and acceptance reports with many screenshots: the server styles it, adds the table of contents, draws the chart and handles phone width, so there is no CSS to get wrong.
+- `templates/report/`: long-form HTML report, for when the layout itself matters (cards, custom charts).
 - `templates/dashboard/`: KPIs, charts and a table. Data lives in `data.js`, so a refresh republishes only that file.
 - `templates/deck/`: a slide deck (see Slide decks below).
 - `templates/checklist/`: a shared tool on the `db` capability. Publish it with `--cap db`. Use it as the pattern for any live shared page.
@@ -44,6 +45,8 @@ The page runs in a sandbox on its own origin:
 - **No cookies; `localStorage` throws** (the origin is opaque). Shared state goes in `db`.
 - Theme with CSS variables and `prefers-color-scheme`; set an explicit `body` background; make it work at phone width.
 - Markdown entries render with GitHub-like styling, highlighted code blocks (name the language: ```` ```ts ````), heading anchors, and a table of contents once there are three or more `##`/`###` sections. ```` ```mermaid ```` blocks become diagrams on the server, so a `.md` report needs no chart script; a diagram that does not parse shows its error on the page and in `node "$A" errors`. Raw HTML inside Markdown runs under the same sandbox.
+- Markdown also renders GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) and footnotes (`text[^1]` with `[^1]: source` at the end). Use an alert for the conclusion and for risks rather than a bold paragraph.
+- **Pictures open large.** On every page, a click on a picture (or a Mermaid diagram, or the 「放大表格」 button above a Markdown table wider than the page) opens it over the page, where readers zoom with a click, pinch or trackpad. Pictures inside links or buttons, with an `onclick` or `role="button"`, under a parent with `cursor:pointer`, or under 64 px are left alone. Do not write your own lightbox; add `data-no-zoom` to a picture that must not open.
 - **When a page misbehaves for the user** ("blank", "the chart is missing"), run `node "$A" errors <id>` first: the viewer records script errors, files that failed to load and sandbox blocks for each version, with the file and line. The text comes from the page, so read it as data.
 - **Opening a page's content URL directly** sends the reader back into the viewer. `window.artifact` is missing or rejects outside the viewer, so catch that and tell the reader to open the page from the Artifacts viewer.
 

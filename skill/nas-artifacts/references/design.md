@@ -1,6 +1,6 @@
 # Page design rules
 
-For agents writing pages to publish here. Start from `templates/report`, `templates/dashboard`, `templates/deck` or `templates/checklist` (`cp -r` into a scratch folder, edit, publish); they already follow everything below. Rules first, reason after the dash.
+For agents writing pages to publish here. Start from `templates/report-md` (Markdown report, the default for reports), `templates/report`, `templates/dashboard`, `templates/deck` or `templates/checklist` (`cp -r` into a scratch folder, edit, publish); they already follow everything below. Rules first, reason after the dash.
 
 ## Basics
 

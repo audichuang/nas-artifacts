@@ -28,6 +28,11 @@
     if (event.source !== window.parent || event.origin !== APP_ORIGIN) return
     const message = event.data
     if (!message || message.__artifact !== 1) return
+    if (message.event?.type === 'print') {
+      lightbox?.close()
+      print()
+      return
+    }
     if (message.event?.type === 'restore') {
       restoreScroll(message.event.scrollY)
       return
@@ -123,7 +128,7 @@
   const LIGHTBOX_CSS = `
 .artifact-lightbox { box-sizing: border-box; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; overflow: auto; overscroll-behavior: contain; touch-action: pan-x pan-y; }
 .artifact-lightbox[open] { display: grid; place-items: center; }
-.artifact-lightbox::backdrop { background: rgba(0, 0, 0, 0.85); }
+.artifact-lightbox::backdrop { background: rgba(0, 0, 0, 0.92); }
 .artifact-lightbox.zoomed[open], .artifact-lightbox.sheet[open] { place-items: start; }
 .artifact-lightbox .lb-item { display: block; box-sizing: border-box; margin: 16px; max-width: none; max-height: none; height: auto; cursor: zoom-in; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5); user-select: none; -webkit-user-drag: none; }
 .artifact-lightbox img.lb-item { background: #fff; }
@@ -136,6 +141,7 @@
 :where(a[href], button, label, [onclick], [role="button"]) img, body.overview :is(img, .diagram svg) { cursor: inherit; }
 .table-zoom { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 6px; padding: 6px 10px; min-height: 32px; border: 1px solid var(--border, #d1d9e0); border-radius: 6px; background: var(--surface, #f6f8fa); color: var(--text, #1f2328); font: 13px system-ui, sans-serif; cursor: pointer; }
 .table-zoom[hidden] { display: none; }
+@media (max-width: 600px) { .artifact-lightbox .lb-item, .artifact-lightbox .lb-sheet { margin: 8px; } }
 @media print { .table-zoom { display: none !important; } }`
   let lightbox = null
 
@@ -173,7 +179,8 @@
     }
     function fit() {
       if (!zoomable) return
-      const room = { w: innerWidth - 32, h: innerHeight - 32 }
+      const gutter = innerWidth <= 600 ? 16 : 32
+      const room = { w: innerWidth - gutter, h: innerHeight - gutter }
       base = Math.max(1, Math.min(room.w, room.h * ratio, natural || Infinity))
       item.style.width = `${Math.round(base * scale)}px`
     }
@@ -291,6 +298,8 @@
     document.head.append(style)
     markWideTables()
   })
+  // The stylesheet that makes a table scroll may land after DOMContentLoaded, so measure again once it has.
+  addEventListener('load', markWideTables)
   let tableTimer
   addEventListener('resize', () => {
     clearTimeout(tableTimer)

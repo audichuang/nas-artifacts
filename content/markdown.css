@@ -54,7 +54,7 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 .markdown-body blockquote { margin: 0; padding: 0 1em; color: var(--muted); border-left: 0.25em solid var(--border); }
 .markdown-body table { border-collapse: collapse; display: block; overflow: auto; }
 /* A floor on cell width keeps short labels on one line at phone width; a table that then needs more room scrolls. */
-.markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 6px 12px; min-width: 5em; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 6px 12px; min-width: 4em; }
 .markdown-body img { max-width: 100%; }
 .markdown-body hr { border: 0; border-top: 1px solid var(--border); margin: 24px 0; }
 
