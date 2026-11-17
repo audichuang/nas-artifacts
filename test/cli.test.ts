@@ -41,7 +41,8 @@ before(async () => {
     contentPort: 0,
     appOrigin: 'http://app.test',
     contentOrigin: 'http://content.test',
-    tokens: [TOKEN]
+    tokens: [TOKEN],
+    public: { appPort: 0, contentPort: 0, appOrigin: 'https://pub.test', contentOrigin: 'https://pub-content.test' }
   })
   await new Promise<void>((resolve) => {
     server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info) => {
@@ -55,6 +56,39 @@ after(() => {
   server.close()
   store.close()
   rmSync(dir, { recursive: true, force: true })
+})
+
+describe('visibility', () => {
+  test('publish --public prints the public URL; visibility flips it; list marks public ones', async () => {
+    const folder = mkdtempSync(join(dir, 'pub-'))
+    writeFileSync(join(folder, 'index.md'), '# 公開\n')
+    const first = await cli(['publish', folder, '--public'])
+    assert.equal(first.code, 0, first.stderr)
+    const id = /\/a\/([A-Za-z0-9_-]+)/.exec(first.stdout)![1]
+    assert.match(first.stdout, new RegExp(`public: https://pub\\.test/a/${id}`))
+    assert.equal(store.requireSummary(id).visibility, 'public')
+
+    // A later publish without the flag leaves it as it is.
+    writeFileSync(join(folder, 'index.md'), '# 公開 v2\n')
+    const again = await cli(['publish', folder])
+    assert.equal(again.code, 0, again.stderr)
+    assert.equal(store.requireSummary(id).visibility, 'public')
+    assert.match((await cli(['list'])).stdout, new RegExp(`${id}.*\\[public\\]`))
+
+    const flip = await cli(['visibility', id, 'private'])
+    assert.equal(flip.code, 0, flip.stderr)
+    assert.match(flip.stdout, /private/)
+    assert.equal(store.requireSummary(id).visibility, 'private')
+    assert.doesNotMatch((await cli(['list'])).stdout, new RegExp(`${id}.*\\[public\\]`))
+
+    const bad = await cli(['visibility', id, 'everyone'])
+    assert.notEqual(bad.code, 0)
+    const caps = page()
+    store.update(caps.id, { capabilities: ['db'], files: {}, baseVersion: 1 })
+    const refused = await cli(['visibility', caps.id, 'public'])
+    assert.notEqual(refused.code, 0)
+    assert.match(refused.stderr, /capabilities|read-only/)
+  })
 })
 
 describe('comments', () => {

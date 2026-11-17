@@ -79,7 +79,9 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
 
   const urls = (summary: ArtifactSummary) => ({
     url: `${config.appOrigin}/a/${summary.id}`,
-    contentUrl: `${config.contentOrigin}/a/${summary.id}/v/${summary.currentVersion}/`
+    contentUrl: `${config.contentOrigin}/a/${summary.id}/v/${summary.currentVersion}/`,
+    // Where anyone may open it, once the publisher made it public and the public listeners are on.
+    publicUrl: config.public && summary.visibility === 'public' && summary.capabilities.length === 0 ? `${config.public.appOrigin}/a/${summary.id}` : null
   })
   const present = (summary: ArtifactSummary) => ({ ...summary, ...urls(summary) })
 
@@ -220,10 +222,18 @@ export function createAppServer(store: ArtifactStore, config: Config): Hono {
 
   app.patch('/api/artifacts/:id', async (c) => {
     const id = c.req.param('id')
-    requireCaller(c, id)
     const body = await jsonBody(c)
+    // Publishing to the internet is the publisher's call, never a viewer's.
+    if (body.visibility !== undefined) {
+      requirePublisher(c)
+      if (body.visibility !== 'public' && body.visibility !== 'private') {
+        throw new ArtifactError(400, 'invalid_field', 'visibility is "public" or "private".')
+      }
+      return c.json(present(store.setVisibility(id, body.visibility)))
+    }
+    requireCaller(c, id)
     if (typeof body.pinned !== 'boolean') {
-      throw new ArtifactError(400, 'invalid_field', 'Only { pinned: boolean } can be patched.')
+      throw new ArtifactError(400, 'invalid_field', 'Only { pinned: boolean } or, with the token, { visibility } can be patched.')
     }
     return c.json(present(store.setPinned(id, body.pinned)))
   })

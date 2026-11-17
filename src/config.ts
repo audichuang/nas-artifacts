@@ -10,6 +10,11 @@ export type Config = {
   /** Public origin that serves artifact files; must differ from appOrigin (stored-XSS isolation). */
   contentOrigin: string
   tokens: string[]
+  /**
+   * The internet-facing pair, reached through the Cloudflare tunnel: read-only, and only artifacts marked
+   * public. Separate listeners with their own origins, so nothing on the tailnet pair is exposed by accident.
+   */
+  public?: { appPort: number; contentPort: number; appOrigin: string; contentOrigin: string }
   office?: { url: string; internalUrl: string; callbackOrigin: string; secret: string }
 }
 
@@ -51,6 +56,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (secret.length < 32) throw new Error('The ONLYOFFICE JWT secret must be at least 32 characters.')
     office = { url, internalUrl, callbackOrigin, secret }
   }
+  let publicPair: Config['public']
+  if (env.PUBLIC_APP_ORIGIN || env.PUBLIC_CONTENT_ORIGIN) {
+    if (!env.PUBLIC_APP_ORIGIN || !env.PUBLIC_CONTENT_ORIGIN) throw new Error('Set both PUBLIC_APP_ORIGIN and PUBLIC_CONTENT_ORIGIN, or neither.')
+    publicPair = {
+      appPort: Number(env.PUBLIC_APP_PORT ?? 8792),
+      contentPort: Number(env.PUBLIC_CONTENT_PORT ?? 8793),
+      appOrigin: origin(env.PUBLIC_APP_ORIGIN),
+      contentOrigin: origin(env.PUBLIC_CONTENT_ORIGIN)
+    }
+    if (new Set([appOrigin, contentOrigin, publicPair.appOrigin, publicPair.contentOrigin]).size !== 4) {
+      throw new Error('The tailnet and public app and content origins must all differ.')
+    }
+  }
   return {
     dataDir: resolve(env.DATA_DIR ?? '/data'),
     appPort,
@@ -58,6 +76,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     appOrigin,
     contentOrigin,
     tokens: readTokens(env),
+    ...(publicPair ? { public: publicPair } : {}),
     ...(office ? { office } : {})
   }
 }

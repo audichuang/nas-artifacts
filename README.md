@@ -13,6 +13,7 @@
 - **簡報**:`*.slides.md`(每頁用一行 `---` 分開,`???` 之後是講稿)在伺服器端畫成 16:9 投影片:方向鍵或滑動翻頁、總覽、講稿、全螢幕、版面依內容自動挑(封面、章節、`|||` 分欄),字太多先自動縮小、再塞不下就記進頁面錯誤。檢視頁的「編輯」在旁邊改原始碼、即時預覽,⌘S 存成新版本;「PPTX」下載成 PowerPoint(文字可編輯),投影片列的「PDF」列印成一頁一張。`artifact export <id>` 給 agent 下載 .pptx。
 - **PowerPoint/Word/Excel**:直接發佈 `.pptx`/`.docx`/`.xlsx`(含巨集、放映、範本格式),伺服器端依檔案自己的母片、樣式與主題畫成頁面:`.pptx` 是投影片(同樣有總覽、講稿、PDF),`.docx` 是一整頁文件,`.xlsx` 每個可見的工作表一個分頁;文字可選取、可搜尋,巨集不會執行,下載鈕給回原檔。舊版 `.ppt`/`.doc`/`.xls` 與加密檔只提供下載。Office 檔上限 64 MB。
 - **PowerPoint 物件編輯**:選配自架 ONLYOFFICE Docs。最新、未宣告互動能力的 `.pptx` 顯示「編輯」，可直接改文字、拖曳／縮放物件，使用 Office 工具列的「儲存」或 ⌘/Ctrl+S。「返回檢視」會先由 Office 確認未儲存的修改，再結束編輯並等待回存版本；若關閉自動儲存，請先使用原生儲存，或在 Office 提示中選擇繼續編輯。引擎的保存回呼會建立新版本；保存遇到其他人先發佈時不覆寫，提供「下載編輯結果」供合併。編輯引擎獨立於 artifact 沙箱，不會把頁面升權。未設定時維持原來的唯讀預覽。
+- **公開分享**:每個 artifact 預設私人(只有 tailnet 內看得到);`publish --public` 或 `artifact visibility <id> public` 後,任何人拿到公開網址都能看(唯讀、不列入任何清單、`noindex`),改回私人後公開網址立刻 404。公開面是另外兩個 listener,只有檢視頁與下載原檔,沒有任何寫入;宣告了互動能力的頁面不能公開。
 - **圖庫**:首頁列出全部 artifact,可釘選;搜尋比對標題、說明、目前版本的內文(中文兩個字也找得到,附命中的那段文字)與發佈來源的機器和資料夾。
 - **留言**:每個 artifact 都有留言串(回覆、解決)。Agent 用 `artifact comments <id> --open` 讀未解決的回饋,`--wait` 等新留言,`artifact comment reply … --resolve` 回覆並結案。
 - **頁面錯誤**:頁面執行時的腳本錯誤、載入失敗的檔案與被沙箱擋下的請求會記在該版本底下,檢視頁顯示 ⚠ 數量,agent 用 `artifact errors <id>` 讀。發佈前 CLI 也會先靜態檢查一次(`artifact check`)。
@@ -45,6 +46,8 @@
 | `APP_PORT` / `CONTENT_PORT` / `LISTEN_HOST` | 預設 `8790` / `8791` / `0.0.0.0` |
 | `ARTIFACTS_TOKEN_FILE` | 發佈 token 檔(一行一個,可放多個,`#` 開頭的行略過);或 `ARTIFACTS_TOKENS` 逗號分隔。`NODE_ENV=production`(image 預設)時每個 token 至少 16 字元,否則啟動失敗 |
 | `DATA_DIR` | SQLite 與 blob 存放處,預設 `/data` |
+| `PUBLIC_APP_ORIGIN` / `PUBLIC_CONTENT_ORIGIN` | 選配,對外唯讀 listener 的兩個 origin(經 Cloudflare Tunnel);設了才啟動,四個 origin 必須互不相同 |
+| `PUBLIC_APP_PORT` / `PUBLIC_CONTENT_PORT` | 預設 `8792` / `8793`;只讓 tunnel 連得到,不要發佈到區網 |
 | `ONLYOFFICE_URL` | 選配，瀏覽器能連到的自架 Document Server origin，必須與 app、content 不同 |
 | `ONLYOFFICE_INTERNAL_URL` | 伺服器下載結果的內部 origin，預設同 `ONLYOFFICE_URL` |
 | `ONLYOFFICE_CALLBACK_ORIGIN` | Document Server 能連到的 app origin，預設 `APP_ORIGIN`；NAS 本機連不到 tailnet 名稱時使用區網 app 位址 |

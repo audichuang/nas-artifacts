@@ -51,10 +51,14 @@ export type ArtifactSummary = {
   currentVersion: number
   capabilities: Capability[]
   pinned: boolean
+  /** 'public': anyone with the link may view it on the public origins. New artifacts are private. */
+  visibility: Visibility
   source: Source | null
   createdAt: string
   updatedAt: string
 }
+
+export type Visibility = 'public' | 'private'
 
 export type FileChange = {
   path: string
@@ -384,6 +388,7 @@ export class ArtifactStore {
       this.addColumn(table, 'source_host', 'TEXT')
       this.addColumn(table, 'source_path', 'TEXT')
     }
+    this.addColumn('artifacts', 'visibility', "TEXT NOT NULL DEFAULT 'private'")
     this.db.exec(`CREATE TABLE IF NOT EXISTS search_text (
       artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
       version INTEGER NOT NULL,
@@ -572,6 +577,9 @@ export class ArtifactStore {
     const icon = input.icon === undefined ? current.icon : optionalText(input.icon, 'icon', 40)
     const label = optionalText(input.label, 'label', 60)
     const capabilities = input.capabilities === undefined ? current.capabilities : parseCapabilities(input.capabilities)
+    if (current.visibility === 'public' && capabilities.length > 0) {
+      throw new ArtifactError(409, 'has_capabilities', 'This artifact is public, and public pages are read-only: make it private before declaring capabilities.')
+    }
     const source = parseSource(input.source)
     const { files, bodies } = this.planFiles(previous.files, input.files ?? {})
     const entry = input.entry !== undefined ? chooseEntry(files, input.entry) : files[current.entry] ? current.entry : chooseEntry(files, undefined)
@@ -638,6 +646,22 @@ export class ArtifactStore {
         return { ...change, lines: shown }
       })
     return { from: base?.version ?? null, to: target.version, label: target.label, source: target.source, createdAt: target.createdAt, files }
+  }
+
+  /** Public pages run without any write path, so a page that declares capabilities stays private. */
+  setVisibility(id: string, visibility: Visibility): ArtifactSummary {
+    const summary = this.requireSummary(id)
+    if (visibility === 'public' && summary.capabilities.length > 0) {
+      throw new ArtifactError(409, 'has_capabilities', `This artifact declares ${summary.capabilities.join(', ')}; public pages are read-only, so it cannot be made public.`)
+    }
+    this.db.prepare('UPDATE artifacts SET visibility = ? WHERE id = ?').run(visibility, id)
+    return this.requireSummary(id)
+  }
+
+  /** What the public origins may serve: public, and no capabilities (checked again in case of an old row). */
+  isPublic(id: string): boolean {
+    const summary = this.getSummary(id)
+    return summary !== null && summary.visibility === 'public' && summary.capabilities.length === 0
   }
 
   setPinned(id: string, pinned: boolean): ArtifactSummary {
@@ -744,6 +768,7 @@ export class ArtifactStore {
       currentVersion: Number(row.current_version),
       capabilities: JSON.parse(String(row.capabilities)) as Capability[],
       pinned: Number(row.pinned) === 1,
+      visibility: row.visibility === 'public' ? 'public' : 'private',
       source: sourceFromRow(row),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)

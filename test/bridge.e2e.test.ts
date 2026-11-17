@@ -10,6 +10,7 @@ import pptxgen from 'pptxgenjs'
 import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import { createContentServer } from '../src/content-server.ts'
+import { createPublicAppServer, publicContentConfig } from '../src/public-server.ts'
 
 const PptxGenJS = ((pptxgen as unknown as { default?: typeof pptxgen.default }).default ?? pptxgen) as typeof pptxgen.default
 
@@ -34,6 +35,8 @@ const TOKEN = 'e2e-token-0123456789'
 const APP_PORT = 18790
 const CONTENT_PORT = 18791
 const SINK_PORT = 18799
+const PUBLIC_APP_PORT = 18792
+const PUBLIC_CONTENT_PORT = 18793
 let dir: string
 let store: ArtifactStore
 let servers: ServerType[] = []
@@ -61,11 +64,14 @@ before(async () => {
     contentPort: CONTENT_PORT,
     appOrigin: `http://localhost:${APP_PORT}`,
     contentOrigin: `http://127.0.0.1:${CONTENT_PORT}`,
-    tokens: [TOKEN]
+    tokens: [TOKEN],
+    public: { appPort: PUBLIC_APP_PORT, contentPort: PUBLIC_CONTENT_PORT, appOrigin: `http://localhost:${PUBLIC_APP_PORT}`, contentOrigin: `http://127.0.0.1:${PUBLIC_CONTENT_PORT}` }
   }
   servers = [
     serve({ fetch: createAppServer(store, config).fetch, port: APP_PORT, hostname: '127.0.0.1' }),
-    serve({ fetch: createContentServer(store, config).fetch, port: CONTENT_PORT, hostname: '127.0.0.1' })
+    serve({ fetch: createContentServer(store, config).fetch, port: CONTENT_PORT, hostname: '127.0.0.1' }),
+    serve({ fetch: createPublicAppServer(store, config).fetch, port: PUBLIC_APP_PORT, hostname: '127.0.0.1' }),
+    serve({ fetch: createContentServer(store, publicContentConfig(config), { publicOnly: true }).fetch, port: PUBLIC_CONTENT_PORT, hostname: '127.0.0.1' })
   ]
   browser = await chromium.launch({ executablePath: chromiumPath })
 })
@@ -1052,3 +1058,61 @@ test('on a phone the bar stays away at the bottom of a page instead of bouncing'
   assert.equal(new Set(bars).size, 1, `bar moved: ${bars.join(',')}`)
   await viewer.close()
 })
+
+test('the public viewer shows a public page in the sandbox, read-only, and nothing of a private one', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = '# 公開報告\n\n![圖](pic.svg)\n\n[下一頁](two.md)\n'
+  const { id } = store.publish({ title: '公開報告', files: { 'index.md': { content: Buffer.from(md) }, 'two.md': { content: Buffer.from('# 第二頁\n') }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  // Private by default: the public viewer does not know it.
+  const closed = await viewer.goto(`http://localhost:${PUBLIC_APP_PORT}/a/${id}`)
+  assert.equal(closed!.status(), 404)
+
+  store.setVisibility(id, 'public')
+  const errors: string[] = []
+  viewer.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()) })
+  await viewer.goto(`http://localhost:${PUBLIC_APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('iframe.public-frame')
+  await frame.locator('h1', { hasText: '公開報告' }).waitFor({ timeout: 5000 })
+  // The page runs in the same sandbox: opaque origin, and the bridge talks to the public viewer.
+  const pageFrame = viewer.frames().find((f) => f.url().startsWith(`http://127.0.0.1:${PUBLIC_CONTENT_PORT}/`))!
+  assert.equal(await pageFrame.evaluate(() => origin), 'null')
+  // Pictures open large here too.
+  await frame.locator('img[alt="圖"]').click()
+  await frame.locator('dialog.artifact-lightbox[open] img').waitFor({ timeout: 5000 })
+  await viewer.keyboard.press('Escape')
+  // Links between its own pages work inside the frame.
+  await frame.locator('a', { hasText: '下一頁' }).click()
+  await frame.locator('h1', { hasText: '第二頁' }).waitFor({ timeout: 5000 })
+  // Nothing on the page writes: no comment box, no pin, no delete.
+  assert.equal(await viewer.locator('#comments, #pin, #menu-delete, #toggle-comments').count(), 0)
+  assert.deepEqual(errors.filter((text) => !/favicon/.test(text)), [])
+
+  // Made private again while open: a reload shows nothing.
+  store.setVisibility(id, 'private')
+  const gone = await viewer.goto(`http://localhost:${PUBLIC_APP_PORT}/a/${id}`)
+  assert.equal(gone!.status(), 404)
+  const file = await viewer.request.get(`http://127.0.0.1:${PUBLIC_CONTENT_PORT}/a/${id}/v/1/pic.svg`)
+  assert.equal(file.status(), 404)
+  await viewer.close()
+})
+
+for (const [name, body] of Object.entries(EXFIL_PAGES)) {
+  test(`a public page cannot send data out by navigation either (${name})`, { skip: !chromiumPath && 'no Chromium found' }, async () => {
+    const sink = await listenSink()
+    try {
+      const { id } = store.publish({ title: 'Exfil public', files: { 'index.html': { content: Buffer.from(`<!doctype html><html><head></head><body>${body}</body></html>`) } } })
+      store.setVisibility(id, 'public')
+      const context = await browser.newContext()
+      const page = await context.newPage()
+      await page.goto(`http://localhost:${PUBLIC_APP_PORT}/a/${id}`)
+      await page.waitForTimeout(1500)
+      assert.deepEqual(sink.hits, [])
+      assert.equal(context.pages().length, 1)
+      assert.ok(page.frames().every((frame) => !frame.url().includes(`:${SINK_PORT}`)))
+      await context.close()
+    } finally {
+      sink.server.close()
+    }
+  })
+}

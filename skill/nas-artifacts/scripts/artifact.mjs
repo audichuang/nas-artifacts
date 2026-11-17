@@ -21,9 +21,12 @@ const USAGE = `artifact <command> [options]
       --id ID            update this artifact instead of the one remembered for the path
       --new              always create a new artifact
       --force            overwrite newer remote changes (default: stop on a conflict)
+      --public | --private  who may open it: public = anyone with the link, read-only (default: private;
+                         a later publish without either flag keeps the current setting)
   checkout <id|url> [dir]  download the current version into dir (default ./<id>) and remember it,
                          so the next publish from dir sends only your changes; --force reuses a non-empty dir
-  list [--q TEXT]        list artifacts
+  list [--q TEXT]        list artifacts ([public] marks the ones anyone with the link may open)
+  visibility <id> public|private  open an artifact to anyone with its link, or close it again
   get <id>               metadata and version history
   read <id> [path] [--v N] [--out FILE]  print a published file (default: the entry); a binary one (an Office file, a picture) needs --out
   check <file|dir>       report what the page sandbox will block or cannot find (publish runs it too)
@@ -353,11 +356,14 @@ async function publish(target, values) {
     const title = values.title ?? guessTitle(paths, values.entry) ?? basename(source).replace(/\.(pptx|pptm|ppsx|ppsm|potx|potm|ppt|docx|docm|dotx|dotm|doc|xlsx|xlsm|xltx|xltm|xls)$/i, '')
     result = await api('/api/artifacts', { method: 'POST', auth: true, json: { ...common, title, files: encode(Object.keys(paths)) } })
   }
+  if (values.public || values.private) {
+    result = await api(`/api/artifacts/${encodeURIComponent(result.id)}`, { method: 'PATCH', auth: true, json: { visibility: values.public ? 'public' : 'private' } })
+  }
   const recordedNow = { id: result.id, url: result.url, version: result.currentVersion, files: hashes }
   updateState((latest) => {
     latest[source] = recordedNow
   })
-  print(values.json ? { ...result, warnings } : result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})`)
+  print(values.json ? { ...result, warnings } : result, values.json, (r) => `${r.url}  (v${r.currentVersion}${r.currentVersion > 1 ? ', same URL' : ''})${r.publicUrl ? `\npublic: ${r.publicUrl}` : ''}`)
 }
 
 async function checkout(target, dirArg, values) {
@@ -485,6 +491,8 @@ async function main() {
       id: { type: 'string' },
       new: { type: 'boolean' },
       force: { type: 'boolean' },
+      public: { type: 'boolean' },
+      private: { type: 'boolean' },
       q: { type: 'string' },
       v: { type: 'string' },
       limit: { type: 'string' },
@@ -513,7 +521,14 @@ async function main() {
   switch (command) {
     case 'publish':
       if (!args[0]) fail('publish needs a file or directory')
+      if (values.public && values.private) fail('pass --public or --private, not both')
       return publish(args[0], values)
+    case 'visibility': {
+      const [id, visibility] = args
+      if (!id || !['public', 'private'].includes(visibility)) fail('usage: visibility <id> public|private')
+      const data = await api(`/api/artifacts/${enc(id)}`, { method: 'PATCH', auth: true, json: { visibility } })
+      return print(data, json, (d) => (d.visibility === 'public' ? `${d.id} is public: ${d.publicUrl ?? '(the server has no public address configured)'}` : `${d.id} is private`))
+    }
     case 'check': {
       if (!args[0]) fail('check needs a file or directory')
       const source = resolve(args[0])
@@ -569,13 +584,13 @@ async function main() {
       if (values.q) params.set('q', values.q)
       const data = await api(`/api/artifacts?${params}`)
       return print(data, json, (d) =>
-        d.artifacts.map((a) => `${a.id}  v${a.currentVersion}  ${a.updatedAt.slice(0, 16).replace('T', ' ')}  ${a.icon ?? ''} ${a.title}${a.source ? `  [${a.source.host} ${a.source.path}]` : ''}`).join('\n') || '(none)'
+        d.artifacts.map((a) => `${a.id}  v${a.currentVersion}  ${a.updatedAt.slice(0, 16).replace('T', ' ')}  ${a.icon ?? ''} ${a.title}${a.visibility === 'public' ? '  [public]' : ''}${a.source ? `  [${a.source.host} ${a.source.path}]` : ''}`).join('\n') || '(none)'
       )
     }
     case 'get': {
       const data = await api(`/api/artifacts/${enc(args[0] ?? fail('get needs an id'))}`)
       return print(data, json, (d) =>
-        [`${d.icon ?? ''} ${d.title}`.trim(), d.url, `entry ${d.entry} · capabilities ${d.capabilities.join(', ') || 'none'}`, ...d.versions.map((v) => `  v${v.version}  ${v.createdAt.slice(0, 16).replace('T', ' ')}  ${v.label ?? ''}`)].join('\n')
+        [`${d.icon ?? ''} ${d.title}`.trim(), d.url, ...(d.publicUrl ? [`public: ${d.publicUrl}`] : [`visibility ${d.visibility ?? 'private'}`]), `entry ${d.entry} · capabilities ${d.capabilities.join(', ') || 'none'}`, ...d.versions.map((v) => `  v${v.version}  ${v.createdAt.slice(0, 16).replace('T', ' ')}  ${v.label ?? ''}`)].join('\n')
       )
     }
     case 'read': {

@@ -44,7 +44,12 @@ export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, 
 const STATIC_ROOT = new URL('../content/', import.meta.url)
 const staticFile = (name: string): string => readFileSync(new URL(name, STATIC_ROOT), 'utf8')
 
-export function createContentServer(store: ArtifactStore, config: Config, options: { renderVersion?: string } = {}): Hono {
+/**
+ * `publicOnly`: the internet-facing listener. It serves only artifacts marked public (and without
+ * capabilities), and nothing it sends may be cached as public: Cloudflare's edge and the browser would
+ * otherwise keep handing out a page after it went private again.
+ */
+export function createContentServer(store: ArtifactStore, config: Config, options: { renderVersion?: string; publicOnly?: boolean } = {}): Hono {
   const app = new Hono()
   const bridge = staticFile('bridge.js').replace('__APP_ORIGIN__', JSON.stringify(config.appOrigin))
   const markdownCss = staticFile('markdown.css')
@@ -60,8 +65,16 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     .slice(0, 16)
 
   app.use('*', async (c, next) => {
-    await next()
     const id = /^\/a\/([A-Za-z0-9_-]+)\//.exec(new URL(c.req.url).pathname)?.[1]
+    if (options.publicOnly && id !== undefined && !store.isPublic(id)) {
+      c.res = c.text('Not found', 404)
+    } else {
+      await next()
+    }
+    if (options.publicOnly) {
+      c.header('Cache-Control', 'private, no-cache')
+      c.header('X-Robots-Tag', 'noindex, nofollow')
+    }
     const topLevel = c.req.header('sec-fetch-dest') === 'document'
     c.header('Content-Security-Policy', contentSecurityPolicy(config.appOrigin, config.contentOrigin, id, topLevel))
     c.header('Vary', 'Sec-Fetch-Dest', { append: true })

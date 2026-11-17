@@ -1,6 +1,6 @@
 # 公開網址、擁有者登入與遠端 MCP（設計稿）
 
-狀態：草稿，待擁有者確認「待決定」各項後才開始實作。
+狀態：擁有者確認三階段（2026-11-18）。階段 1 已實作（`src/public-server.ts`）；階段 2、3 尚未開始。
 
 ## 目標
 
@@ -50,12 +50,12 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 |---|---|
 | `GET /a/:id` | artifact 為公開；回一個**另寫的小型公開檢視頁**（標題、版本選單、iframe、下載原檔），不重用 tailnet 的 `viewer.js` |
 | `GET /static/*`、`/healthz` | 一律 |
-| `GET /api/artifacts/:id` | 公開；只回標題、圖示、說明、entry、版本號與版本日期 |
-| `GET /api/artifacts/:id/events` | 公開；只送「有新版本」 |
 | `GET /api/artifacts/:id/files/*` | 公開；下載原檔 |
 | content：`/a/:id/v/:n/*`、`/a/:id/assets/*`、`/_/bridge.js`、`/_/markdown.css` | 公開 |
 
 不回給匿名訪客的欄位：發佈機器名與本機資料夾（`source_host`、`source_path`）、留言數、錯誤數、互動能力清單、版本標籤（`--label` 可能寫內部資訊，只顯示版本號與日期）。
+
+檢視頁的標題、版本清單直接畫在 HTML 裡，所以公開面不需要 JSON API 與事件串流；新版本要重新整理才看得到（階段 1 的取捨）。
 
 公開面**完全沒有寫入路徑**：留言、釘選、頁面錯誤回報、`db`、`uploads`、`PUT …/slides`、Office 編輯、發佈、更新、刪除、prune 都不掛。發佈仍走 tailnet（所有發佈的機器都在 tailnet 上）。`export.pptx` 也不掛：它是匿名可觸發的伺服器端運算。
 
