@@ -1,6 +1,6 @@
 # 公開網址、擁有者登入與遠端 MCP（設計稿）
 
-狀態：擁有者確認三階段（2026-11-18）。階段 1 已上線（`src/public-server.ts`）；階段 2 已實作（`src/owner-auth.ts`、公開 app 的 session 閘門、內容 token）；階段 3 實作中。定案寫在各自的段落。
+狀態：擁有者確認三階段（2026-11-18）。階段 1 已上線（`src/public-server.ts`）；階段 2 已實作（`src/owner-auth.ts`、公開 app 的 session 閘門、內容 token）；階段 3 已實作（`src/oauth.ts`、`src/mcp.ts`）。定案寫在各自的段落。
 
 ## 目標
 
@@ -105,7 +105,9 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 
 - content listener 驗 token 後才回檔案；CSP 的自有檔案範圍改成 `<content>/t/<token>/a/<id>/`，一個 artifact 仍讀不到另一個的檔案。
 - 公開閘門的條件改成「公開（只限目前版本），或 token 對這個 id 有效（任何版本）」。
-- 伺服器自己拼的網址都要帶前綴：巢狀 entry 的 302 帶 token，頂層文件導回檢視頁的 302 不帶；asset 的 `url` 在登入後的公開 app 帶 token。檢視頁的 `frame-src` 是 `<content>/t/`：token 換新時不用重載整頁，框內頁面仍無法導向沒有 token 的其他 artifact。
+- 伺服器自己拼的網址都要帶前綴：巢狀 entry 的 302 帶 token，頂層文件導回檢視頁的 302 不帶。API（列表、detail、asset 的 `url`）一律不帶 token，由檢視頁換成 iframe 當下那枚，一份偷來的 session 不能一次拿到所有 artifact 的 token。
+- 「登出所有裝置」與刪除 passkey 會換掉內容 token 的金鑰（和刪 session 同一筆交易），已發出的 token 立即失效。
+- 公開閘門拒絕前四個路徑段（`a`、id、`v`、版本）有百分比編碼的請求：閘門讀原始路徑、路由讀解碼後的路徑，兩邊必須看到同一個版本。檢視頁的 `frame-src` 是 `<content>/t/`：token 換新時不用重載整頁，框內頁面仍無法導向沒有 token 的其他 artifact。
 - 檢視頁的 `contentUrl`、`framePath`、錯誤來源縮寫都先剝掉 `/t/<token>` 前綴。
 - `Referrer-Policy: no-referrer` 留著並以測試釘住，token 不會經 Referer 流到 CDN。
 - 公開頁不需要 token，路徑不變。
@@ -123,10 +125,12 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 - 這個 app 自己當 authorization server，依 MCP authorization spec（2026-07-28 版）：
   - `/.well-known/oauth-protected-resource`（RFC 9728，含 `/mcp` 路徑版），`/mcp` 未授權回 401 與 `WWW-Authenticate: Bearer resource_metadata="…"`。
   - `/.well-known/oauth-authorization-server`（RFC 8414）。授權回應帶 `iss`（RFC 9207）。
-  - 動態用戶端註冊（RFC 7591，只收 public client、`token_endpoint_auth_method: none`）。redirect URI 只收 https，或 `http://localhost`／`127.0.0.1` 的 loopback。未使用的註冊 30 天後清掉，總數有上限。Client ID Metadata Documents 先不做（要從伺服器向外抓網址）；三個目標 client 實測都能用動態註冊，有 client 只支援 CIMD 再補。
+  - 動態用戶端註冊（RFC 7591，只收 public client、`token_endpoint_auth_method: none`）。redirect URI 只收 https，或 `http://localhost`／`127.0.0.1` 的 loopback。只清掉超過一天、從未完成授權的註冊（用過的 client id 會被 client 拿來重新登入，刪了會卡住），總數上限 200。Client ID Metadata Documents 先不做（要從伺服器向外抓網址）；三個目標 client 實測都能用動態註冊，有 client 只支援 CIMD 再補。
+  - 授權參數錯（缺 PKCE、scope 或 resource 不對）在本站顯示錯誤，不轉回 client：任何人都能註冊回呼，錯誤轉址會跳過寫明目的地的同意頁。
   - 授權碼流程只接受 PKCE S256；`resource` 參數必須是本服務的 `/mcp`，token 綁定這個 audience，`/mcp` 驗證時再檢查。
   - 授權頁要求 passkey 登入（階段 2 的 session），顯示 client 名稱與 redirect host，擁有者按「允許」才發碼。同意送出用 fetch 加 `x-artifact-client` 標頭（擋 CSRF），不是表單。
-  - access token 1 小時，refresh token 30 天、每次換新（rotation）、重用舊的就撤銷整串。token 只存摘要。設定頁可撤銷某個 client 的全部 token。
+  - access token 1 小時，refresh token 30 天、每次換新（rotation）、重用舊的就撤銷整串，沒有寬限期（Claude Code 跨行程序列化 refresh；回應遺失就要重新授權）。
+  - CORS 只開在 `/.well-known/*` 與 `/oauth/{token,register,revoke}`、`/mcp`；同意頁與擁有者路由沒有。token 只存摘要。設定頁可撤銷某個 client 的全部 token。
 - **publish token 停用時程**：MCP 上線並在三個 client 實測過後，SKILL.md 改教 MCP；CLI 保留一段相容期（各機器 aghub 更新完），之後由擁有者決定何時從伺服器移除 token。停用前不動 tailnet 的 token 路由。
 
 ## 安全面的改變

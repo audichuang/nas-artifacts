@@ -6,6 +6,8 @@ import { ArtifactError, type ArtifactStore } from './artifact-store.ts'
 import type { Config } from './config.ts'
 import { escapeHtml } from './content-render.ts'
 import { decodeRequestPath, isOfficePath } from './file-paths.ts'
+import { mountMcp } from './mcp.ts'
+import { mountOAuth, OAuthServer } from './oauth.ts'
 import { readCookie, sessionCookie, SESSION_COOKIE, type OwnerAuth } from './owner-auth.ts'
 
 /** Pages of the public app that run a script of their own (sign-in, account): own files only, no frames. */
@@ -14,7 +16,7 @@ const SCRIPT_PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'self'
 /** Where to go after signing in: a path on this app only, never another host. */
 export function safeNext(value: string | undefined): string {
   // No backslash or control character anywhere: URL parsers drop tabs and newlines and read "\\" as "/".
-  if (!value || value.length >= 2000 || !value.startsWith('/') || value.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(value)) return '/'
+  if (!value || value.length >= 8192 || !value.startsWith('/') || value.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(value)) return '/'
   const base = 'https://next.invalid'
   return new URL(value, base).origin === base ? value : '/'
 }
@@ -77,7 +79,8 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
 
   app.use('*', async (c, next) => {
     await next()
-    c.header('Cache-Control', 'private, no-cache')
+    // Never cacheable by Cloudflare; token responses keep their stricter no-store.
+    if (!c.res.headers.get('Cache-Control')?.includes('no-store')) c.header('Cache-Control', 'private, no-cache')
     c.header('X-Robots-Tag', 'noindex, nofollow')
     c.header('X-Content-Type-Options', 'nosniff')
     c.header('Referrer-Policy', 'no-referrer')
@@ -90,6 +93,12 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
   app.get('/healthz', (c) => c.text('ok'))
 
   if (auth && ownerApp) {
+    // The remote MCP and its OAuth server: bearer tokens only, so they sit before the session gate and read no cookie
+    // (the consent page asks for the session itself).
+    const oauth = new OAuthServer(auth.db, pair.appOrigin)
+    mountOAuth(app, oauth, signedIn)
+    mountMcp(app, store, config, oauth)
+
     // Every call that changes sign-in state needs the viewer header: a CORS preflight no other origin passes.
     const requireClient = (c: Context) => {
       if (c.req.header(VIEWER_HEADER) !== 'viewer') throw new ArtifactError(403, 'forbidden', 'Missing client header.')
@@ -166,6 +175,8 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
   <h2>Passkey</h2>
   <ul id="passkeys" class="plain-list"></ul>
   <button id="add-passkey" class="button" type="button">在這台裝置新增 passkey</button>
+  <h2>已授權的應用程式（MCP）</h2>
+  <ul id="clients" class="plain-list"></ul>
   <h2>登入中的裝置</h2>
   <p class="muted"><span id="sessions"></span> 個工作階段</p>
   <div class="row-buttons">
@@ -175,7 +186,12 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
   <p id="status" class="muted small" role="status"></p>
 </main>`, 'account.js'))
     })
-    owner.get('/api/account', (c) => c.json({ passkeys: auth.listPasskeys(), sessions: auth.sessionCount() }))
+    owner.get('/api/account', (c) => c.json({ passkeys: auth.listPasskeys(), sessions: auth.sessionCount(), clients: oauth.grantedClients() }))
+    owner.delete('/api/account/clients/:id', (c) => {
+      requireClient(c)
+      oauth.revokeClient(c.req.param('id'))
+      return c.body(null, 204)
+    })
     owner.delete('/api/account/passkeys/:id', (c) => {
       requireClient(c)
       if (auth.listPasskeys().length <= 1) throw new ArtifactError(409, 'last_passkey', '不能刪掉最後一把 passkey。')
@@ -257,7 +273,7 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
   const STATIC: Record<string, string> = {
     'app.css': 'text/css; charset=utf-8',
     'favicon.svg': 'image/svg+xml',
-    ...(auth ? { 'login.js': 'text/javascript; charset=utf-8', 'webauthn.js': 'text/javascript; charset=utf-8' } : {})
+    ...(auth ? { 'login.js': 'text/javascript; charset=utf-8', 'webauthn.js': 'text/javascript; charset=utf-8', 'consent.js': 'text/javascript; charset=utf-8' } : {})
   }
   app.get('/static/:name', (c) => {
     const type = STATIC[c.req.param('name')]
