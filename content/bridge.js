@@ -149,7 +149,7 @@
    * Shows `item` over the page. A zoomable item (picture, diagram) starts fitted to the frame and zooms
    * with a click, double-tap, pinch or ctrl/⌘-wheel (a trackpad pinch); the dialog scrolls to pan.
    */
-  function openLightbox(item, { ratio, natural, label, zoomable = true, sheet = false }) {
+  function openLightbox(item, { ratio, natural, label, zoomable = true, sheet = false, shown = 0, at = null }) {
     const dialog = document.createElement('dialog')
     dialog.className = `artifact-lightbox${sheet ? ' sheet' : ''}`
     dialog.setAttribute('aria-label', label || '放大檢視')
@@ -239,16 +239,22 @@
     lightbox = dialog
     fit()
     dialog.showModal()
+    // When the fitted size is about what the page already showed (a full-width picture on a phone),
+    // open zoomed in, around the point that was tapped, so the first tap visibly enlarges it.
+    if (zoomable && shown && base < shown * 1.25) {
+      const more = natural && natural > base * 1.05 ? natural / base : 2
+      setScale(Math.min(2.5, more), at?.x, at?.y)
+    }
   }
 
-  function zoomPicture(source) {
+  function zoomPicture(source, at) {
     const image = document.createElement('img')
     image.src = source.currentSrc || source.src
     image.alt = source.alt
     image.draggable = false
     const width = source.naturalWidth || source.width
     const height = source.naturalHeight || source.height
-    openLightbox(image, { ratio: width / (height || 1), natural: width, label: source.alt })
+    openLightbox(image, { ratio: width / (height || 1), natural: width, label: source.alt, shown: source.getBoundingClientRect().width, at })
   }
 
   function zoomDiagram(figure) {
@@ -292,10 +298,12 @@
     }
   }
 
+  let lightboxStyle = null
   addEventListener('DOMContentLoaded', () => {
     const style = document.createElement('style')
     style.textContent = LIGHTBOX_CSS
     document.head.append(style)
+    lightboxStyle = style
     markWideTables()
   })
   // The stylesheet that makes a table scroll may land after DOMContentLoaded, so measure again once it has.
@@ -305,6 +313,17 @@
     clearTimeout(tableTimer)
     tableTimer = setTimeout(markWideTables, 150)
   })
+  // A page that gives a picture (or its parent) a pointer or zoom cursor of its own runs its own click there,
+  // often its own lightbox. Our zoom-in cursor would hide that, so read the cursors without our stylesheet.
+  function pageHandlesClick(image) {
+    if (lightboxStyle) lightboxStyle.disabled = true
+    try {
+      return [image, image.parentElement].some((element) => element && /^(pointer|zoom-in)$/.test(getComputedStyle(element).cursor))
+    } finally {
+      if (lightboxStyle) lightboxStyle.disabled = false
+    }
+  }
+
   addEventListener('click', (event) => {
     if (event.defaultPrevented || event.button !== 0 || lightbox) return
     const target = event.target instanceof Element ? event.target : null
@@ -318,9 +337,9 @@
     if (!image || !image.complete || image.naturalWidth === 0) return
     const rect = image.getBoundingClientRect()
     if (Math.max(rect.width, rect.height) < 64) return
-    if (image.parentElement && getComputedStyle(image.parentElement).cursor === 'pointer') return
+    if (pageHandlesClick(image)) return
     event.preventDefault()
-    zoomPicture(image)
+    zoomPicture(image, { x: event.clientX, y: event.clientY })
   })
   // Keys stay with the open item (the deck turns pages on window keydown); Escape still closes it.
   addEventListener('keydown', (event) => {

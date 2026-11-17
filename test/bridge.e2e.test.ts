@@ -878,13 +878,15 @@ test('hand-written pages zoom their pictures too, except icons, opted-out pictur
 <img id="opt" src="pic.svg" width="300" data-no-zoom>
 <div onclick="document.title='clicked'"><img id="handled" src="pic.svg" width="300"></div>
 <span role="button"><img id="rolebtn" src="pic.svg" width="300"></span>
+<img id="pointer" src="pic.svg" width="300" style="cursor:pointer">
+<style>figure.own img { cursor: zoom-in }</style><figure class="own"><img id="ownzoom" src="pic.svg" width="300"></figure>
 </body>`
   const { id } = store.publish({ title: 'Own', files: { 'index.html': { content: Buffer.from(html) }, 'pic.svg': { content: WIDE_PICTURE } } })
   const viewer = await browser.newPage()
   await viewer.setViewportSize({ width: 1200, height: 800 })
   await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
   const frame = viewer.frameLocator('#frame')
-  for (const skipped of ['#icon', '#opt', '#handled', '#rolebtn']) {
+  for (const skipped of ['#icon', '#opt', '#handled', '#rolebtn', '#pointer', '#ownzoom']) {
     await frame.locator(skipped).click()
     await viewer.waitForTimeout(150)
     assert.equal(await frame.locator('dialog.artifact-lightbox').count(), 0, skipped)
@@ -993,4 +995,60 @@ test('a report page prints from the viewer bar, and a Markdown page offers its s
   await second.frameLocator('#frame').locator('.slide.active').waitFor()
   assert.equal(await second.locator('#print').isHidden(), true)
   await second.close()
+})
+
+test('on a phone the first tap on a full-width picture already shows it larger', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: '手機點圖', files: { 'index.md': { content: Buffer.from('# 圖\n\n![寬圖](pic.svg)\n') }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  const inline = (await frame.locator('img[alt="寬圖"]').boundingBox())!.width
+  await frame.locator('img[alt="寬圖"]').click()
+  const shown = frame.locator('dialog.artifact-lightbox[open] img')
+  await shown.waitFor({ timeout: 5000 })
+  const width = (await shown.boundingBox())!.width
+  assert.ok(width > inline * 1.5, `inline ${inline}, dialog ${width}`)
+  // A tap brings it back to the fitted size.
+  await shown.click({ position: { x: 20, y: 20 } })
+  await frame.locator('dialog.artifact-lightbox:not(.zoomed)[open]').waitFor({ timeout: 3000 })
+  await viewer.close()
+})
+
+test('on a phone the bar stays away at the bottom of a page instead of bouncing', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = `# 長文\n\n${'段落文字。\n\n'.repeat(120)}<div style="min-height:100vh">結尾</div>\n`
+  const { id } = store.publish({ title: '頁尾', files: { 'index.md': { content: Buffer.from(md) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('h1').waitFor()
+  const frame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  for (let y = 400; y <= 20000; y += 600) await frame.evaluate((top) => scrollTo(0, top), y)
+  await frame.evaluate(() => scrollTo(0, document.documentElement.scrollHeight))
+  await viewer.waitForTimeout(1500)
+  const state = async () => ({
+    bar: await viewer.locator('.viewer-bar').evaluate((bar) => Math.round(bar.getBoundingClientRect().bottom)),
+    gap: await frame.evaluate(() => Math.round(document.documentElement.scrollHeight - innerHeight - scrollY))
+  })
+  const first = await state()
+  await viewer.waitForTimeout(1000)
+  const second = await state()
+  assert.ok(first.bar <= 1 && second.bar <= 1, `bar ${first.bar} -> ${second.bar}`)
+  assert.ok(second.gap <= 2, `not at the bottom: ${second.gap}`)
+
+  // A page barely taller than the frame, read to the end in one move: the bar giving its room back
+  // pulls the page up by that much, which must not read as scrolling up.
+  const short = store.publish({ title: '短頁', files: { 'index.html': { content: Buffer.from('<!doctype html><body style="margin:0"><div style="height:calc(100vh + 160px);background:linear-gradient(#eee,#999)"></div></body>') } } })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${short.id}`)
+  await viewer.frameLocator('#frame').locator('div').waitFor()
+  const shortFrame = viewer.frames().find((f) => f.url().includes(`/a/${short.id}/`))!
+  await shortFrame.evaluate(() => scrollTo(0, document.documentElement.scrollHeight))
+  await viewer.waitForTimeout(1500)
+  const bars: number[] = []
+  for (let i = 0; i < 5; i++) {
+    bars.push(await viewer.locator('.viewer-bar').evaluate((bar) => Math.round(bar.getBoundingClientRect().bottom)))
+    await viewer.waitForTimeout(250)
+  }
+  assert.equal(new Set(bars).size, 1, `bar moved: ${bars.join(',')}`)
+  await viewer.close()
 })
