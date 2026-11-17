@@ -1289,3 +1289,37 @@ test('signed in, the owner reads a private page on the public origins under a co
   await top.close()
   await context.close()
 })
+
+test('an MCP client signs in through the browser: passkey sign-in, consent page, back to its loopback with code, state and iss', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  await enrolOwner(page)
+  await page.evaluate(() => fetch('/auth/logout', { method: 'POST', headers: { 'x-artifact-client': 'viewer' } }))
+
+  const callback = `http://127.0.0.1:${SINK_PORT}/callback`
+  const registered = (await (await fetch(`${PUBLIC_APP}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'E2E 客戶端', redirect_uris: [callback] }) })).json()) as { client_id: string }
+  const verifier = 'v'.repeat(64)
+  const challenge = (await import('node:crypto')).createHash('sha256').update(verifier).digest('base64url')
+  // Long states happen (some clients pack JSON in them); the round trip through sign-in must keep it.
+  const state = 's'.repeat(1500)
+  const query = new URLSearchParams({ response_type: 'code', client_id: registered.client_id, redirect_uri: callback, code_challenge: challenge, code_challenge_method: 'S256', state, resource: `${PUBLIC_APP}/mcp`, scope: 'artifacts' })
+  await page.route(`${callback}**`, (route) => route.fulfill({ body: 'back in the client' }))
+
+  await page.goto(`${PUBLIC_APP}/oauth/authorize?${query}`)
+  await page.waitForURL(/\/login\?next=/)
+  await page.locator('#go').click()
+  await page.locator('h1', { hasText: 'E2E 客戶端' }).waitFor({ timeout: 10_000 })
+  assert.match(await page.locator('.auth-card').textContent() ?? '', new RegExp(`127\\.0\\.0\\.1:${SINK_PORT}`))
+  await page.locator('#allow').click()
+  await page.waitForURL((url) => url.href.startsWith(callback), { timeout: 10_000 })
+  const back = new URL(page.url())
+  assert.equal(back.searchParams.get('state'), state)
+  assert.equal(back.searchParams.get('iss'), PUBLIC_APP)
+  const tokens = await fetch(`${PUBLIC_APP}/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, redirect_uri: callback, client_id: registered.client_id, code_verifier: verifier }).toString()
+  })
+  assert.equal(tokens.status, 200)
+  await context.close()
+})
