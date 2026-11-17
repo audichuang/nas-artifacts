@@ -22,8 +22,8 @@ const SCRIPT_HOSTS = 'https://cdnjs.cloudflare.com https://cdn.jsdelivr.net http
  * Own-file sources are scoped to the artifact's path so one artifact cannot load another's files.
  * A top-level navigation has no frame-src to confine it, so it gets no allow-scripts.
  */
-export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, artifactId?: string, topLevel = false): string {
-  const own = artifactId ? `${contentOrigin}/a/${artifactId}/` : ''
+export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, artifactId?: string, topLevel = false, prefix = ''): string {
+  const own = artifactId ? `${contentOrigin}${prefix}/a/${artifactId}/` : ''
   const sources = (...list: string[]) => list.filter(Boolean).join(' ')
   return [
     `sandbox ${topLevel ? '' : 'allow-scripts '}allow-forms allow-modals allow-downloads`,
@@ -44,13 +44,26 @@ export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, 
 const STATIC_ROOT = new URL('../content/', import.meta.url)
 const staticFile = (name: string): string => readFileSync(new URL(name, STATIC_ROOT), 'utf8')
 
+/** Checks a content token (see OwnerAuth) against the artifact it is used for. */
+export type ContentTokens = { verifyContentToken(token: string, id: string): boolean }
+
+/** A request that came in under `/t/<token>`: the token, and the prefix every URL this server builds keeps. */
+type Grant = { token: string; prefix: string }
+type Env = { Bindings: { contentGrant?: Grant } }
+
 /**
  * `publicOnly`: the internet-facing listener. It serves only artifacts marked public (and without
  * capabilities), and nothing it sends may be cached as public: Cloudflare's edge and the browser would
- * otherwise keep handing out a page after it went private again.
+ * otherwise keep handing out a page after it went private again. With `contentTokens`, it also serves any
+ * version of a private artifact under `/t/<token>/a/<id>/…` while the owner's token for that id is valid.
  */
-export function createContentServer(store: ArtifactStore, config: Config, options: { renderVersion?: string; publicOnly?: boolean } = {}): Hono {
-  const app = new Hono()
+export function createContentServer(
+  store: ArtifactStore,
+  config: Config,
+  options: { renderVersion?: string; publicOnly?: boolean; contentTokens?: ContentTokens } = {}
+): Hono<Env> {
+  const app = new Hono<Env>()
+  const prefixOf = (c: { env: Env['Bindings'] | undefined }): string => c.env?.contentGrant?.prefix ?? ''
   const bridge = staticFile('bridge.js').replace('__APP_ORIGIN__', JSON.stringify(config.appOrigin))
   const markdownCss = staticFile('markdown.css')
   const deck: DeckAssets = { css: staticFile('deck.css'), js: staticFile('deck.js') }
@@ -64,6 +77,17 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     .digest('hex')
     .slice(0, 16)
 
+  // The token rides in the path so a page's relative links keep it; the routes below see the path without it.
+  if (options.publicOnly && options.contentTokens) {
+    app.all('/t/:token/*', (c) => {
+      const url = new URL(c.req.url)
+      const match = /^\/t\/([^/]+)(\/a\/[^/]+\/.*)$/.exec(url.pathname)
+      if (!match) return c.text('Not found', 404)
+      const inner = new Request(new URL(match[2] + url.search, url), c.req.raw)
+      return app.fetch(inner, { ...c.env, contentGrant: { token: match[1], prefix: `/t/${match[1]}` } })
+    })
+  }
+
   app.use('*', async (c, next) => {
     const id = /^\/a\/([A-Za-z0-9_-]+)\//.exec(new URL(c.req.url).pathname)?.[1]
     await next()
@@ -72,7 +96,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
       c.header('X-Robots-Tag', 'noindex, nofollow')
     }
     const topLevel = c.req.header('sec-fetch-dest') === 'document'
-    c.header('Content-Security-Policy', contentSecurityPolicy(config.appOrigin, config.contentOrigin, id, topLevel))
+    c.header('Content-Security-Policy', contentSecurityPolicy(config.appOrigin, config.contentOrigin, id, topLevel, prefixOf(c)))
     c.header('Vary', 'Sec-Fetch-Dest', { append: true })
     c.header('X-Content-Type-Options', 'nosniff')
     c.header('Referrer-Policy', 'no-referrer')
@@ -82,7 +106,17 @@ export function createContentServer(store: ArtifactStore, config: Config, option
   // lets through only the current version: a page made public shares what it is now, not its drafts.
   if (options.publicOnly) {
     app.use('/a/:id/*', async (c, next) => {
+      // The gate reads the version from the raw path; routes match the decoded one. Ids, "v" and version
+      // numbers never need encoding, so an encoded one there is refused rather than read two ways.
+      if (new URL(c.req.url).pathname.split('/').slice(1, 5).some((segment) => segment.includes('%'))) return c.text('Not found', 404)
       const id = c.req.param('id')
+      const grant = c.env?.contentGrant
+      // The owner's token opens every version of the one artifact it was issued for.
+      if (grant && options.contentTokens?.verifyContentToken(grant.token, id)) {
+        await next()
+        return
+      }
+      if (grant) return c.text('Not found', 404)
       const version = /^\/a\/[^/]+\/v\/([^/]+)/.exec(new URL(c.req.url).pathname)?.[1]
       const summary = store.isPublic(id) ? store.requireSummary(id) : null
       if (!summary || (version !== undefined && version !== String(summary.currentVersion))) {
@@ -178,7 +212,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
       return c.text('Not found', 404)
     }
     const row = store.requireVersion(id, version)
-    return c.redirect(`/a/${id}/v/${version}/${row.entry.includes('/') ? encodePath(row.entry) : ''}`, 302)
+    return c.redirect(`${prefixOf(c)}/a/${id}/v/${version}/${row.entry.includes('/') ? encodePath(row.entry) : ''}`, 302)
   })
 
   app.get('/a/:id/v/:version/*', (c) => {
@@ -192,7 +226,7 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     const row = store.requireVersion(id, version)
     if (encoded === '') {
       return row.entry.includes('/')
-        ? c.redirect(`${prefix}${encodePath(row.entry)}`, 302)
+        ? c.redirect(`${prefixOf(c)}${prefix}${encodePath(row.entry)}`, 302)
         : serveEntry(row.entry)
     }
     return serveEntry(decodeRequestPath(encoded))

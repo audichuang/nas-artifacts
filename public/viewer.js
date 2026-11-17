@@ -81,8 +81,18 @@ async function api(path, options = {}) {
 
 // Versions
 
+// On the public app the owner's frame reads files under a short-lived content token: <content>/t/<token>.
+let contentBase = data.contentBase || data.contentOrigin
+const TOKEN_PREFIX = /^\/t\/[^/]+(?=\/a\/)/
+
+// Asset URLs come without a token; under one, they get the frame's own, the one its CSP allows.
+function withFrameToken(asset) {
+  const prefix = `${data.contentOrigin}/a/`
+  return asset.url.startsWith(prefix) ? { ...asset, url: `${contentBase}/a/${asset.url.slice(prefix.length)}` } : asset
+}
+
 function contentUrl(v, path) {
-  const base = `${data.contentOrigin}/a/${id}/v/${v}/`
+  const base = `${contentBase}/a/${id}/v/${v}/`
   return path ? base + path.split('/').map(encodeURIComponent).join('/') : base
 }
 
@@ -165,7 +175,7 @@ const currentEntry = () => artifact.versions.find((row) => row.version === versi
 // The file a page URL in the frame names, for the version on show; undefined for anything else.
 function framePath(pathname) {
   if (typeof pathname !== 'string' || pathname.length > 4096) return undefined
-  const match = /^\/a\/([^/]+)\/v\/(\d+)\/(.*)$/.exec(pathname)
+  const match = /^\/a\/([^/]+)\/v\/(\d+)\/(.*)$/.exec(pathname.replace(TOKEN_PREFIX, ''))
   if (!match || match[1] !== id || Number(match[2]) !== version) return undefined
   try {
     const path = match[3].split('/').map(decodeURIComponent).join('/')
@@ -298,13 +308,13 @@ const methods = {
     capability('db')
     return (await api('/db/_batch', { method: 'POST', json: { ops } })).results
   },
-  'uploads.put': ({ name, bytes }) => {
+  'uploads.put': async ({ name, bytes }) => {
     capability('uploads')
-    return api(`/assets?name=${encodeURIComponent(name)}`, { method: 'POST', body: bytes })
+    return withFrameToken(await api(`/assets?name=${encodeURIComponent(name)}`, { method: 'POST', body: bytes }))
   },
   'uploads.list': async () => {
     capability('uploads')
-    return (await api('/assets')).assets.filter((asset) => asset.source === 'page')
+    return (await api('/assets')).assets.filter((asset) => asset.source === 'page').map(withFrameToken)
   }
 }
 
@@ -833,6 +843,7 @@ document.getElementById('copy').addEventListener('click', async () => {
   }
 })
 
+document.getElementById('menu-delete').hidden = data.canDelete === false
 document.getElementById('menu-delete').addEventListener('click', async () => {
   if (!confirm(`永久刪除「${artifact.title}」與它所有的版本、資料與留言?`)) return
   let token = storage.get('artifacts.publisherToken')
@@ -959,4 +970,24 @@ if (storage.get('artifacts.commentsOpen') === '1') {
 }
 show(version, data.path, validHash(location.hash))
 loadComments().catch(() => {})
+
+// Before the content token runs out, take a new one and reopen the frame where the reader is.
+let contentExpiresAt = data.contentExpiresAt
+async function renewContentToken() {
+  if (!contentExpiresAt || Date.now() < contentExpiresAt - 30 * 60_000) return
+  try {
+    const grant = await api('/content-token')
+    contentBase = grant.contentBase
+    contentExpiresAt = grant.expiresAt
+    await showKeepingPlace(version)
+  } catch (error) {
+    if (error.status === 404) toast('登入已過期,請重新整理頁面登入', { label: '登入', run: () => { location.href = `/login?next=${encodeURIComponent(location.pathname + location.search)}` } })
+  }
+}
+if (contentExpiresAt) {
+  setInterval(renewContentToken, 60_000)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') renewContentToken()
+  })
+}
 connectEvents()
