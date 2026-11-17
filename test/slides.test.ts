@@ -255,11 +255,15 @@ describe('exporting decks', () => {
     const response = await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)
     assert.equal(response.status, 200)
     const entries = unzip(Buffer.from(await response.arrayBuffer()))
-    // Nothing XML 1.0 cannot hold. Marked turns the &#xD800; reference into U+FFFD, as CommonMark asks; that one is valid XML.
-    for (const [name, xml] of entries) {
-      if (name.endsWith('.xml')) assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]|[\ud800-\udfff]/u, name)
-    }
+    // Nothing XML 1.0 cannot hold. unzip decodes UTF-8, so a stray surrogate would show up as U+FFFD; the one
+    // U+FFFD allowed is marked's own reading of &#xD800; (CommonMark asks for it), in place of that reference.
     const slide = entries.get('ppt/slides/slide1.xml')!
+    for (const [name, xml] of entries) {
+      if (!name.endsWith('.xml')) continue
+      assert.doesNotMatch(xml, /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/, name)
+      assert.equal(xml.split('\ufffd').length - 1, xml === slide ? 1 : 0, name)
+    }
+    assert.match(slide, /<a:t>bell \ufffd esc<\/a:t>/)
     assert.equal((slide.match(/<a:hlinkClick /g) ?? []).length, 1)
   })
 
