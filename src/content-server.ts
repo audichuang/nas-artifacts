@@ -44,7 +44,12 @@ export function contentSecurityPolicy(appOrigin: string, contentOrigin: string, 
 const STATIC_ROOT = new URL('../content/', import.meta.url)
 const staticFile = (name: string): string => readFileSync(new URL(name, STATIC_ROOT), 'utf8')
 
-export function createContentServer(store: ArtifactStore, config: Config, options: { renderVersion?: string } = {}): Hono {
+/**
+ * `publicOnly`: the internet-facing listener. It serves only artifacts marked public (and without
+ * capabilities), and nothing it sends may be cached as public: Cloudflare's edge and the browser would
+ * otherwise keep handing out a page after it went private again.
+ */
+export function createContentServer(store: ArtifactStore, config: Config, options: { renderVersion?: string; publicOnly?: boolean } = {}): Hono {
   const app = new Hono()
   const bridge = staticFile('bridge.js').replace('__APP_ORIGIN__', JSON.stringify(config.appOrigin))
   const markdownCss = staticFile('markdown.css')
@@ -60,14 +65,37 @@ export function createContentServer(store: ArtifactStore, config: Config, option
     .slice(0, 16)
 
   app.use('*', async (c, next) => {
-    await next()
     const id = /^\/a\/([A-Za-z0-9_-]+)\//.exec(new URL(c.req.url).pathname)?.[1]
+    await next()
+    if (options.publicOnly) {
+      c.header('Cache-Control', 'private, no-cache')
+      c.header('X-Robots-Tag', 'noindex, nofollow')
+    }
     const topLevel = c.req.header('sec-fetch-dest') === 'document'
     c.header('Content-Security-Policy', contentSecurityPolicy(config.appOrigin, config.contentOrigin, id, topLevel))
     c.header('Vary', 'Sec-Fetch-Dest', { append: true })
     c.header('X-Content-Type-Options', 'nosniff')
     c.header('Referrer-Policy', 'no-referrer')
   })
+
+  // The public gate reads the id the routes below read (decoded), so an encoded id cannot pass it, and it
+  // lets through only the current version: a page made public shares what it is now, not its drafts.
+  if (options.publicOnly) {
+    app.use('/a/:id/*', async (c, next) => {
+      const id = c.req.param('id')
+      const version = /^\/a\/[^/]+\/v\/([^/]+)/.exec(new URL(c.req.url).pathname)?.[1]
+      const summary = store.isPublic(id) ? store.requireSummary(id) : null
+      if (!summary || (version !== undefined && version !== String(summary.currentVersion))) {
+        return c.text('Not found', 404)
+      }
+      await next()
+    })
+    app.all('/a/*', async (c, next) => {
+      // Anything under /a/ the gate above did not see (no id segment) is not served either.
+      if (!/^\/a\/[^/]+\//.test(new URL(c.req.url).pathname)) return c.text('Not found', 404)
+      await next()
+    })
+  }
 
   app.get(BRIDGE_PATH, (c) => {
     c.header('Cache-Control', 'no-cache')

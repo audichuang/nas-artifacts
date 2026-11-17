@@ -24,6 +24,8 @@ A=<this-skill-directory>/scripts/artifact.mjs
 node "$A" publish <file-or-dir> --icon 📊 --description "<one sentence>" [--cap db,uploads] [--label "<what changed>"]
 ```
 
+- **Private by default.** Only the user's own devices on the tailnet can open a new artifact. Pass `--public` only when the user asks for a page others can open: anyone with the link may then view it, read-only, at the `public:` URL the command prints (no comments, no capabilities, nothing about which machine or folder it came from). `node "$A" visibility <id> public|private` changes it later; a publish without either flag keeps the current setting. A page that declares capabilities cannot be public. Give the user the public URL only for a public artifact.
+
 - A directory publishes every file in it. The entry is the first of `index.html`, `index.md`, `index.slides.md`, `README.md`; else the only HTML/Markdown page (Office files beside it stay attachments); else the only Office file. Otherwise pass `--entry <path>`. Relative links between files work.
 - The CLI remembers the version and file hashes for each local path. Republishing that path sends only your changed files, based on the version you last saw. Files you deleted locally are removed remotely.
 - **Conflict:** if someone else published in between, publish exits 1, lists the files changed remotely and uploads nothing. Then run `node "$A" checkout <id> <newdir>`, merge your edits there, and publish from `<newdir>`. `--force` overwrites the remote changes instead; it still sends only your changed files, so use it only when your version should win.

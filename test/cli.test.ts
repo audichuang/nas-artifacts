@@ -41,7 +41,8 @@ before(async () => {
     contentPort: 0,
     appOrigin: 'http://app.test',
     contentOrigin: 'http://content.test',
-    tokens: [TOKEN]
+    tokens: [TOKEN],
+    public: { appPort: 0, contentPort: 0, appOrigin: 'https://pub.test', contentOrigin: 'https://pub-content.test' }
   })
   await new Promise<void>((resolve) => {
     server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info) => {
@@ -55,6 +56,82 @@ after(() => {
   server.close()
   store.close()
   rmSync(dir, { recursive: true, force: true })
+})
+
+describe('visibility', () => {
+  test('publish --public prints the public URL; visibility flips it; list marks public ones', async () => {
+    const folder = mkdtempSync(join(dir, 'pub-'))
+    writeFileSync(join(folder, 'index.md'), '# 公開\n')
+    const first = await cli(['publish', folder, '--public'])
+    assert.equal(first.code, 0, first.stderr)
+    const id = /\/a\/([A-Za-z0-9_-]+)/.exec(first.stdout)![1]
+    assert.match(first.stdout, new RegExp(`public: https://pub\\.test/a/${id}`))
+    assert.equal(store.requireSummary(id).visibility, 'public')
+
+    // A later publish without the flag leaves it as it is.
+    writeFileSync(join(folder, 'index.md'), '# 公開 v2\n')
+    const again = await cli(['publish', folder])
+    assert.equal(again.code, 0, again.stderr)
+    assert.equal(store.requireSummary(id).visibility, 'public')
+    assert.match((await cli(['list'])).stdout, new RegExp(`${id}.*\\[public\\]`))
+
+    const flip = await cli(['visibility', id, 'private'])
+    assert.equal(flip.code, 0, flip.stderr)
+    assert.match(flip.stdout, /private/)
+    assert.equal(store.requireSummary(id).visibility, 'private')
+    assert.doesNotMatch((await cli(['list'])).stdout, new RegExp(`${id}.*\\[public\\]`))
+
+    const bad = await cli(['visibility', id, 'everyone'])
+    assert.notEqual(bad.code, 0)
+    const caps = page()
+    store.update(caps.id, { capabilities: ['db'], files: {}, baseVersion: 1 })
+    const refused = await cli(['visibility', caps.id, 'public'])
+    assert.notEqual(refused.code, 0)
+    assert.match(refused.stderr, /capabilities|read-only/)
+  })
+})
+
+describe('visibility with a publish that cannot be public', () => {
+  test('--cap with --public stops before publishing anything', async () => {
+    const folder = mkdtempSync(join(dir, 'capub-'))
+    writeFileSync(join(folder, 'index.html'), '<p>x</p>')
+    const before = store.list().total
+    const run = await cli(['publish', folder, '--cap', 'db', '--public'])
+    assert.notEqual(run.code, 0)
+    assert.match(run.stderr, /--public/)
+    assert.equal(store.list().total, before)
+  })
+
+  test('a refused visibility change still remembers the version just published', async () => {
+    const folder = mkdtempSync(join(dir, 'refused-'))
+    writeFileSync(join(folder, 'index.html'), '<p>x</p>')
+    const first = await cli(['publish', folder, '--cap', 'db'])
+    assert.equal(first.code, 0, first.stderr)
+    const id = /\/a\/([A-Za-z0-9_-]+)/.exec(first.stdout)![1]
+    writeFileSync(join(folder, 'index.html'), '<p>y</p>')
+    const refused = await cli(['publish', folder, '--public'])
+    assert.notEqual(refused.code, 0)
+    assert.equal(store.requireSummary(id).currentVersion, 2)
+    writeFileSync(join(folder, 'index.html'), '<p>z</p>')
+    const again = await cli(['publish', folder])
+    assert.equal(again.code, 0, again.stderr)
+    assert.match(again.stdout, new RegExp(`/a/${id}`))
+    assert.equal(store.requireSummary(id).currentVersion, 3)
+  })
+
+  test('--private on a public artifact closes it before the new content goes up', async () => {
+    const folder = mkdtempSync(join(dir, 'close-'))
+    writeFileSync(join(folder, 'index.md'), '# a\n')
+    const first = await cli(['publish', folder, '--public'])
+    const id = /\/a\/([A-Za-z0-9_-]+)/.exec(first.stdout)![1]
+    const seen: string[] = []
+    const stop = store.subscribe(id, (change) => { if (change.kind === 'version') seen.push(store.requireSummary(id).visibility) })
+    writeFileSync(join(folder, 'index.md'), '# b\n')
+    const closed = await cli(['publish', folder, '--private'])
+    stop()
+    assert.equal(closed.code, 0, closed.stderr)
+    assert.deepEqual(seen, ['private'])
+  })
 })
 
 describe('comments', () => {
