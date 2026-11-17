@@ -37,7 +37,9 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 ## 可見性
 
 - `artifacts.visibility TEXT NOT NULL DEFAULT 'private'`；既有 artifact 全部是私人，部署後外網看不到任何東西，直到擁有者把某頁設為公開。
-- 設定方式：CLI `publish --public`／`--private`、`artifact visibility <id> public|private`（需 token）；檢視頁對擁有者顯示切換開關。
+- 設定方式：CLI `publish --public`／`--private`、`artifact visibility <id> public|private`（需 token，走 tailnet）；tailnet 檢視頁的 ⋯ 選單也能切換。登入狀態與公開開關不放在手機上會自動收起的工具列。
+- **宣告了互動能力（`--cap db,uploads`）的 artifact 不能設為公開**：那些頁面依賴寫入，公開面又不開放任何寫入。正式站目前 38 個 artifact 中 0 個有宣告。
+- CLI 發佈後印的網址：公開頁印公開網址；階段 2 上線後全部印公開網址（私人頁開啟時會要求登入）。
 - 公開的語意是「整個 artifact 的所有版本」。舊版本也公開，因為 `?v=N` 本來就是同一份東西的歷史；要藏舊內容就 `prune`。
 
 ## 公開面的路由白名單
@@ -46,16 +48,30 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 
 | 路由 | 條件 |
 |---|---|
-| `GET /a/:id`（檢視頁） | artifact 為公開；不顯示留言、釘選、錯誤、刪除、編輯 |
+| `GET /a/:id` | artifact 為公開；回一個**另寫的小型公開檢視頁**（標題、版本選單、iframe、下載原檔），不重用 tailnet 的 `viewer.js` |
 | `GET /static/*`、`/healthz` | 一律 |
-| `GET /api/artifacts/:id`（只回檢視頁需要的欄位） | 公開 |
-| `GET /api/artifacts/:id/events`（只送版本更新） | 公開 |
-| `GET /api/artifacts/:id/files/*`、`/export.pptx` | 公開 |
+| `GET /api/artifacts/:id` | 公開；只回標題、圖示、說明、entry、版本號與版本日期 |
+| `GET /api/artifacts/:id/events` | 公開；只送「有新版本」 |
+| `GET /api/artifacts/:id/files/*` | 公開；下載原檔 |
 | content：`/a/:id/v/:n/*`、`/a/:id/assets/*`、`/_/bridge.js`、`/_/markdown.css` | 公開 |
 
-匿名訪客一律不能寫入：留言、釘選、頁面錯誤回報、`db`、`uploads`、`PUT …/slides`、Office 編輯全部 404。宣告了 `db`／`uploads` 的頁面在公開面以唯讀方式運作（bridge 的寫入回傳「需要登入」）。
+不回給匿名訪客的欄位：發佈機器名與本機資料夾（`source_host`、`source_path`）、留言數、錯誤數、互動能力清單、版本標籤（`--label` 可能寫內部資訊，只顯示版本號與日期）。
 
-不在白名單：`GET /`（圖庫）、`GET /api/artifacts`（列表、搜尋）、comments、errors、diff、assets 列表、所有 token 路由以外的寫入。
+公開面**完全沒有寫入路徑**：留言、釘選、頁面錯誤回報、`db`、`uploads`、`PUT …/slides`、Office 編輯、發佈、更新、刪除、prune 都不掛。發佈仍走 tailnet（所有發佈的機器都在 tailnet 上）。`export.pptx` 也不掛：它是匿名可觸發的伺服器端運算。
+
+不在白名單：`GET /`（圖庫）、`GET /api/artifacts`（列表、搜尋）、comments、errors、diff、assets 列表、export、所有 token 路由。
+
+### 快取：Cloudflare 邊緣不能留住內容
+
+版本檔案現在送 `Cache-Control: public, max-age=31536000, immutable`（`src/content-server.ts` `serveFile`、Office 圖片路由）。經過 Cloudflare 代理時，邊緣會依副檔名快取圖片等靜態檔；頁面改回私人後，邊緣與瀏覽器仍會回舊的公開副本，階段 2 的過期 token 網址也一樣。
+
+- 公開 listener 的所有回應一律 `Cache-Control: private, no-store`（或 `private, max-age=…` 只給瀏覽器），並用 `cf` 對兩個公開 host 設 cache bypass 規則，兩道都做。
+- tailnet listener 維持現狀。
+- 測試：公開頁的圖片取得一次 → 改回私人 → 同網址立刻 404，回應標頭沒有 `public`。
+
+### 每組 listener 各自的 origin
+
+目前只認一組 origin 的地方，公開面都要用公開的那組：bridge.js 內嵌的 `__APP_ORIGIN__`（postMessage 的對象）、content CSP 的 `frame-ancestors`、檢視頁的 `frame-src`、頂層開啟時的轉址、API 回傳的 `url`／`contentUrl`。做法是 content server 與 app server 依 listener 建兩個實例，各自帶自己的 `{ appOrigin, contentOrigin }`，而不是在同一個實例裡看 Host 標頭分支。
 
 擁有者登入後（階段 2），公開面開放和 tailnet 相同的能力；發佈、更新、刪除、prune 仍只認 publish token（CLI）或 MCP 的 OAuth token，瀏覽器 session 不能發佈。
 
@@ -70,8 +86,10 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 | Cloudflare Access | 程式最少 | 依賴第三方；content host 的子資源驗證、MCP OAuth 仍要自己處理 |
 
 - **第一個 passkey 的註冊**：CLI `artifact login-link`（需 publish token）印出 10 分鐘有效的一次性連結，打開後註冊 passkey。之後新增裝置也走這條，或從已登入的裝置新增。
-- **Session**：app host 的 `HttpOnly; Secure; SameSite=Lax` cookie，不設 `Domain`（只回 app host），有效期 30 天，可在檢視頁登出、撤銷全部。
-- **寫入請求**：沿用 `x-artifact-client: viewer` 標頭強制 CORS preflight，外站無法代送。
+- **第一把 passkey 建議在手機上註冊**：之後公司電腦可以用手機掃碼跨裝置登入（不用在公司電腦上存 passkey）。
+- **Session**：cookie 名用 `__Host-` 前綴（強制 `Secure`、`Path=/`、不得設 `Domain`，`audichuang.app` 的其他子網域無法覆寫它），`HttpOnly; SameSite=Lax`，有效期 30 天，可登出、撤銷全部。
+- **寫入請求**：所有靠 cookie 的寫入都要 `x-artifact-client: viewer` 標頭，強制 CORS preflight，同站的其他子網域也無法代送。
+- **速率限制**：優先用 Cloudflare 的速率規則（`cf` 設定，程式最少）。若要在程式裡做，只能信 `CF-Connecting-IP`，而且前提是公開 listener 只有 cloudflared 連得到：artifacts 容器加入 cloudflared 所在的 docker network，公開 port 不發佈到 host。
 
 ### 私人頁的內容怎麼驗證（需先做實驗）
 
@@ -83,9 +101,13 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 - content listener 驗 token 後才回檔案；CSP 的自有檔案範圍改成 `<content>/t/<token>/a/<id>/`，一個 artifact 仍讀不到另一個的檔案。
 - 公開頁不需要 token，路徑不變。
 - token 外流的影響：拿到的人在到期前能看那一份私人頁。頁面本身被 `connect-src 'none'` 擋住，無法主動外送。
-- **實作前先寫 real-Chromium 實驗**，確認 token 路徑在相對連結、`<base>`、CSS `url()`、Office 圖片路由下都能用，再定案。
+- bridge 的錯誤回報會帶檔案網址：存進 `page_errors` 前把 `/t/<token>` 剝掉，token 不落地。
+- 頁面開著超過有效期，延遲載入的圖（xlsx 用 `loading="lazy"`）會失敗：到期前由檢視頁換新 token、重載 frame 並還原閱讀位置（沿用現有的換版還原機制）。
+- **實作前先寫 real-Chromium 實驗（spike）**，確認 token 路徑在相對連結、`<base>`、CSS `url()`、Office 圖片路由、延遲載入、錯誤回報下都能用，並驗證事件串流（SSE）經過 Cloudflare Tunnel 不會被閒置逾時切斷，再定案。
 
 ## 遠端 MCP（階段 3）
+
+先查各目標 client 的遠端 MCP 支援哪種驗證，再決定要不要做 OAuth：若要用的 coding agent（Claude Code、Codex 等）都能對遠端 MCP 帶固定的 `Authorization` 標頭，MCP 只是現有 API 外面一層薄殼，沿用 publish token 即可；OAuth 只有從 claude.ai 網頁或手機 App 連線時才需要。
 
 - app 新增 `POST /mcp`（MCP Streamable HTTP）。工具：`publish`（檔案內容以 base64 傳）、`update`（帶 `baseVersion`，衝突回 409 與變更檔清單，和 CLI 同一套契約）、`list`、`read`、`comments`、`reply`、`set_visibility`、`delete`。
 - 授權：OAuth 2.1 + PKCE，這個 app 自己當 authorization server，支援動態註冊（Claude、Codex 連 MCP 時需要）。授權頁要求 passkey 登入，擁有者按「允許」後發 access token（1 小時）與 refresh token；可在設定頁撤銷。
@@ -101,10 +123,12 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
 ## 資料遷移與回滾
 
 - 新欄位 `visibility` 可預設、舊 image 不讀它；新表 `passkeys`、`sessions`、`oauth_clients`、`oauth_tokens` 只增不改。回滾到舊 image：公開 listener 消失、外網全部斷，tailnet 照常。
-- nas-ops：compose 加兩個 port（只綁 cloudflared 會連的位址）、`PUBLIC_APP_ORIGIN`、`PUBLIC_CONTENT_ORIGIN`、內容 token 的簽章金鑰（0400 檔案，與 publish token 同樣管理）；Cloudflare Tunnel 加兩條 ingress。
+- Cloudflare Tunnel `ttnas` 也服務 learning 與 ads.parallux.uk。改 ingress 前先用 `cf` 讀出現有設定並存檔，改完確認那兩個服務仍可連，再加新的 host。
+- nas-ops：compose 讓 artifacts 加入 cloudflared 的 docker network（公開 port 不發佈到 host）、`PUBLIC_APP_ORIGIN`、`PUBLIC_CONTENT_ORIGIN`、內容 token 的簽章金鑰（0400 檔案，與 publish token 同樣管理）；Cloudflare Tunnel 加兩條 ingress。
 
 ## 待決定
 
 1. ~~公開網址用哪兩個 host~~：已定 `artifacts.audichuang.app`、`artifacts-content.audichuang.app`。
 2. 階段 1 先上，還是三階段做完再一起上。
 3. 外網的私人頁是否也要能留言（擁有者登入後；建議可以，和 tailnet 相同）。
+4. 是否需要從 claude.ai 網頁或手機發佈：需要才做 OAuth，否則階段 3 只是帶 token 的 MCP。
