@@ -166,6 +166,15 @@ function framePath(pathname) {
   }
 }
 
+// Phones: reading down slides the bar away, scrolling up (or reaching the top) brings it back. Panels keep it.
+const phone = matchMedia('(max-width: 720px)')
+function slideBar(delta, scrollY) {
+  const keep = !phone.matches || scrollY < 80 || !commentsPanel.hidden || !editorPanel.hidden
+  if (keep || delta < -24) document.body.classList.remove('bar-away')
+  else if (delta > 24) document.body.classList.add('bar-away')
+}
+phone.addEventListener('change', () => document.body.classList.remove('bar-away'))
+
 // The page is untrusted: its report only picks which of this version's files the address bar names.
 function onPlaceReport(report) {
   const path = framePath(report.path)
@@ -173,6 +182,7 @@ function onPlaceReport(report) {
   const next = path === currentEntry() ? null : path
   const hash = validHash(report.hash)
   const moved = next !== place.path || hash !== place.hash
+  slideBar(next === place.path ? report.scrollY - place.scrollY : 0, report.scrollY)
   place = { path: next, hash, scrollY: Math.max(0, report.scrollY) }
   if (moved) {
     syncUrl()

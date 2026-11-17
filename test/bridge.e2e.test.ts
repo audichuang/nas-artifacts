@@ -816,7 +816,7 @@ test('PPTX editing has a separate trusted page while artifact frames cannot crea
 
 const WIDE_PICTURE = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1200"><rect width="2400" height="1200" fill="#4a7"/></svg>')
 
-test('clicking a picture on a rendered page opens it large in a dialog; links and hand-written pages keep their clicks', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+test('clicking a picture opens it large in a dialog; pictures in links keep their clicks', { skip: !chromiumPath && 'no Chromium found' }, async () => {
   const md = '# 圖\n\n![大圖](pic.svg)\n\n[![連結圖](pic.svg)](other.md)\n'
   const { id } = store.publish({ title: 'Pictures', files: { 'index.md': { content: Buffer.from(md) }, 'other.md': { content: Buffer.from('# 另一頁\n') }, 'pic.svg': { content: WIDE_PICTURE } } })
   const viewer = await browser.newPage()
@@ -831,8 +831,28 @@ test('clicking a picture on a rendered page opens it large in a dialog; links an
   const fitted = await dialog.locator('img').boundingBox()
   assert.ok(fitted!.width <= 1200 && fitted!.height <= 800, JSON.stringify(fitted))
   await dialog.locator('img').click()
-  await frame.locator('dialog.artifact-lightbox.actual[open]').waitFor()
+  await frame.locator('dialog.artifact-lightbox.zoomed[open]').waitFor()
   assert.equal(Math.round((await dialog.locator('img').boundingBox())!.width), 2400)
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  // Reopen; two fingers spreading apart zoom in, a trackpad pinch (ctrl + wheel) zooms back out.
+  await frame.locator('img[alt="大圖"]').click()
+  await dialog.waitFor()
+  const before = (await dialog.locator('img').boundingBox())!.width
+  await dialog.evaluate((d) => {
+    const fire = (type: string, id: number, x: number) => d.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: 'touch', clientX: x, clientY: 300, bubbles: true }))
+    fire('pointerdown', 1, 500); fire('pointerdown', 2, 600)
+    fire('pointermove', 1, 400); fire('pointermove', 2, 700)
+    fire('pointerup', 1, 400); fire('pointerup', 2, 700)
+  })
+  const pinched = (await dialog.locator('img').boundingBox())!.width
+  assert.ok(pinched > before * 2.5, `${before} -> ${pinched}`)
+  await viewer.mouse.move(600, 400)
+  await viewer.keyboard.down('Control')
+  await viewer.mouse.wheel(0, 400)
+  await viewer.keyboard.up('Control')
+  await viewer.waitForTimeout(100)
+  assert.ok((await dialog.locator('img').boundingBox())!.width < pinched, 'ctrl+wheel zooms out')
   await viewer.keyboard.press('Escape')
   await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
   // Reopen, then close by clicking outside the picture.
@@ -848,15 +868,57 @@ test('clicking a picture on a rendered page opens it large in a dialog; links an
   assert.equal(await frame.locator('dialog.artifact-lightbox[open]').count(), 0)
   await viewer.close()
 
-  // A page the agent wrote itself decides what its pictures do.
-  const own = store.publish({ title: 'Own', files: { 'index.html': { content: Buffer.from('<!doctype html><body><img id="p" src="pic.svg" width="300"></body>') }, 'pic.svg': { content: WIDE_PICTURE } } })
-  const second = await browser.newPage()
-  await second.goto(`http://localhost:${APP_PORT}/a/${own.id}`)
-  const ownFrame = second.frameLocator('#frame')
-  await ownFrame.locator('#p').click()
-  await second.waitForTimeout(300)
-  assert.equal(await ownFrame.locator('dialog.artifact-lightbox').count(), 0)
-  await second.close()
+  await viewer.close()
+})
+
+test('hand-written pages zoom their pictures too, except icons, opted-out pictures and pictures that do something', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const html = `<!doctype html><body style="margin:0">
+<img id="shot" src="pic.svg" width="300">
+<img id="icon" src="pic.svg" width="24" height="24">
+<img id="opt" src="pic.svg" width="300" data-no-zoom>
+<div onclick="document.title='clicked'"><img id="handled" src="pic.svg" width="300"></div>
+<span role="button"><img id="rolebtn" src="pic.svg" width="300"></span>
+</body>`
+  const { id } = store.publish({ title: 'Own', files: { 'index.html': { content: Buffer.from(html) }, 'pic.svg': { content: WIDE_PICTURE } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  for (const skipped of ['#icon', '#opt', '#handled', '#rolebtn']) {
+    await frame.locator(skipped).click()
+    await viewer.waitForTimeout(150)
+    assert.equal(await frame.locator('dialog.artifact-lightbox').count(), 0, skipped)
+  }
+  await frame.locator('#shot').click()
+  await frame.locator('dialog.artifact-lightbox[open] img').waitFor({ timeout: 5000 })
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  await viewer.close()
+})
+
+test('mermaid diagrams and wide tables open large too', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const columns = Array.from({ length: 14 }, (_, i) => `欄位${i}`)
+  const table = `| ${columns.join(' | ')} |\n|${columns.map(() => '---').join('|')}|\n| ${columns.map((_, i) => `value-${i}-0123456789`).join(' | ')} |\n`
+  const md = `# 圖表\n\n\`\`\`mermaid\nflowchart LR\n  A[寫檔] --> B[發布]\n\`\`\`\n\n${table}\n| 短 | 表 |\n|---|---|\n| a | b |\n`
+  const { id } = store.publish({ title: 'Diagram zoom', files: { 'index.md': { content: Buffer.from(md) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 800, height: 700 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('figure.diagram svg').click()
+  const dialog = frame.locator('dialog.artifact-lightbox[open]')
+  await dialog.locator('svg', { hasText: '寫檔' }).waitFor({ timeout: 5000 })
+  // Still themed: the node fill resolves through the page's colour variables.
+  assert.notEqual(await dialog.locator('svg rect').first().evaluate((r) => getComputedStyle(r).fill), 'rgb(0, 0, 0)')
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  // Only a table wider than the page gets the button.
+  assert.equal(await frame.locator('.table-zoom:visible').count(), 1)
+  await frame.locator('.table-zoom:visible').click()
+  await dialog.locator('table th', { hasText: '欄位13' }).waitFor({ timeout: 5000 })
+  await viewer.keyboard.press('Escape')
+  await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
+  await viewer.close()
 })
 
 test('a picture opened large on a slide holds the deck still until it closes', { skip: !chromiumPath && 'no Chromium found' }, async () => {
@@ -874,5 +936,36 @@ test('a picture opened large on a slide holds the deck still until it closes', {
   await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
   await viewer.keyboard.press('ArrowRight')
   await frame.locator('.slide.active#slide-2').waitFor()
+  await viewer.close()
+})
+
+test('on a phone the viewer bar slides away while reading down and comes back on scrolling up', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const md = `# 長文\n\n| 項目 | 內容 |\n|---|---|\n| 受測版本 | ${'很長的說明文字'.repeat(8)} |\n\n${'段落文字。\n\n'.repeat(150)}`
+  const { id } = store.publish({ title: '手機閱讀', files: { 'index.md': { content: Buffer.from(md) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const pageFrame = async () => { await viewer.frameLocator('#frame').locator('h1').waitFor(); return viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))! }
+  const frame = await pageFrame()
+  // A short label column keeps its words on one line instead of one character per line.
+  const lines = await frame.locator('td', { hasText: '受測版本' }).evaluate((td) => {
+    const range = document.createRange()
+    range.selectNodeContents(td)
+    return new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size
+  })
+  assert.equal(lines, 1, 'label cell lines')
+  const barTop = () => viewer.locator('.viewer-bar').evaluate((bar) => bar.getBoundingClientRect().bottom)
+  assert.ok((await barTop()) > 40)
+  await frame.evaluate(() => scrollTo(0, 1500))
+  await viewer.waitForFunction(() => document.querySelector('.viewer-bar')!.getBoundingClientRect().bottom <= 1, null, { timeout: 3000 })
+  // The frame takes the room the bar gave up.
+  assert.ok((await viewer.locator('#frame').boundingBox())!.height > 740)
+  await frame.evaluate(() => scrollTo(0, 1200))
+  await viewer.waitForFunction(() => document.querySelector('.viewer-bar')!.getBoundingClientRect().bottom > 40, null, { timeout: 3000 })
+  // Wide screens keep the bar where it is.
+  await viewer.setViewportSize({ width: 1200, height: 800 })
+  await frame.evaluate(() => scrollTo(0, 3000))
+  await viewer.waitForTimeout(600)
+  assert.ok((await barTop()) > 40)
   await viewer.close()
 })

@@ -116,67 +116,204 @@
     addEventListener('scroll', () => { reportTimer ??= setTimeout(reportPlace, 250) }, { passive: true })
   }
 
-  // Pictures on the pages drawn here (Markdown, slides, Word, Excel, PowerPoint) open large on a click.
-  // Hand-written pages are left alone: their pictures may already do something when clicked.
-  const ZOOMABLE = '.markdown-body img, .slide-inner img, .pp-pic img, .dx-img, .xl-pic, .xl-cellpic'
+  // Pictures, Mermaid diagrams and wide Markdown tables open large on a click, on every page. A picture is
+  // left alone when the page already gives it a job (inside a link or button, an onclick or role=button,
+  // a pointer cursor on its parent), when it is icon-sized, or when it carries data-no-zoom.
+  const SKIP = 'a[href], button, label, summary, select, [onclick], [role="button"], [data-no-zoom], body.overview'
   const LIGHTBOX_CSS = `
-.artifact-lightbox { box-sizing: border-box; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; overflow: auto; }
+.artifact-lightbox { box-sizing: border-box; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; overflow: auto; overscroll-behavior: contain; touch-action: pan-x pan-y; }
 .artifact-lightbox[open] { display: grid; place-items: center; }
-.artifact-lightbox::backdrop { background: rgba(0, 0, 0, 0.82); }
-.artifact-lightbox img { display: block; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); width: auto; height: auto; object-fit: contain; background: #fff; cursor: zoom-in; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5); }
-.artifact-lightbox.actual[open] { place-items: start; }
-.artifact-lightbox.actual img { max-width: none; max-height: none; margin: 16px; cursor: zoom-out; }
-.artifact-lightbox button { position: fixed; top: 10px; right: 12px; width: 36px; height: 36px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; font: 22px/36px system-ui, sans-serif; cursor: pointer; }
-${ZOOMABLE} { cursor: zoom-in; }
-a[href] :is(${ZOOMABLE}), button :is(${ZOOMABLE}), label :is(${ZOOMABLE}), body.overview .slide-inner img, body.overview .pp-pic img { cursor: inherit; }`
+.artifact-lightbox::backdrop { background: rgba(0, 0, 0, 0.85); }
+.artifact-lightbox.zoomed[open], .artifact-lightbox.sheet[open] { place-items: start; }
+.artifact-lightbox .lb-item { display: block; box-sizing: border-box; margin: 16px; max-width: none; max-height: none; height: auto; cursor: zoom-in; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5); user-select: none; -webkit-user-drag: none; }
+.artifact-lightbox img.lb-item { background: #fff; }
+.artifact-lightbox.zoomed .lb-item { cursor: zoom-out; }
+.artifact-lightbox .lb-sheet { box-sizing: border-box; margin: 16px; padding: 16px; max-width: none; background: var(--bg, #fff); color: var(--text, #1f2328); border-radius: 8px; cursor: auto; user-select: text; }
+.artifact-lightbox .lb-sheet table { display: table; overflow: visible; }
+.artifact-lightbox .lb-sheet svg { display: block; width: 100%; height: auto; max-width: none; }
+.artifact-lightbox .lb-close { position: fixed; top: 10px; right: 12px; z-index: 1; width: 44px; height: 44px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.6); color: #fff; font: 26px/44px system-ui, sans-serif; cursor: pointer; }
+:where(img:not([data-no-zoom])), :where(.markdown-body .diagram svg) { cursor: zoom-in; }
+:where(a[href], button, label, [onclick], [role="button"]) img, body.overview :is(img, .diagram svg) { cursor: inherit; }
+.table-zoom { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 6px; padding: 6px 10px; min-height: 32px; border: 1px solid var(--border, #d1d9e0); border-radius: 6px; background: var(--surface, #f6f8fa); color: var(--text, #1f2328); font: 13px system-ui, sans-serif; cursor: pointer; }
+.table-zoom[hidden] { display: none; }
+@media print { .table-zoom { display: none !important; } }`
   let lightbox = null
 
-  function openLightbox(source) {
+  /**
+   * Shows `item` over the page. A zoomable item (picture, diagram) starts fitted to the frame and zooms
+   * with a click, double-tap, pinch or ctrl/⌘-wheel (a trackpad pinch); the dialog scrolls to pan.
+   */
+  function openLightbox(item, { ratio, natural, label, zoomable = true, sheet = false }) {
     const dialog = document.createElement('dialog')
-    dialog.className = 'artifact-lightbox'
-    dialog.setAttribute('aria-label', source.alt || '圖片')
-    const image = document.createElement('img')
-    image.src = source.currentSrc || source.src
-    image.alt = source.alt
+    dialog.className = `artifact-lightbox${sheet ? ' sheet' : ''}`
+    dialog.setAttribute('aria-label', label || '放大檢視')
+    item.classList.add('lb-item')
     const close = document.createElement('button')
     close.type = 'button'
+    close.className = 'lb-close'
     close.textContent = '×'
     close.setAttribute('aria-label', '關閉')
-    dialog.append(image, close)
-    // Fitted first; a click shows a picture that was shrunk at its own size, scrollable.
-    image.addEventListener('click', () => {
-      if (dialog.classList.contains('actual') || image.naturalWidth > image.width + 1 || image.naturalHeight > image.height + 1) {
-        dialog.classList.toggle('actual')
-      } else {
-        dialog.close()
+    dialog.append(item, close)
+
+    let base = 0
+    let scale = 1
+    const maxScale = () => Math.max(4, (natural || 0) / base)
+    function setScale(next, clientX = innerWidth / 2, clientY = innerHeight / 2) {
+      if (!zoomable || !base) return
+      const before = item.getBoundingClientRect()
+      const fx = before.width ? (clientX - before.left) / before.width : 0.5
+      const fy = before.height ? (clientY - before.top) / before.height : 0.5
+      scale = Math.min(maxScale(), Math.max(1, next))
+      item.style.width = `${Math.round(base * scale)}px`
+      dialog.classList.toggle('zoomed', scale > 1.01)
+      // Keep the point under the finger or cursor where it was.
+      const after = item.getBoundingClientRect()
+      dialog.scrollLeft += after.left + fx * after.width - clientX
+      dialog.scrollTop += after.top + fy * after.height - clientY
+    }
+    function fit() {
+      if (!zoomable) return
+      const room = { w: innerWidth - 32, h: innerHeight - 32 }
+      base = Math.max(1, Math.min(room.w, room.h * ratio, natural || Infinity))
+      item.style.width = `${Math.round(base * scale)}px`
+    }
+
+    // A click zooms a fitted item to its own size (or 2x when it already fits), and back.
+    let lastTap = 0
+    item.addEventListener('click', (event) => {
+      if (!zoomable) return
+      event.stopPropagation()
+      if (Date.now() - lastTap < 350) return
+      lastTap = Date.now()
+      if (scale > 1.01) setScale(1, event.clientX, event.clientY)
+      else setScale(natural && natural > base * 1.05 ? natural / base : 2, event.clientX, event.clientY)
+    })
+    // Two fingers pinch; one finger scrolls the dialog natively (touch-action: pan-x pan-y).
+    const pointers = new Map()
+    let pinch = null
+    dialog.addEventListener('pointerdown', (event) => {
+      if (event.pointerType !== 'touch') return
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()]
+        pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y) || 1, scale }
       }
     })
+    dialog.addEventListener('pointermove', (event) => {
+      if (!pointers.has(event.pointerId)) return
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (!pinch || pointers.size !== 2) return
+      const [a, b] = [...pointers.values()]
+      setScale(pinch.scale * (Math.hypot(a.x - b.x, a.y - b.y) / pinch.distance), (a.x + b.x) / 2, (a.y + b.y) / 2)
+    })
+    const lift = (event) => {
+      pointers.delete(event.pointerId)
+      if (pointers.size < 2) pinch = null
+    }
+    dialog.addEventListener('pointerup', lift)
+    dialog.addEventListener('pointercancel', lift)
+    dialog.addEventListener('wheel', (event) => {
+      if (!event.ctrlKey && !event.metaKey) return
+      event.preventDefault()
+      setScale(scale * Math.exp(-event.deltaY * 0.01), event.clientX, event.clientY)
+    }, { passive: false })
+
     close.addEventListener('click', () => dialog.close())
-    // A click on the dark area around the picture lands on the dialog itself.
+    // A click on the dark area around the item lands on the dialog itself.
     dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close() })
+    const onResize = () => fit()
+    addEventListener('resize', onResize)
     dialog.addEventListener('close', () => {
+      removeEventListener('resize', onResize)
       dialog.remove()
       if (lightbox === dialog) lightbox = null
     })
     document.body.append(dialog)
     lightbox = dialog
+    fit()
     dialog.showModal()
+  }
+
+  function zoomPicture(source) {
+    const image = document.createElement('img')
+    image.src = source.currentSrc || source.src
+    image.alt = source.alt
+    image.draggable = false
+    const width = source.naturalWidth || source.width
+    const height = source.naturalHeight || source.height
+    openLightbox(image, { ratio: width / (height || 1), natural: width, label: source.alt })
+  }
+
+  function zoomDiagram(figure) {
+    const svg = figure.querySelector('svg')
+    if (!svg) return
+    const box = svg.viewBox?.baseVal
+    const width = box?.width || svg.getBoundingClientRect().width
+    const height = box?.height || svg.getBoundingClientRect().height
+    // Inside a .markdown-body wrapper the diagram keeps the colours markdown.css gives it.
+    const sheet = document.createElement('div')
+    sheet.className = 'markdown-body lb-sheet'
+    const copy = document.createElement('figure')
+    copy.className = 'diagram'
+    copy.style.margin = '0'
+    copy.append(svg.cloneNode(true))
+    sheet.append(copy)
+    openLightbox(sheet, { ratio: width / (height || 1), natural: width * 3, label: '圖表' })
+  }
+
+  function zoomTable(table) {
+    const sheet = document.createElement('div')
+    sheet.className = 'markdown-body lb-sheet'
+    sheet.append(table.cloneNode(true))
+    openLightbox(sheet, { zoomable: false, sheet: true, label: '表格' })
+  }
+
+  // Wide Markdown tables get a button; the table itself stays selectable and scrollable in place.
+  function markWideTables() {
+    for (const table of document.querySelectorAll('.markdown-body table')) {
+      if (table.closest('dialog')) continue
+      let button = table.previousElementSibling
+      if (!button?.classList.contains('table-zoom')) {
+        button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'table-zoom'
+        button.textContent = '⤢ 放大表格'
+        button.addEventListener('click', () => zoomTable(table))
+        table.before(button)
+      }
+      button.hidden = table.scrollWidth <= table.clientWidth + 1
+    }
   }
 
   addEventListener('DOMContentLoaded', () => {
     const style = document.createElement('style')
     style.textContent = LIGHTBOX_CSS
     document.head.append(style)
+    markWideTables()
+  })
+  let tableTimer
+  addEventListener('resize', () => {
+    clearTimeout(tableTimer)
+    tableTimer = setTimeout(markWideTables, 150)
   })
   addEventListener('click', (event) => {
     if (event.defaultPrevented || event.button !== 0 || lightbox) return
-    const image = event.target instanceof Element ? event.target.closest('img') : null
-    if (!image || !image.matches(ZOOMABLE) || !image.complete || image.naturalWidth === 0) return
-    if (image.closest('a[href], button, label, body.overview')) return
+    const target = event.target instanceof Element ? event.target : null
+    if (!target || target.closest(SKIP)) return
+    const figure = target.closest('figure.diagram')
+    if (figure?.querySelector('svg')) {
+      event.preventDefault()
+      return zoomDiagram(figure)
+    }
+    const image = target.closest('img')
+    if (!image || !image.complete || image.naturalWidth === 0) return
+    const rect = image.getBoundingClientRect()
+    if (Math.max(rect.width, rect.height) < 64) return
+    if (image.parentElement && getComputedStyle(image.parentElement).cursor === 'pointer') return
     event.preventDefault()
-    openLightbox(image)
+    zoomPicture(image)
   })
-  // Keys stay with the picture while it is open (the deck turns pages on window keydown); Escape still closes it.
+  // Keys stay with the open item (the deck turns pages on window keydown); Escape still closes it.
   addEventListener('keydown', (event) => {
     if (lightbox) event.stopImmediatePropagation()
   }, true)

@@ -47,6 +47,8 @@ function decodeEntities(text: string): string {
   })
 }
 
+const ALERT_TITLES: Record<string, string> = { note: '說明', tip: '提示', important: '重要', warning: '警告', caution: '注意' }
+
 function inlineRuns(tokens: Token[] | undefined, style: pptxgen.default.TextPropsOptions = {}): Run[] {
   const runs: Run[] = []
   for (const token of tokens ?? []) {
@@ -189,11 +191,24 @@ function blocksOf(markdown: string, pt: number, read: ReadFile): Block[] {
       case 'list':
         text.push(...listParagraphs(token as Tokens.List, pt, 0))
         break
-      case 'blockquote':
+      case 'blockquote': {
+        // A GitHub alert (> [!WARNING]) leads with its title in bold instead of the bracket marker.
+        let title: string | undefined
         for (const inner of (token as Tokens.Blockquote).tokens) {
-          if (inner.type === 'paragraph') text.push({ runs: inlineRuns(inner.tokens, { italic: true }), options: { color: C.muted, indentLevel: 1 }, pt, indent: 0.4 })
+          if (inner.type !== 'paragraph') continue
+          let tokens = inner.tokens ?? []
+          const first = tokens[0]?.type === 'text' ? (tokens[0] as Tokens.Text) : undefined
+          const marker = title === undefined && first ? /^\[!(note|tip|important|warning|caution)\]\s*/i.exec(first.text) : null
+          if (first && marker) {
+            title = ALERT_TITLES[marker[1].toLowerCase()]
+            tokens = [{ ...first, text: first.text.slice(marker[0].length) }, ...tokens.slice(1)]
+          }
+          const runs = inlineRuns(tokens, { italic: true })
+          if (marker) runs.unshift({ text: `${title}　`, options: { bold: true } })
+          text.push({ runs, options: { color: C.muted, indentLevel: 1 }, pt, indent: 0.4 })
         }
         break
+      }
       case 'code': {
         const language = (token.lang ?? '').trim().split(/\s+/)[0].toLowerCase()
         if (language === 'mermaid') {

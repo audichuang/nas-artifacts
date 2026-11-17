@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import hljs from 'highlight.js/lib/common'
 import { Marked, type Tokens } from 'marked'
+import markedAlert from 'marked-alert'
+import markedFootnote from 'marked-footnote'
 import { render as renderDiagram } from 'pele'
 
 export const BRIDGE_PATH = '/_/bridge.js'
@@ -14,7 +16,7 @@ const packageVersion = (name: string) =>
  * Library upgrades count themselves; bump the leading tags when you change what renderMarkdown (md) or
  * the Office renderers in pptx.ts, docx.ts and xlsx.ts emit.
  */
-export const RENDER_VERSION = ['md-2', 'pptx-5', 'docx-7', 'xlsx-6', ...['marked', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
+export const RENDER_VERSION = ['md-3', 'pptx-5', 'docx-7', 'xlsx-6', ...['marked', 'marked-alert', 'marked-footnote', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)
@@ -64,6 +66,14 @@ function diagram(source: string, idPrefix: string): string {
   }
 }
 
+const ALERTS = [
+  { type: 'note', title: '說明' },
+  { type: 'tip', title: '提示' },
+  { type: 'important', title: '重要' },
+  { type: 'warning', title: '警告' },
+  { type: 'caution', title: '注意' }
+].map((variant) => ({ ...variant, icon: '' }))
+
 export type TocEntry = { depth: number; id: string; html: string }
 
 /**
@@ -74,7 +84,8 @@ export type TocEntry = { depth: number; id: string; html: string }
 export function markdownParser(options: { anchors: boolean; toc?: TocEntry[]; diagramPrefix?: string }): Marked {
   const slugs = new Map<string, number>()
   let diagrams = 0
-  return new Marked({
+  // GitHub-style alerts (> [!NOTE]) and footnotes ([^1]), as readers of GitHub Markdown expect.
+  return new Marked(markedAlert({ variants: ALERTS }), markedFootnote({ description: '註腳' }), {
     gfm: true,
     renderer: {
       heading({ tokens, depth, text }: Tokens.Heading) {

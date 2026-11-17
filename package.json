@@ -19,6 +19,8 @@
     "highlight.js": "11.12.0",
     "hono": "4.13.18",
     "marked": "18.2.0",
+    "marked-alert": "2.1.2",
+    "marked-footnote": "1.4.0",
     "pele": "1.13.0",
     "pptxgenjs": "4.0.1"
   },

@@ -187,6 +187,12 @@ importers:
       marked:
         specifier: 18.2.0
         version: 18.2.0
+      marked-alert:
+        specifier: 2.1.2
+        version: 2.1.2(marked@18.2.0)
+      marked-footnote:
+        specifier: 1.4.0
+        version: 1.4.0(marked@18.2.0)
       pele:
         specifier: 1.13.0
         version: 1.13.0
@@ -372,6 +378,16 @@ packages:
   lie@3.3.0:
     resolution: {integrity: sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==}
 
+  marked-alert@2.1.2:
+    resolution: {integrity: sha512-EFNRZ08d8L/iEIPLTlQMDjvwIsj03gxWCczYTht6DCiHJIZhMk4NK5gtPY9UqAYb09eV5VGT+jD4lp396E0I+w==}
+    peerDependencies:
+      marked: '>=7.0.0'
+
+  marked-footnote@1.4.0:
+    resolution: {integrity: sha512-fZTxAhI1TcLEs5UOjCfYfTHpyKGaWQevbxaGTEA68B51l7i87SctPFtHETYqPkEN0ka5opvy4Dy1l/yXVC+hmg==}
+    peerDependencies:
+      marked: '>=7.0.0'
+
   marked@18.2.0:
     resolution: {integrity: sha512-KaeL+tAbtvI930q7HE2PN5lYXYdT8EiSmxHlN6F3rsfb57wd5mp5W5TLazpdj4inTQBJdgjYwbs40W/0VUGU+Q==}
     engines: {node: '>= 20'}
@@ -526,6 +542,14 @@ snapshots:
   lie@3.3.0:
     dependencies:
       immediate: 3.0.6
+
+  marked-alert@2.1.2(marked@18.2.0):
+    dependencies:
+      marked: 18.2.0
+
+  marked-footnote@1.4.0(marked@18.2.0):
+    dependencies:
+      marked: 18.2.0
 
   marked@18.2.0: {}
 

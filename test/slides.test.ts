@@ -249,6 +249,14 @@ describe('exporting decks', () => {
     assert.ok([...entries].some(([name, xml]) => name.startsWith('ppt/notesSlides/') && xml.includes('開場白')))
   })
 
+  test('a GitHub alert exports with its title, not the bracket marker', async () => {
+    const { id } = store.publish({ title: 'Alert', files: { 'index.slides.md': { content: Buffer.from('## A\n\n> [!WARNING]\n> 會刪資料\n') } } })
+    const entries = unzip(Buffer.from(await (await app.request(`http://app.test/api/artifacts/${id}/export.pptx`)).arrayBuffer()))
+    const slide = entries.get('ppt/slides/slide1.xml')!
+    assert.match(slide, /<a:t>警告　<\/a:t>[\s\S]*<a:t>會刪資料<\/a:t>/)
+    assert.doesNotMatch(slide, /\[!WARNING\]/)
+  })
+
   test('odd Markdown still exports: empty and relative links, control characters, lone surrogates', async () => {
     const source = '## A [empty]() [rel](other.md) [web](https://example.com)\n\nbell\u0007 &#xD800; esc\u001b\n???\nnote\u0001'
     const { id } = store.publish({ title: 'Odd\u0002', files: { 'index.slides.md': { content: Buffer.from(source) } } })
