@@ -1,6 +1,6 @@
 FROM node:24.22.3-alpine3.24 AS deps
 WORKDIR /app
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN npm install -g pnpm@12.21.0 && pnpm install --prod --frozen-lockfile
 
 FROM node:24.22.3-alpine3.24

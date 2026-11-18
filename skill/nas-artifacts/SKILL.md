@@ -5,7 +5,7 @@ description: Publishes HTML or Markdown pages and slide decks to the user's self
 
 # nas-artifacts
 
-Pages live on the user's NAS. Devices on their tailnet open them with no sign-in; off the tailnet the owner signs in with a passkey on the public address, and a page the user makes public opens read-only for anyone with the link. Every page gets a stable URL; republishing the same path makes a new version at the same URL, and open viewers switch to it live.
+Pages live on the user's NAS. Devices on their tailnet open them with no sign-in; elsewhere the user signs in with a passkey on the public address, and a page the user makes public opens read-only for anyone with the link. Every page gets a stable URL; republishing the same path makes a new version at the same URL, and open viewers switch to it live.
 
 ## Start from a template
 
@@ -24,7 +24,7 @@ A=<this-skill-directory>/scripts/artifact.mjs
 node "$A" publish <file-or-dir> --icon 📊 --description "<one sentence>" [--cap db,uploads] [--label "<what changed>"]
 ```
 
-- **Private by default.** Only the user's own devices on the tailnet can open a new artifact. Pass `--public` only when the user asks for a page others can open: anyone with the link may then view it, read-only, at the `public:` URL the command prints (no comments, no capabilities, nothing about which machine or folder it came from). `node "$A" visibility <id> public|private` changes it later; a publish without either flag keeps the current setting. A page that declares capabilities cannot be public. Give the user the public URL only for a public artifact. The owner can also sign in on the public address with a passkey to read private pages and comment from any device; when they ask to set that up or add a device, run `node "$A" login-link` and hand them the printed one-time link (valid 10 minutes, opened on the device that should hold the passkey).
+- **Private by default.** Only the user can open a new artifact (from the tailnet, or signed in with a passkey on the public address). Pass `--public` only when the user asks for a page others can open: anyone with the link may then view it, read-only, at the `public:` URL the command prints (no comments, no capabilities, nothing about which machine or folder it came from). `node "$A" visibility <id> public|private` changes it later; a publish without either flag keeps the current setting. A page that declares capabilities cannot be public. Give the user the public URL only for a public artifact. The owner can also sign in on the public address with a passkey to read private pages and comment from any device; when they ask to set that up or add a device, run `node "$A" login-link` and hand them the printed one-time link (valid 10 minutes, opened on the device that should hold the passkey).
 
 - A directory publishes every file in it. The entry is the first of `index.html`, `index.md`, `index.slides.md`, `README.md`; else the only HTML/Markdown page (Office files beside it stay attachments); else the only Office file. Otherwise pass `--entry <path>`. Relative links between files work.
 - The CLI remembers the version and file hashes for each local path. Republishing that path sends only your changed files, based on the version you last saw. Files you deleted locally are removed remotely.
