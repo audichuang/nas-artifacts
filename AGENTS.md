@@ -22,16 +22,17 @@ Pages agents publish for one person to read on his own devices over Tailscale: n
 
 ## Two things ship separately
 
-- The **server** ships as an image: push to `main` → CI (`.github/workflows/ci.yml`) runs `tc` + tests and pushes `ghcr.io/audichuang/nas-artifacts:sha-<full sha>`. It is live only after the nas-ops repo pins that digest in `hosts/ttnas/artifacts/compose.yaml` and Komodo deploys it (`nas-container` skill; record it in that folder's `deployments.md`). This repo holds no deploy config.
+- The **server** ships as an image: push to `main` → CI (`.github/workflows/ci.yml`) runs `tc` + tests and pushes `ghcr.io/audichuang/nas-artifacts:sha-<full sha>`. It is live only after the nas-ops repo pins that digest in `hosts/ttnas/artifacts/compose.yaml` and Komodo deploys it (`nas-container` skill; record it in that folder's `deployments.md`). This repo holds no deploy config. The image runs Node 24 (`Dockerfile`), so `@types/node` stays on 24.x even when `pnpm outdated` lists a newer major.
 - The **skill + CLI** (`skill/nas-artifacts/`) ship to every agent on every machine through aghub (`aghub-cli -g source sync audichuang/nas-artifacts --update --yes`). Machines update at different times, so a server change must keep working with the previous CLI, or land the CLI side first.
 - The CLI stays a single dependency-free file runnable on Node 20+; agents run it straight from the installed skill folder. `SKILL.md` is read by Claude Code, Codex, omp, grok and Antigravity alike — write it agent-neutral, with no tool names from one harness.
 
 ## Verifying
 
 - `pnpm tc` and `node --test test/*.test.ts` are the gate CI runs. The browser e2e (`test/bridge.e2e.test.ts`) needs Chromium (`CHROMIUM_PATH`, or a Playwright headless shell in the default cache) and binds fixed ports 18790-18793 and 18799 — run one e2e process at a time.
+- A route that needs the publish token is tested against the server (`test/server.test.ts`), not through the CLI: the CLI refuses without a token before it reaches the server, so a CLI test stays green when the route loses its check.
 - Anything touching the sandbox, CSP, bridge or capability checks gets a real-Chromium e2e that fails before the fix; unit tests of headers alone have missed browser behaviour here before.
 - To prove a change end to end the way users and agents reach it (CLI, viewer and content origins in Chromium, public listeners, passkey sign-in, MCP, Office rendering) on a local throwaway instance, use the `verify` skill in `.claude/skills/verify/` (ports 28790-28793, evidence in `.verify/evidence/`).
-- After a deploy, accept it from a tailnet machine (ttnas itself cannot resolve its own `*.ttnas.audichuang.app` names): publish a scratch page with the CLI, open the viewer, then delete the page.
+- After a deploy, accept it from a tailnet machine (ttnas itself cannot resolve its own `*.ttnas.audichuang.app` names): publish a scratch page with the CLI, open the viewer, then delete the page. A content URL fetched from the shell answers 200; the top-level redirect into the viewer happens only for `Sec-Fetch-Dest: document`, so send that header (or use a browser) when checking it.
 
 ## Public repo
 
