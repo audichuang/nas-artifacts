@@ -1144,7 +1144,7 @@ test('the tailnet gallery and viewer show which artifacts are public, with the p
   await viewer.close()
 })
 
-test('the 公開 chip stays on screen and tappable when a page slides the phone bar away, and covers no bar control', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+test('the 公開 chip stays on screen and tappable when a page slides the phone bar away, and covers neither a bar control nor the page', { skip: !chromiumPath && 'no Chromium found' }, async () => {
   // The page reports a scroll position it never had: any page can hide the bar, so visibility must not live in it.
   const forged = `<!doctype html><body><h1>短頁</h1><p id="sent"></p><script>
 addEventListener('load', () => setTimeout(() => {
@@ -1161,7 +1161,10 @@ addEventListener('load', () => setTimeout(() => {
       const o = other.getBoundingClientRect()
       return o.width > 0 && o.height > 0 && o.left < r.right && r.left < o.right && o.top < r.bottom && r.top < o.bottom
     }).map((other) => other.id || other.className)
+    // On phones the bar slides away and the frame grows to the top: the chip must not sit over the page then.
+    const f = document.getElementById('frame')!.getBoundingClientRect()
     return {
+      coversFrame: f.left < r.right && r.left < f.right && f.top < r.bottom && r.top < f.bottom,
       inBar: Boolean(el.closest('.viewer-bar')),
       inside: r.width > 0 && r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth,
       hit: Boolean(hit && el.contains(hit)),
@@ -1175,12 +1178,12 @@ addEventListener('load', () => setTimeout(() => {
     await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
     await viewer.locator('#public-link:not([hidden])').waitFor({ timeout: 5000 })
     const shown = await chip(viewer)
-    assert.deepEqual(shown, { inBar: false, inside: true, hit: true, overlaps: [], barAway: false }, `bar showing: ${JSON.stringify(shown)}`)
+    assert.deepEqual(shown, { coversFrame: false, inBar: false, inside: true, hit: true, overlaps: [], barAway: false }, `bar showing: ${JSON.stringify(shown)}`)
     await viewer.frameLocator('#frame').locator('#sent', { hasText: 'sent' }).waitFor({ timeout: 5000 })
     await viewer.waitForFunction(() => document.body.classList.contains('bar-away'), null, { timeout: 3000 })
     await viewer.waitForTimeout(400) // the 0.2 s slide
     const away = await chip(viewer)
-    assert.deepEqual({ ...away, overlaps: [] }, { inBar: false, inside: true, hit: true, overlaps: [], barAway: true }, `bar away: ${JSON.stringify(away)}`)
+    assert.deepEqual({ ...away, overlaps: [] }, { coversFrame: false, inBar: false, inside: true, hit: true, overlaps: [], barAway: true }, `bar away: ${JSON.stringify(away)}`)
     assert.equal(await viewer.locator('#public-link').getAttribute('href'), `http://localhost:${PUBLIC_APP_PORT}/a/${id}`)
 
     await viewer.setViewportSize({ width: 1280, height: 800 })
@@ -1188,7 +1191,7 @@ addEventListener('load', () => setTimeout(() => {
     await viewer.frameLocator('#frame').locator('#sent', { hasText: 'sent' }).waitFor({ timeout: 5000 })
     await viewer.waitForTimeout(300)
     const desk = await chip(viewer)
-    assert.deepEqual(desk, { inBar: false, inside: true, hit: true, overlaps: [], barAway: false }, `desktop: ${JSON.stringify(desk)}`)
+    assert.deepEqual(desk, { coversFrame: false, inBar: false, inside: true, hit: true, overlaps: [], barAway: false }, `desktop: ${JSON.stringify(desk)}`)
   } finally {
     await viewer.close()
   }

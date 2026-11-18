@@ -27,11 +27,14 @@ addEventListener('load', () => setTimeout(() => {
 
 const barAway = (page) => page.evaluate(() => document.body.classList.contains('bar-away'))
 // The 公開 chip as the reader meets it: its rect, whether it sits in the sliding bar, and whether a tap at its
-// centre reaches it (a chip under the sticky bar or the frame would be on screen yet unusable).
+// centre reaches it (a chip under the sticky bar or the frame would be on screen yet unusable), and whether it
+// lies over the frame (with the bar away it would then take taps meant for the page).
 const chipState = (page) => page.locator('#public-link').evaluate((el) => {
   const r = el.getBoundingClientRect()
   const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
-  return { inBar: Boolean(el.closest('.viewer-bar')), hit: Boolean(hit && el.contains(hit)), top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) }
+  const f = document.getElementById('frame').getBoundingClientRect()
+  const coversFrame = f.left < r.right && r.left < f.right && f.top < r.bottom && r.top < f.bottom
+  return { coversFrame, inBar: Boolean(el.closest('.viewer-bar')), hit: Boolean(hit && el.contains(hit)), top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) }
 })
 const frameScrollY = (page) => contentFrame(page, V.content).evaluate(() => scrollY)
 async function wheelOverFrame(page, dy) {
@@ -124,7 +127,9 @@ try {
   c.ok(chipBefore.inside && !(await barAway(pub)), '(e) control: with the bar showing, the 公開 chip (#public-link) is on screen at 390px', JSON.stringify(chipBefore))
   await shot(pub, F, '07a-public-page-bar-showing')
   await pub.frameLocator('#frame').locator('#sent', { hasText: 'forged report sent' }).waitFor({ timeout: 5000 })
-  await pub.waitForTimeout(500)
+  // A miss shows as the failed checks below (they assert bar-away), not as a thrown timeout.
+  await pub.waitForFunction(() => document.body.classList.contains('bar-away'), null, { timeout: 3000 }).catch(() => {})
+  await pub.waitForTimeout(400) // the 0.2 s slide
   const chipAfter = await inViewport(pub, '#public-link')
   const indicators = await pub.evaluate(() => [...document.querySelectorAll('.public-chip, .public-mark, #public-link')].map((el) => {
     const r = el.getBoundingClientRect()
@@ -133,8 +138,8 @@ try {
   save(F, 'visibility-indicators.json', { barAway: await barAway(pub), indicators })
   log(F, `visibility indicators in the viewer after the page hid the bar: ${JSON.stringify(indicators)}`)
   const chipHit = await chipState(pub)
-  c.ok(chipAfter.inside, '(e) after the page hid the bar, a visibility indicator is still on screen in the viewer', `bar-away ${await barAway(pub)} #public-link ${JSON.stringify(chipAfter)}`)
-  c.ok(!chipHit.inBar && chipHit.hit && (await pub.locator('#public-link').getAttribute('href')) === `${V.publicApp}/a/${hostile.id}`, '(e) the 公開 chip is outside .viewer-bar, a tap at its centre reaches it, and it links to the public URL', JSON.stringify(chipHit))
+  c.ok((await barAway(pub)) && chipAfter.inside, '(e) after the page hid the bar, a visibility indicator is still on screen in the viewer', `bar-away ${await barAway(pub)} #public-link ${JSON.stringify(chipAfter)}`)
+  c.ok((await barAway(pub)) && !chipHit.inBar && chipHit.hit && !chipHit.coversFrame && (await pub.locator('#public-link').getAttribute('href')) === `${V.publicApp}/a/${hostile.id}`, '(e) with the bar hidden, the 公開 chip is outside .viewer-bar, does not lie over the page, a tap at its centre reaches it, and it links to the public URL', JSON.stringify(chipHit))
   await shot(pub, F, '07-public-page-bar-hidden')
 
   // (e) the owner's viewer on the public app shows the same chip; the page hides that bar too.
@@ -143,7 +148,7 @@ try {
   await owner.waitForTimeout(500)
   const ownerChip = await inViewport(owner, '#public-link')
   const ownerHit = await chipState(owner)
-  c.ok((await barAway(owner)) && ownerChip.inside && !ownerHit.inBar && ownerHit.hit, '(e) owner viewer on the public app at 390px: the page hid the bar, the 公開 chip is still on screen and tappable', `bar-away ${await barAway(owner)} ${JSON.stringify(ownerHit)}`)
+  c.ok((await barAway(owner)) && ownerChip.inside && !ownerHit.inBar && ownerHit.hit && !ownerHit.coversFrame, '(e) owner viewer on the public app at 390px: the page hid the bar, the 公開 chip is still on screen, tappable and not over the page', `bar-away ${await barAway(owner)} ${JSON.stringify(ownerHit)}`)
   await shot(owner, F, '08-owner-viewer-bar-hidden')
   await ownerCtx.close()
 

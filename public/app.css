@@ -190,14 +190,17 @@ body.public-view { display: flex; flex-direction: column; height: 100dvh; overfl
 .public-mark { flex: none; font-size: 11px; font-weight: 600; line-height: 1; padding: 4px 7px; border-radius: 999px; color: #1a7f37; background: color-mix(in srgb, #2da44e 14%, transparent); }
 .public-chip { color: #1a7f37; text-decoration: none; }
 /* 公開 sits outside the viewer bar, pinned where the bar's right end is: a page can slide that bar away on
-   phones (AGENTS.md), and the visibility mark must stay in view. The bar keeps room for it at its right end. */
-:root { --chip-w: 56px; }
+   phones (AGENTS.md), and the visibility mark must stay in view. The bar keeps room for it at its right end;
+   with the bar away, the frame starts below a strip that holds the chip, so the chip never covers the page. */
+:root { --chip-w: 56px; --chip-strip: 46px; }
 #public-link { position: fixed; top: 9px; right: 16px; z-index: 3; min-width: var(--chip-w); }
 body:has(#public-link:not([hidden])) .viewer-bar { padding-right: calc(16px + var(--chip-w) + 10px); }
 @media (max-width: 720px) {
   #public-link { right: 12px; }
   body:has(#public-link:not([hidden])) .viewer-bar { padding-right: calc(12px + var(--chip-w) + 8px); }
-  body.bar-away #public-link { box-shadow: var(--shadow); }
+  .viewer { transition: margin-top 0.2s ease; }
+  body.bar-away #public-link { top: 6px; }
+  body.bar-away:has(#public-link:not([hidden])) .viewer { margin-top: var(--chip-strip); height: calc(100% - var(--chip-strip)); }
 }
 @media (prefers-color-scheme: dark) { .public-mark, .public-chip { color: #3fb950; } }
 .public-bar .artifact-icon:empty { display: none; }
