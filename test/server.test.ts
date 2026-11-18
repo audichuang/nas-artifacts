@@ -128,6 +128,19 @@ describe('publishing', () => {
     assert.equal((await call(`/api/artifacts/${id}`)).status, 200)
   })
 
+  test('deleting an asset needs the token: neither no auth nor the viewer header will do', async () => {
+    const { id } = await publish({ 'index.html': 'x' }, { capabilities: ['uploads'] })
+    const upload = await call(`/api/artifacts/${id}/assets?name=x.png`, { method: 'POST', viewer: true, body: 'png' })
+    assert.equal(upload.status, 201, await upload.clone().text())
+    const asset = (await upload.json()) as { id: string }
+    const listed = async () => ((await (await call(`/api/artifacts/${id}/assets`)).json()) as { assets: { id: string }[] }).assets.map((a) => a.id)
+    assert.equal((await call(`/api/artifacts/${id}/assets/${asset.id}`, { method: 'DELETE' })).status, 401)
+    assert.equal((await call(`/api/artifacts/${id}/assets/${asset.id}`, { method: 'DELETE', viewer: true })).status, 401)
+    assert.deepEqual(await listed(), [asset.id])
+    assert.equal((await call(`/api/artifacts/${id}/assets/${asset.id}`, { method: 'DELETE', token: TOKEN })).status, 204)
+    assert.deepEqual(await listed(), [])
+  })
+
   test('deleting drops blobs nothing else references', async () => {
     const shared = 'shared-body-' + Math.random()
     const keep = await publish({ 'index.html': shared })

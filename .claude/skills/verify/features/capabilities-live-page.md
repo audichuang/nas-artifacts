@@ -28,7 +28,7 @@ node .claude/skills/verify/scripts/journeys/capabilities-live-page.mjs
 - Tab 1 and tab 2 open the capable page and `#count` reads `0`. The tab 1 frame's `origin` is `'null'`.
 - Clicks `#bump` in tab 1's frame and tab 2's `#count` becomes `1`. `artifact db get <id> c main` returns `{"data":{"n":1}}`.
 - `artifact db set <id> c main '{"n":41}'` makes both tabs show `41`.
-- Clicks `#up`: `#upload` shows `<content>/a/<id>/assets/…/note.txt`. `artifact asset list <id>` shows the asset with source `page`.
+- Clicks `#up`: `#upload` shows `<content>/a/<id>/assets/…/note.txt`. Node fetch of that URL → 200 with the body `hello from the page` byte for byte, and `artifact asset list <id>` has a line with source `page` ending in that same URL.
 - Tab 3 opens the page without caps: `#err` shows `capability_not_declared`. `PUT <app>/api/artifacts/<id>/db/c/main` with `x-artifact-client: viewer` and no token gets 403 `capability_not_declared`, saved as `direct-api-call.json`.
 - `artifact visibility <capId> public` exits 1 with `409 has_capabilities …`, and `get` still reports `private`.
 

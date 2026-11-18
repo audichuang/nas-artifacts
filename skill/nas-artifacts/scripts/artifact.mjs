@@ -46,7 +46,7 @@ const USAGE = `artifact <command> [options]
   db get|delete <id> <collection> <docId>
   db set|update <id> <collection> <docId> <json>
   db query <id> <collection> <json-where>
-  asset upload <id> <file> | asset list <id>
+  asset upload <id> <file> | asset list <id> | asset delete <id> <assetId>
   config [--url URL] [--token-stdin] [--author NAME] [--machine NAME]
                          save server URL / token / comment author / machine name to ${CONFIG_FILE}
 
@@ -710,7 +710,12 @@ async function main() {
         const data = await api(`/api/artifacts/${enc(id)}/assets?name=${enc(basename(file))}`, { method: 'POST', auth: true, body: readFileSync(file) })
         return print(data, json, (d) => d.url)
       }
-      return fail('asset upload|list')
+      if (action === 'delete') {
+        if (!id || !file) fail('asset delete <id> <assetId>')
+        await api(`/api/artifacts/${enc(id)}/assets/${enc(file)}`, { method: 'DELETE', auth: true })
+        return console.log(`deleted asset ${file}`)
+      }
+      return fail('asset upload|list|delete')
     }
     case 'config': {
       const file = readJson(CONFIG_FILE, {})

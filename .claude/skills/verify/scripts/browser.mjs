@@ -30,8 +30,12 @@ export const V = {
   publicApp: `http://localhost:${base + 2}`,
   publicContent: `http://127.0.0.1:${base + 3}`,
   callback: `http://127.0.0.1:${base + 9}/callback`,
-  stamp: readRun('stamp')
+  stamp: readRun('stamp'),
+  // The throwaway publish token (same value as env.sh), for the token-only routes the CLI has no command for.
+  token: 'verify-throwaway-token-0001'
 }
+
+export const SESSION_COOKIE = '__Host-artifacts_session'
 
 const claimed = new Set()
 /**
@@ -202,4 +206,26 @@ export function scratch(name) {
   const dir = join(RUN, 'work', name)
   mkdirSync(dir, { recursive: true })
   return dir
+}
+
+/**
+ * Where an element sits against the viewport, from getBoundingClientRect: { inside, top, bottom, left, right }.
+ * Use this, not isVisible(): a bar pushed off screen by a negative margin still counts as visible.
+ */
+export async function inViewport(page, selector) {
+  return page.locator(selector).first().evaluate((el) => {
+    const r = el.getBoundingClientRect()
+    const style = getComputedStyle(el)
+    const shown = !el.hidden && style.display !== 'none' && style.visibility !== 'hidden' && r.width > 0 && r.height > 0
+    return { inside: shown && r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth, top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) }
+  })
+}
+
+/**
+ * GET a URL from Node with an explicit owner session cookie (or none) and no redirects followed:
+ * replays a cookie value after the browser has dropped it. Returns { status, body }.
+ */
+export async function withCookie(url, cookieValue) {
+  const response = await fetch(url, { redirect: 'manual', headers: cookieValue ? { cookie: `${SESSION_COOKIE}=${cookieValue}` } : {} })
+  return { status: response.status, body: await response.text() }
 }

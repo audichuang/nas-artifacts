@@ -52,7 +52,7 @@ node .claude/skills/verify/scripts/mcp-call.mjs tool get '{"id":"<id>"}'
   - A public capability-free artifact (CLI `--public`): MCP `update` with `capabilities: ['db']` returns `has_capabilities`; CLI `get` shows no new version.
   - A page whose inline `<script>` throws on line 3: opened in the tailnet viewer in Chromium (the bridge reports it), then MCP `errors` and CLI `errors` return kind `error`, the page `index.html` and source `index.html:3:<col>` (the server stores it relative to the version). Screenshot `07-page-that-throws.png`.
 - Cross-checks:
-  - CLI `get` shows v3 with label `MCP`.
+  - CLI `get` shows version 3 labelled `MCP` and version 2 (the CLI's) not labelled `MCP`. MCP `publish` labels v1 `MCP` too, so the check targets version 3 itself.
   - CLI `comments` shows the MCP comment.
   - The tailnet viewer renders the v3 text.
   - MCP `delete` succeeds, after which CLI `get` fails.
@@ -65,9 +65,10 @@ Evidence: `steps.log` (OAuth steps with the code and tokens redacted), `mcp-call
 - Always use `scripts/artifact` (it issues the login-link with the throwaway token). The bare CLI defaults to production and reads the real token.
 - Simulated passkey: this proves the server's WebAuthn, session, OAuth and MCP code paths, not a real authenticator or the production rpID.
 - Each new browser context is a new authenticator with no passkey. Every run enrols again with a fresh login-link (links are single-use), even on a reused data dir. Keep the owner in one context for the whole journey, revoke included.
-- The `__Host-` Secure cookie is accepted only in Chromium on `http://localhost`, so the public app origin must be `localhost`, not `127.0.0.1`. curl or Node `fetch` cannot carry the owner session, so owner routes are proved in the browser only.
+- The `__Host-` Secure cookie is accepted only in Chromium on `http://localhost`, so the public app origin must be `localhost`, not `127.0.0.1`. Node `fetch` never receives the cookie, but it can replay one read from `context.cookies()` with an explicit `cookie:` header (`withCookie()`); owner-sessions uses that to prove sessions end on the server.
 - Register the `dialog` handler before clicking 撤銷 (it uses `confirm`).
-- Access tokens last 1 h. A refresh token used twice revokes the whole family. Rerun `mcp-token.mjs` rather than refreshing by hand.
+- Access tokens last 1 h. A refresh token used twice revokes the whole family. Rerun `mcp-token.mjs` rather than refreshing by hand. Rotation, replay and revocation are driven by the `oauth-refresh` journey.
+- The journey's cleanup deletes with `--yes`: without it `artifact delete` refuses and deletes nothing.
 - Tokens, codes and the `/t/<token>/` segment are redacted in evidence. Never paste `mcp-token.json` anywhere; `stop.sh` deletes it.
 - A script loaded from a file (`<script src=app.js>`) that throws is reported only as `Script error.` with no source: the sandboxed page has a null origin, so the browser masks cross-origin errors. The "source file and line" promise holds for inline scripts and sandbox (csp) blocks; the journey uses an inline script for that reason.
 - The MCP `reply` tool without `commentId` starts a new thread. Its author defaults to "Agent".

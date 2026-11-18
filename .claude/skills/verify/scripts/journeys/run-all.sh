@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Runs every feature journey in the map's order against the running instance and prints a summary.
-# Usage: .claude/skills/verify/scripts/journeys/run-all.sh [feature …]     (default: all seven)
+# Usage: .claude/skills/verify/scripts/journeys/run-all.sh [feature …]     (default: all fourteen)
 # Exit 0 only if every journey passed, 1 if any failed. The last line is the verdict, so it survives a `tail`,
 # but a pipe replaces this exit code with the last command's: redirect to a file instead of piping.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 . "${here}/../env.sh" || exit 1
 features="$*"
-[ -n "${features}" ] || features="publish-and-view versions-and-conflict comments capabilities-live-page public-sharing owner-signin-and-mcp office-files"
+[ -n "${features}" ] || features="publish-and-view versions-and-conflict comments capabilities-live-page public-sharing owner-signin-and-mcp office-files owner-sessions oauth-refresh deck-edit pins phone-viewer-bar page-errors delete-and-blobs"
 status=0
 summary=""
 passed=0
