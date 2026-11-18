@@ -37,6 +37,8 @@ This directory is the maintained source for verifying what users and agents can 
 .claude/skills/verify/scripts/stop.sh
 ```
 
+Known red (2026-11-18): `phone-viewer-bar` check (e) fails on purpose until the owner decides whether the 公開 chip moves out of the sliding bar or the AGENTS.md rule is reworded (see that file's Gotchas), so a full pass currently ends `run-all: FAIL 13/14 …`.
+
 `run-all.sh` exits 0 only if every journey passed and 1 otherwise; its last line is the verdict and the `== summary` block above it has one `pass`/`FAIL` line per journey. Redirect rather than pipe it (a pipe reports the last command's exit code), then read the file.
 
 The journeys do not depend on each other; each creates its own artifacts with a per-run nonce in titles, so they also run on a reused data dir. Run one with `node .claude/skills/verify/scripts/journeys/<feature>.mjs`.

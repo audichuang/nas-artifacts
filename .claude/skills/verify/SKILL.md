@@ -72,7 +72,7 @@ Everything lands in `.verify/evidence/<UTC yyyymmdd-HHMMSS>/<feature>/` (git-ign
 - Extras per feature: response headers, MCP calls, ids.
 - `server.log`: copied in by `stop.sh`.
 
-Proof standard: the real user path, the action and the resulting state, and the side effect seen from another surface (CLI `get` after an MCP write, the second tab after a db write, the anonymous context after a visibility change). Headers alone are not proof of sandbox, CSP or redirect behaviour; the journeys check them in Chromium. Bearer, access and refresh tokens, login-link codes and `/t/<content token>/` segments are redacted before anything is written. The publish output and `steps.log` carry the scratch folder path (the CLI sends source host and path), so evidence stays local.
+Proof standard: the real user path, the action and the resulting state, and the side effect seen from another surface (CLI `get` after an MCP write, the second tab after a db write, the anonymous context after a visibility change). Headers alone are not proof of sandbox, CSP or redirect behaviour; the journeys check them in Chromium. Bearer, access and refresh tokens, session cookie values, login-link codes and `/t/<content token>/` segments are redacted before anything is written. The publish output and `steps.log` carry the scratch folder path (the CLI sends source host and path), so evidence stays local.
 
 ## Cleanup
 

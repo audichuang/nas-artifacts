@@ -23,7 +23,7 @@ Preconditions: instance ready.
 node .claude/skills/verify/scripts/journeys/delete-and-blobs.mjs
 ```
 
-- Publishes A and B, each with a different `index.html` and an identical `shared.txt` (`text/plain` is servable; `application/octet-stream` files are 404 by design). Both `shared.txt` URLs → 200, equal bytes.
+- Publishes A and B, each with a different `index.html` and an identical `shared.txt` (`text/plain` is servable; per `src/content-server.ts` an extension without a web media type answers 404 `not_servable`, not observed here). Both `shared.txt` URLs → 200, equal bytes.
 - A viewer tab opens A. `delete A` → non-zero, `pass --yes`, A still in `list --json`. `delete A --yes` → `deleted A`.
 - The tab shows the toast and lands on `/`. `list` has B, not A; `get A` fails; Node fetch of `<app>/a/A`, `<content>/a/A/v/1/` and A's `shared.txt` → 404; gallery search by nonce shows only B.
 - B's `shared.txt` → 200 same bytes; `read B shared.txt` equal; B renders in a fresh browser context.
