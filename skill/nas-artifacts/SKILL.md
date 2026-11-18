@@ -37,6 +37,15 @@ node "$A" publish <file-or-dir> --icon 📊 --description "<one sentence>" [--ca
 
 Credentials: `ARTIFACTS_TOKEN`, or `~/.config/nas-artifacts/config.json` (set once with `node "$A" config --token-stdin`). The token lives in the 1Password `Agent` vault, item `nas-artifacts publish token`. Pipe it, never print it. Reads (list, get, read, comments, checkout) need no token.
 
+### Without the CLI: the `artifacts` MCP server
+
+Prefer the CLI whenever it can reach the server: it publishes folders and binary files straight from disk, sends only changed files and runs the page check. When it cannot (no tailnet, no token, no shell) and your tools include an MCP server named `artifacts` (`https://artifacts.audichuang.app/mcp`, signed in by the owner through OAuth), use its tools instead: `list`, `get`, `read`, `publish`, `update`, `set_visibility`, `delete`, `comments`, `reply`, `errors`.
+
+- Files go inline as `{ path, content }`; text is utf8, pictures and Office files need `encoding: "base64"`. Keep MCP for text pages with few small assets; publish anything bigger with the CLI.
+- To change an artifact, `get` it for `currentVersion`, then `update` with `baseVersion` set to it, sending only changed files (`delete: true` removes one; the rest carry over). A `version_conflict` lists `changedFiles`: `read` those, merge, retry. `force` overwrites, with the same caution as `--force`.
+- New artifacts are private; the URL it returns opens for the owner signed in on the public address. Visibility and capabilities follow the same rules as the CLI.
+- Nothing is configured, or a call says sign-in is needed: tell the user to add the server in their agent (HTTP transport, the URL above) and sign in. Do not fall back to another publishing service.
+
 ## Page contract
 
 The page runs in a sandbox on its own origin:
