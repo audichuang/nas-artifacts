@@ -27,6 +27,27 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 860 }, acceptDownloads: true })
   const frame = () => page.frameLocator('#frame')
 
+  // Whether the file in the frame was drawn, checked from what src/pptx.ts, src/docx.ts and src/xlsx.ts emit.
+  // It first waits for a render root or a failure page (a timeout is a FAIL, never a count of 0), then counts
+  // the whole-file failure boxes and the per-part "cannot draw" markers of all three formats, and reads the
+  // viewer's page-error badge (#errors), which the renderers' failure script trips.
+  const rendered = async (kind) => {
+    const roots = '.slide, .dx-doc, .xl-tabs, .xl-fail, .xl-empty'
+    const drawn = await frame().locator(roots).first().waitFor({ state: 'attached', timeout: 15_000 }).then(() => true, () => false)
+    c.ok(drawn, `${kind}: the frame shows a rendered document or a failure page within 15 s`)
+    if (!drawn) return
+    const fail = await frame().locator('.dx-fail, .xl-fail, .xl-empty, .pp-missing[role=alert]').allInnerTexts()
+    c.ok(fail.length === 0, `${kind}: no whole-file failure page (.dx-fail, .xl-fail, .xl-empty, alert .pp-missing)`, fail.join(' | ').replace(/\s+/g, ' '))
+    // .xl-note and .dx-notice also carry "not shown / unsupported / cut" notes; an empty sheet's note is not a failure.
+    const markers = '.pp-missing, .dx-unsup, .dx-cut, .dx-notice, .xl-cellmiss, .xl-note, .xl-shape-note'
+    const missing = (await frame().locator(markers).allInnerTexts()).filter((text) => text.trim() !== '這個工作表是空的。')
+    c.ok(missing.length === 0, `${kind}: no "cannot draw" markers (${markers})`, `${missing.length}: ${missing.slice(0, 5).join(' | ')}`)
+    // Secondary signal only: a 2 s window for the error report to arrive, so its absence proves less than the markers.
+    await page.locator('#errors').waitFor({ state: 'visible', timeout: 2000 }).catch(() => {})
+    const errors = (await page.locator('#errors').isVisible()) ? await page.locator('#error-count').textContent() : '0'
+    c.ok(errors === '0', `${kind}: viewer reports no page errors (#errors badge hidden)`, `${errors} page errors`)
+  }
+
   const download = async (kind, path) => {
     const button = page.locator('#export-pptx')
     await button.waitFor({ state: 'visible', timeout: 5000 })
@@ -44,6 +65,7 @@ try {
   // pptx: a deck drawn from the file; slide two's picture comes out of the file under /~office/…/ppt/.
   await page.goto(`${V.app}/a/${ids.pptx}`)
   await frame().locator('.slide.active', { hasText: 'Verify deck slide one' }).waitFor({ timeout: 8000 })
+  await rendered('pptx')
   await shot(page, F, '01-pptx-slide1')
   await page.locator('#title').click()
   await page.keyboard.press('ArrowRight')
@@ -64,6 +86,7 @@ try {
   // docx: real text in the DOM, not a picture of it.
   await page.goto(`${V.app}/a/${ids.docx}`)
   await frame().getByText('A paragraph of selectable verify text.').waitFor({ timeout: 8000 })
+  await rendered('docx')
   const docText = await frame().locator('body').innerText()
   c.ok(docText.includes('Verify document heading') && docText.includes('A paragraph of selectable verify text.'), 'docx: heading and paragraph are DOM text')
   c.ok((await contentFrame(page, V.content).evaluate(() => origin)) === 'null', 'docx: frame origin null')
@@ -73,6 +96,7 @@ try {
   // xlsx: a tab per sheet; #sheet-2 is the hash the second tab links to.
   await page.goto(`${V.app}/a/${ids.xlsx}`)
   await frame().getByText('verify-first-sheet').waitFor({ timeout: 8000 })
+  await rendered('xlsx')
   c.ok((await frame().locator('a.xl-tab').count()) === 2, 'xlsx: two sheet tabs', await frame().locator('a.xl-tab').allTextContents())
   await shot(page, F, '04-xlsx-sheet1')
   await frame().locator('a.xl-tab[href="#sheet-2"]').click()
@@ -85,11 +109,10 @@ try {
   if (real) {
     if (!existsSync(real)) throw new Error(`VERIFY_OFFICE_FILE ${real} does not exist`)
     const out = cli(F, ['publish', real, '--new', '--json'])
-    ids.real = JSON.parse(out.stdout).id
+    ids.real = out.code === 0 ? JSON.parse(out.stdout).id : undefined
+    c.ok(out.code === 0, `real file ${basename(real)}: published`, ids.real ?? out.stderr.trim())
     await page.goto(`${V.app}/a/${ids.real}`)
-    await page.waitForTimeout(3000)
-    const missing = await frame().locator('.pp-missing').count()
-    c.ok(out.code === 0 && missing === 0, `real file ${basename(real)}: published, no "cannot draw" boxes`, `${missing} missing boxes`)
+    await rendered(`real file ${basename(real)}`)
     await shot(page, F, '06-real-file')
     await download('real', real)
   } else {

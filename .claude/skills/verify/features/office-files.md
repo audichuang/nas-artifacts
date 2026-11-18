@@ -36,14 +36,16 @@ VERIFY_OFFICE_FILE=~/Downloads/real.pptx node .claude/skills/verify/scripts/jour
   - `artifact read <id> --out` has the same sha256.
   - `#edit` is hidden.
 - pptx only: `artifact export <id> --out` has the same sha256.
-- With `VERIFY_OFFICE_FILE`: it publishes that file and requires no `.pp-missing` boxes. Then it runs the same download and read checks.
+- Every file, generated or real, goes through the same render checks. The frame must show a render root or a failure page within 15 s (`.slide`, `.dx-doc`, `.xl-tabs`, `.xl-fail`, `.xl-empty`); a timeout is a FAIL, never a count of 0. There must be no whole-file failure page (`.dx-fail`, `.xl-fail`, `.xl-empty`, `.pp-missing[role=alert]`), no "cannot draw" markers or notes (`.pp-missing`, `.dx-unsup`, `.dx-cut`, `.dx-notice`, `.xl-cellmiss`, `.xl-note` except an empty sheet's, `.xl-shape-note`), and the viewer's `#errors` badge must stay hidden. The renderers' failure script throws in the page, and the bridge reports that as a page error. The badge check waits only 2 s for that report, so it is a secondary signal behind the markers.
+- With `VERIFY_OFFICE_FILE`: it publishes that file (`.pptx`, `.docx` or `.xlsx`) and runs the render checks above. Then it runs the same download and read checks.
 
 Evidence: `01-pptx-slide1.png` … `05-xlsx-sheet2.png` (`06-real-file.png` with a real file), `cli.log`, `result.json`.
 
 ## Gotchas
 
 - Always use `scripts/artifact`. The bare CLI defaults to production and reads the real token.
-- The generated files are only a few shapes. They prove the publish → render → download pipeline, not that any uploaded file renders. Feed real files through `VERIFY_OFFICE_FILE` for that, and note that `.pp-missing` only catches whole-slide failures, so look at the screenshot too.
+- The generated files are only a few shapes. They prove the publish → render → download pipeline, not that any uploaded file renders. Feed real files through `VERIFY_OFFICE_FILE` for that. The markers catch what the renderers label as not drawn, not a shape drawn wrong, so look at the screenshot too.
+- The failure markers come from `src/pptx.ts` (`.pp-missing`, with `role=alert` for a whole deck), `src/docx.ts` (`.dx-fail` inside `.dx-doc`, `.dx-unsup`, `.dx-cut`, `.dx-notice` for parts skipped or cut) and `src/xlsx.ts` (`.xl-fail` and `.xl-empty` with no `.xl-tabs`, `.xl-cellmiss`, `.xl-note` for drawings, charts, sheets or cells not shown, `.xl-shape-note`). `.dx-note` is a footnote, not a marker. If a renderer gains a new marker, add it to `rendered()` in the journey. A check that counted only `.pp-missing` once passed a `.docx` and an `.xlsx` that showed 「無法顯示」.
 - ONLYOFFICE online editing (the 編輯 button, signed callbacks) needs an external Document Server and is not covered. Launch leaves `ONLYOFFICE_*` unset on purpose.
 - `#sheet-2` is a hash the tab links to, not an element id. Click `a.xl-tab[href="#sheet-2"]` inside the frame.
 - The download button's id is `#export-pptx` for every Office type (and for Markdown decks, where it exports). Its label tells which.

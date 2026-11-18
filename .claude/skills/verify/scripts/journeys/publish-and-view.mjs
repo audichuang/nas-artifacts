@@ -11,11 +11,17 @@ const c = checks(F)
 const needle = `needle-${Date.now().toString(36)}`
 const title = `Verify page ${needle}`
 const site = scratch('pv-site')
+// The in-page fetch must target a URL any origin may read (Access-Control-Allow-Origin: *, a simple GET), so
+// only the frame's connect-src can stop it. The tailnet /api sends no CORS headers: a fetch there fails with or
+// without the CSP. The page records the securitypolicyviolation it gets, so the marker names the directive.
+const corsTarget = `${V.publicApp}/.well-known/oauth-protected-resource/mcp`
 writeFileSync(join(site, 'index.html'), `<!doctype html><html><head><title>Verify page</title></head><body>
 <h1 id="t">Verify page</h1><p>${needle}</p><p id="leak">pending</p>
 <a id="next" href="two.html">second page</a>
 <script>
-fetch('${V.app}/api/artifacts').then(() => { document.getElementById('leak').textContent = 'leaked' }, () => { document.getElementById('leak').textContent = 'blocked' })
+const leak = document.getElementById('leak')
+document.addEventListener('securitypolicyviolation', (e) => { if (!leak.textContent.startsWith('leaked')) leak.textContent = 'csp:' + e.effectiveDirective })
+fetch('${corsTarget}').then((r) => { leak.textContent = 'leaked ' + r.status }, () => { if (leak.textContent === 'pending') leak.textContent = 'rejected' })
 </script></body></html>`)
 writeFileSync(join(site, 'two.html'), '<!doctype html><title>two</title><h1 id="two">Second page</h1>')
 const notes = join(scratch('pv-md'), 'notes.md')
@@ -54,9 +60,16 @@ try {
   c.ok(frameSrc === `frame-src ${V.content}/a/${art.id}/`, 'viewer CSP frame-src is scoped to <content>/a/<id>/', frameSrc)
   const frame = contentFrame(page, V.content)
   c.ok((await frame.evaluate(() => origin)) === 'null', 'page frame runs with an opaque origin (sandbox without allow-same-origin)')
-  await page.waitForTimeout(1500)
+  // Control: the same GET from an opaque-origin page without a CSP is readable, so a 'csp:' marker below is
+  // the CSP's doing and not a CORS refusal (if this control fails, pick another target before trusting the check).
+  const control = await browser.newPage()
+  const reachable = await control.evaluate((url) => fetch(url).then((r) => `${origin} ${r.status}`, (e) => `${origin} rejected ${e}`), corsTarget)
+  await control.close()
+  // A cross-origin fetch only resolves when CORS allows it (the ACAO header itself is not readable from JS).
+  c.ok(reachable === 'null 200', 'control: an opaque-origin page without CSP can read the in-page fetch target (CORS *)', reachable)
+  await frame.waitForFunction(() => /^(csp:|leaked)/.test(document.getElementById('leak').textContent), undefined, { timeout: 5000 }).catch(() => {})
   const leak = await frame.locator('#leak').textContent()
-  c.ok(leak === 'blocked', 'in-page fetch to the app API was rejected (marker reads blocked)', leak)
+  c.ok(leak === 'csp:connect-src', "in-page fetch to a CORS-open URL was blocked by the frame's connect-src (securitypolicyviolation)", leak)
   const doc = frameResponses.find((r) => /\/v\/1\/(index\.html)?$/.test(r.url()))
   const csp = doc?.headers()['content-security-policy'] ?? ''
   save(F, 'headers.json', { viewer: viewerResponse.headers(), frameDocument: doc?.headers() })

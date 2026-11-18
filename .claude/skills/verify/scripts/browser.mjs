@@ -1,7 +1,7 @@
 // Shared helpers for the verify journeys: instance settings, the CLI wrapper, Chromium, evidence.
 // Nothing here imports src/ or touches the store: every action goes through the CLI, a browser or HTTP.
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -11,7 +11,14 @@ const here = dirname(fileURLToPath(import.meta.url))
 export const ROOT = join(here, '..', '..', '..', '..')
 const RUN = join(ROOT, '.verify', 'run')
 const readRun = (name) => (existsSync(join(RUN, name)) ? readFileSync(join(RUN, name), 'utf8').trim() : '')
-const base = Number(process.env.VERIFY_PORT_BASE || readRun('port-base') || 28790)
+// Same rule as env.sh: the block launch.sh recorded wins over an exported VERIFY_PORT_BASE, so a stale export
+// never sends this worktree's journeys to another worktree's instance. Written back so the CLI wrapper agrees.
+const recordedBase = readRun('port-base')
+if (recordedBase && process.env.VERIFY_PORT_BASE && process.env.VERIFY_PORT_BASE !== recordedBase) {
+  console.error(`verify: ignoring exported VERIFY_PORT_BASE=${process.env.VERIFY_PORT_BASE}; this worktree's instance was launched on ${recordedBase} (.verify/run/port-base)`)
+}
+const base = Number(recordedBase || process.env.VERIFY_PORT_BASE || 28790)
+process.env.VERIFY_PORT_BASE = String(base)
 
 /** Where everything lives for the running instance (same values as env.sh). */
 export const V = {
@@ -26,10 +33,24 @@ export const V = {
   stamp: readRun('stamp')
 }
 
-/** The evidence folder for one feature of this run; survives stop.sh. */
+const claimed = new Set()
+/**
+ * The evidence folder for one feature of this run; survives stop.sh. The first use in a process claims it: a
+ * folder an earlier run of the same feature left under this stamp moves to <feature>.run-<n>, so steps.log,
+ * cli.log and result.json in <feature>/ always describe one run.
+ */
 export function evidence(feature) {
   if (!V.stamp) throw new Error('no .verify/run/stamp: run scripts/launch.sh first')
   const dir = join(ROOT, '.verify', 'evidence', V.stamp, feature)
+  if (!claimed.has(feature)) {
+    claimed.add(feature)
+    if (existsSync(dir) && readdirSync(dir).length > 0) {
+      let n = 1
+      while (existsSync(`${dir}.run-${n}`)) n++
+      renameSync(dir, `${dir}.run-${n}`)
+      console.error(`verify: an earlier ${feature} run in this stamp moved to ${feature}.run-${n}/`)
+    }
+  }
   mkdirSync(dir, { recursive: true })
   return dir
 }

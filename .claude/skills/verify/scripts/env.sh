@@ -5,9 +5,15 @@ VERIFY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 VERIFY_DIR="${VERIFY_ROOT}/.verify"
 VERIFY_RUN="${VERIFY_DIR}/run"
 
-# The port block launch.sh used wins, so every later call talks to the same instance.
-if [ -z "${VERIFY_PORT_BASE:-}" ] && [ -f "${VERIFY_RUN}/port-base" ]; then
-  VERIFY_PORT_BASE="$(cat "${VERIFY_RUN}/port-base")"
+# The port block launch.sh recorded wins over an exported VERIFY_PORT_BASE, so every later call (and stop.sh)
+# talks to this worktree's instance, never to another worktree's block a stale export points at.
+# browser.mjs applies the same rule. To move to another block: stop.sh, then launch.sh with the new value.
+if [ -f "${VERIFY_RUN}/port-base" ]; then
+  verify_recorded_base="$(cat "${VERIFY_RUN}/port-base")"
+  if [ -n "${VERIFY_PORT_BASE:-}" ] && [ "${VERIFY_PORT_BASE}" != "${verify_recorded_base}" ] && [ "${verify_base_warn:-1}" = 1 ]; then
+    echo "verify: ignoring exported VERIFY_PORT_BASE=${VERIFY_PORT_BASE}; this worktree's instance was launched on ${verify_recorded_base} (.verify/run/port-base). Run stop.sh first to move to another block." >&2
+  fi
+  VERIFY_PORT_BASE="${verify_recorded_base}"
 fi
 VERIFY_PORT_BASE="${VERIFY_PORT_BASE:-28790}"
 case "${VERIFY_PORT_BASE}" in

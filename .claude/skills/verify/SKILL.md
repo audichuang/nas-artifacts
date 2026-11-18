@@ -23,7 +23,7 @@ Starts `node src/server.ts` directly (not `pnpm dev`: `node --watch` would make 
 | public content | `http://127.0.0.1:28793` | base+3 |
 | OAuth loopback callback (intercepted by Playwright, never bound) | `http://127.0.0.1:28799/callback` | base+9 |
 
-`VERIFY_PORT_BASE` (default 28790) shifts the block; launch records it, so later calls follow automatically. 18790-18799 belongs to the e2e suite (`test/bridge.e2e.test.ts`) and is refused. Log: `.verify/run/server.log`, PID: `.verify/run/server.pid`. If our server is already up and ready, launch says so and exits 0.
+`VERIFY_PORT_BASE` (default 28790) shifts the block. Launch records it in `.verify/run/port-base`, and from then on every helper uses the recorded block even if your shell still exports another value (it prints `ignoring exported VERIFY_PORT_BASE=…`), so a stale export never reaches another worktree's instance. To move to another block, run `stop.sh`, then `launch.sh` with the new value. 18790-18799 belongs to the e2e suite (`test/bridge.e2e.test.ts`) and is refused. Log: `.verify/run/server.log`, PID: `.verify/run/server.pid`. If our server is already up and ready, launch says so and exits 0.
 
 Ready means usable, all four within ~10 s, else launch prints the log tail and exits 1: `/healthz` 200 on the four ports; both `artifacts: app …` and `artifacts: public app …` log lines; `scripts/artifact list` exits 0; `POST /mcp` without a token answers 401 with `WWW-Authenticate`.
 
@@ -55,13 +55,15 @@ Read-only (starts, writes, kills nothing; prints no token). Checks Node >= 24, `
 node .claude/skills/verify/scripts/journeys/public-sharing.mjs         # one
 ```
 
+Exit codes are the result: a journey exits 0 only if every check passed, `run-all.sh` exits 1 if any journey failed, and its last line is the verdict (`run-all: PASS 7/7 journeys (exit 0)` or `run-all: FAIL … failed: <features> (exit 1)`), above it the `== summary` block with one `pass`/`FAIL` line per journey. Don't pipe a run through `tail` or `head`: the exit status you then see is the pipe's last command's, and the tool shell (zsh) has no `$PIPESTATUS`. Redirect to a file, print `rc=$?`, then read the file. The same holds for `launch.sh`, `doctor.sh` and `stop.sh`.
+
 No test-only endpoints exist and none may be added: every action goes through the CLI, a browser or HTTP. Helpers never import `src/` or touch the store.
 
 Simulated passkey: the virtual authenticator exercises the server's real WebAuthn, session, OAuth and MCP code, but proves nothing about a real device (Touch ID, phone) or the production rpID. A new browser context has no passkey, so every run enrols again with a fresh `login-link`, even on a reused data dir.
 
 ## Evidence
 
-Everything lands in `.verify/evidence/<UTC yyyymmdd-HHMMSS>/<feature>/` (git-ignored, one stamp per launch, kept by cleanup):
+Everything lands in `.verify/evidence/<UTC yyyymmdd-HHMMSS>/<feature>/` (git-ignored, kept by cleanup). Every server start gets a new stamp; if a launch died without `stop.sh`, the next launch copies its `server.log` into the old stamp first. Within one stamp, `<feature>/` always holds a single run: running a journey again moves the earlier run to `<feature>.run-<n>/` (n = 1 is the oldest).
 
 - `steps.log`: every action and `PASS`/`FAIL` check with the observed value.
 - `cli.log`: each CLI command with exit code, stdout and stderr.
@@ -88,7 +90,7 @@ All executable, in `.claude/skills/verify/scripts/`:
 |---|---|
 | `launch.sh` | `launch.sh [--fresh]` start and wait until ready |
 | `doctor.sh` | `doctor.sh` read-only health check |
-| `stop.sh` | `stop.sh` stop our server, keep evidence, drop `.verify/run` |
+| `stop.sh` | `stop.sh` stop our server, keep evidence, drop `.verify/run`; exit 1 if a foreign PID still holds a port |
 | `env.sh` | `. env.sh` (sourced) ports, origins, `verify_ready`, `verify_server_pid` |
 | `artifact` | `artifact <cli args…>` CLI pinned to the local instance; `VERIFY_CLI_DIR=<dir>` = second machine |
 | `browser.mjs` | module: `V` (origins, paths), `launch()`, `cli()`, `cliBackground()`, `contentFrame()`, `withAuthenticator()`, `enrolOwner()`, `shot()`, `save()`, `log()`, `checks()`, `redact()`, `findChromium()` |
@@ -96,7 +98,7 @@ All executable, in `.claude/skills/verify/scripts/`:
 | `mcp-call.mjs` | `node mcp-call.mjs tools/list` · `node mcp-call.mjs tool get '{"id":"…"}'` prints status + JSON; module: `rpc()`, `tool()` |
 | `make-office.mjs` | `node make-office.mjs <dir>` writes `verify.pptx`, `verify.docx`, `verify.xlsx` |
 | `journeys/<feature>.mjs` | `node journeys/<feature>.mjs` one feature; exit 0 = every check passed |
-| `journeys/run-all.sh` | `run-all.sh [feature …]` in map order, with a summary |
+| `journeys/run-all.sh` | `run-all.sh [feature …]` in map order; `pass`/`FAIL` per journey, last line the verdict; exit 0 = all passed, 1 = any failed |
 
 A quick MCP session by hand:
 

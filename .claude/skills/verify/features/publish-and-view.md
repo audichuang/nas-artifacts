@@ -29,11 +29,11 @@ node .claude/skills/verify/scripts/journeys/publish-and-view.mjs
 
 What it does, with the observable result of each step:
 
-- Writes a site (index.html with a `fetch('<app>/api/artifacts')` script, `#leak` marker and `<a id="next" href="two.html">`), `notes.md` (3 h2s) and `talk.slides.md` (2 slides) under `.verify/run/work/`.
+- Writes a site (index.html with a `fetch('<public app>/.well-known/oauth-protected-resource/mcp')` script that records any `securitypolicyviolation` in a `#leak` marker, and `<a id="next" href="two.html">`), `notes.md` (3 h2s) and `talk.slides.md` (2 slides) under `.verify/run/work/`.
 - `artifact check <site>`: one warning naming `fetch(` and connect-src 'none'.
 - `artifact publish <site> --new --title … --icon 🧪 --description … --json`: `currentVersion` 1, `url` on `:28790`, `contentUrl` on `:28791`. Then it publishes the Markdown file and the deck, and `artifact list` shows all three.
 - Gallery `/`: `.card` with the title. `#search` filled with a unique needle from the page text leaves exactly one `.card`.
-- Clicks the card: the viewer response has `content-security-policy: frame-src <content>/a/<id>/`. `#frame #t` renders. The page frame's `origin` is `'null'` and `#leak` reads `blocked`. The frame document response CSP has `sandbox allow-scripts …` without `allow-same-origin` and has `connect-src 'none'`.
+- Clicks the card: the viewer response has `content-security-policy: frame-src <content>/a/<id>/`. `#frame #t` renders. The page frame's `origin` is `'null'`. Control: an `about:blank` page (opaque origin, no CSP) fetches the same URL and gets `null 200`, since that route answers `Access-Control-Allow-Origin: *`. In the frame, `#leak` reads `csp:connect-src`, so the CSP blocked the fetch, not CORS. The frame document response CSP has `sandbox allow-scripts …` without `allow-same-origin` and has `connect-src 'none'`.
 - Clicks `#next` in the frame: `#two` renders and the viewer URL becomes `?path=two.html`.
 - A new tab goes to `<content>/a/<id>/v/1/index.html` and ends on `<app>/a/<id>`.
 - `artifact read <id>` is byte-equal to index.html.
@@ -49,4 +49,5 @@ Evidence: `cli.log`, `headers.json` (viewer and frame document headers), `01-gal
 - The frame document is `/a/<id>/v/<n>/` (no `index.html`) when the entry is `index.html`. Match both forms when capturing its response.
 - The CLI remembers a published path in `ARTIFACTS_CONFIG_DIR/state.json`. Republishing the same path makes v2 of the same artifact, so the journey passes `--new`.
 - Gallery search is debounced. Wait for the card count to settle before counting.
+- The in-page fetch must target a URL that sends `Access-Control-Allow-Origin: *`. The tailnet `/api` sends no CORS headers, so a fetch from the opaque-origin frame fails there with or without `connect-src 'none'`. An earlier version of this journey fetched `/api/artifacts`, and its marker still read `blocked` with the CSP widened to `connect-src *`. The control check keeps the target honest.
 - Publish output and the gallery card carry the source host (`verify-local`) and the scratch path.

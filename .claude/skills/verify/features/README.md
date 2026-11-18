@@ -6,7 +6,7 @@ This directory is the maintained source for verifying what users and agents can 
 
 - `.claude/skills/verify/scripts/launch.sh --fresh` printed `ready`. `doctor.sh` exits 0.
 - Every CLI call goes through `.claude/skills/verify/scripts/artifact`, never the bare CLI, which defaults to production.
-- Evidence goes to `.verify/evidence/<stamp>/<feature>/`, where `<stamp>` is the launch time in `.verify/run/stamp`.
+- Evidence goes to `.verify/evidence/<stamp>/<feature>/`, where `<stamp>` is the server start time in `.verify/run/stamp`. A rerun of a journey in the same stamp moves the earlier run to `<feature>.run-<n>/`.
 - Never drive an instance this run did not start. `doctor.sh` shows whose PID holds the ports.
 
 ## Features
@@ -26,15 +26,17 @@ This directory is the maintained source for verifying what users and agents can 
 ```bash
 .claude/skills/verify/scripts/launch.sh --fresh
 .claude/skills/verify/scripts/doctor.sh
-.claude/skills/verify/scripts/journeys/run-all.sh      # the seven above, in this table's order
+.claude/skills/verify/scripts/journeys/run-all.sh > .verify/run-all.txt 2>&1; echo "rc=$?"   # the seven above, in order
 .claude/skills/verify/scripts/stop.sh
 ```
+
+`run-all.sh` exits 0 only if every journey passed and 1 otherwise; its last line is the verdict and the `== summary` block above it has one `pass`/`FAIL` line per journey. Redirect rather than pipe it (a pipe reports the last command's exit code), then read the file.
 
 The journeys do not depend on each other; each creates its own artifacts with a per-run nonce in titles, so they also run on a reused data dir. Run one with `node .claude/skills/verify/scripts/journeys/<feature>.mjs`.
 
 ## Proof and failure reporting
 
-- A journey's `result.json` lists every check with the observed value. Exit 0 only if all passed.
+- A journey's `result.json` lists every check with the observed value. A journey exits 0 only if all passed; `run-all.sh` exits 1 if any journey failed.
 - When a step fails because the product is wrong, report the failing check and its evidence. Do not loosen the check. Record the reason in that feature's Gotchas.
 - A skipped entry point is reported as not run. Do not count it as verified through another path.
 

@@ -2,6 +2,8 @@
 # Start the local verify instance (all four listeners) and wait until it is usable.
 # Usage: scripts/launch.sh [--fresh]     --fresh wipes .verify/run/data first. VERIFY_PORT_BASE shifts the ports.
 set -euo pipefail
+requested_base="${VERIFY_PORT_BASE:-}"
+verify_base_warn=0
 . "$(dirname "$0")/env.sh"
 
 fresh=0
@@ -9,11 +11,20 @@ if [ "${1:-}" = "--fresh" ]; then fresh=1; elif [ -n "${1:-}" ]; then echo "usag
 
 pid="$(verify_server_pid)"
 if [ -n "${pid}" ]; then
+  if [ -n "${requested_base}" ] && [ "${requested_base}" != "${VERIFY_PORT_BASE}" ]; then
+    echo "launch: this worktree's instance (pid ${pid}) runs on ${VERIFY_PORT_BASE}, not the requested ${requested_base}; run stop.sh first to move it" >&2
+  fi
   if [ "${fresh}" = 1 ]; then echo "launch: already running (pid ${pid}); run stop.sh before --fresh" >&2; exit 1; fi
   if verify_ready; then echo "launch: already running and ready (pid ${pid})"; exit 0; fi
   echo "launch: pid ${pid} is running but not ready; see ${VERIFY_RUN}/server.log or run stop.sh" >&2; exit 1
 fi
 rm -f "${VERIFY_RUN}/server.pid"
+# No live server of ours: a recorded block from a dead launch must not override the one asked for now.
+if [ -n "${requested_base}" ] && [ "${requested_base}" != "${VERIFY_PORT_BASE}" ]; then
+  rm -f "${VERIFY_RUN}/port-base"
+  VERIFY_PORT_BASE="${requested_base}"
+  . "$(dirname "$0")/env.sh"
+fi
 
 busy=0
 for port in ${VERIFY_PORTS}; do
@@ -26,8 +37,17 @@ mkdir -p "${VERIFY_RUN}"
 if [ "${fresh}" = 1 ]; then rm -rf "${VERIFY_RUN}/data"; fi
 mkdir -p "${VERIFY_RUN}/data" "${VERIFY_RUN}/cli"
 echo "${VERIFY_PORT_BASE}" > "${VERIFY_RUN}/port-base"
-[ -f "${VERIFY_RUN}/stamp" ] || date -u +%Y%m%d-%H%M%S > "${VERIFY_RUN}/stamp"
-evidence="${VERIFY_DIR}/evidence/$(cat "${VERIFY_RUN}/stamp")"
+# One stamp per server start. A previous launch that died without stop.sh keeps its own stamp folder, and its
+# server.log goes there before the new server overwrites it.
+if [ -f "${VERIFY_RUN}/stamp" ]; then
+  old_evidence="${VERIFY_DIR}/evidence/$(cat "${VERIFY_RUN}/stamp")"
+  mkdir -p "${old_evidence}"
+  [ -f "${VERIFY_RUN}/server.log" ] && cp "${VERIFY_RUN}/server.log" "${old_evidence}/server.log"
+fi
+stamp="$(date -u +%Y%m%d-%H%M%S)"
+while [ -e "${VERIFY_DIR}/evidence/${stamp}" ]; do sleep 1; stamp="$(date -u +%Y%m%d-%H%M%S)"; done
+echo "${stamp}" > "${VERIFY_RUN}/stamp"
+evidence="${VERIFY_DIR}/evidence/${stamp}"
 mkdir -p "${evidence}"
 
 cd "${VERIFY_ROOT}"
