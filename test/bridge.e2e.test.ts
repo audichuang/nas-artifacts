@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { createServer, type Server } from 'node:http'
 import { after, before, test } from 'node:test'
 import { serve, type ServerType } from '@hono/node-server'
-import { chromium, type Browser } from 'playwright-core'
+import { chromium, type Browser, type Page } from 'playwright-core'
 import pptxgen from 'pptxgenjs'
 import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
@@ -1142,6 +1142,56 @@ test('the tailnet gallery and viewer show which artifacts are public, with the p
   await viewer.locator('#title').waitFor({ state: 'attached' })
   assert.equal(await viewer.locator('#public-link').isHidden(), true)
   await viewer.close()
+})
+
+test('the 公開 chip stays on screen and tappable when a page slides the phone bar away, and covers no bar control', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  // The page reports a scroll position it never had: any page can hide the bar, so visibility must not live in it.
+  const forged = `<!doctype html><body><h1>短頁</h1><p id="sent"></p><script>
+addEventListener('load', () => setTimeout(() => {
+  parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: '', scrollY: 5000 } }, '*')
+  document.getElementById('sent').textContent = 'sent'
+}, 300))
+</script></body>`
+  const { id } = store.publish({ title: '藏起工具列', files: { 'index.html': { content: Buffer.from(forged) } } })
+  store.setVisibility(id, 'public')
+  const chip = (page: Page) => page.locator('#public-link').evaluate((el) => {
+    const r = el.getBoundingClientRect()
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    const overlaps = [...document.querySelectorAll('.viewer-bar a, .viewer-bar button, .viewer-bar select')].filter((other) => {
+      const o = other.getBoundingClientRect()
+      return o.width > 0 && o.height > 0 && o.left < r.right && r.left < o.right && o.top < r.bottom && r.top < o.bottom
+    }).map((other) => other.id || other.className)
+    return {
+      inBar: Boolean(el.closest('.viewer-bar')),
+      inside: r.width > 0 && r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth,
+      hit: Boolean(hit && el.contains(hit)),
+      overlaps,
+      barAway: document.body.classList.contains('bar-away')
+    }
+  })
+  const viewer = await browser.newPage()
+  try {
+    await viewer.setViewportSize({ width: 390, height: 760 })
+    await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+    await viewer.locator('#public-link:not([hidden])').waitFor({ timeout: 5000 })
+    const shown = await chip(viewer)
+    assert.deepEqual(shown, { inBar: false, inside: true, hit: true, overlaps: [], barAway: false }, `bar showing: ${JSON.stringify(shown)}`)
+    await viewer.frameLocator('#frame').locator('#sent', { hasText: 'sent' }).waitFor({ timeout: 5000 })
+    await viewer.waitForFunction(() => document.body.classList.contains('bar-away'), null, { timeout: 3000 })
+    await viewer.waitForTimeout(400) // the 0.2 s slide
+    const away = await chip(viewer)
+    assert.deepEqual({ ...away, overlaps: [] }, { inBar: false, inside: true, hit: true, overlaps: [], barAway: true }, `bar away: ${JSON.stringify(away)}`)
+    assert.equal(await viewer.locator('#public-link').getAttribute('href'), `http://localhost:${PUBLIC_APP_PORT}/a/${id}`)
+
+    await viewer.setViewportSize({ width: 1280, height: 800 })
+    await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+    await viewer.frameLocator('#frame').locator('#sent', { hasText: 'sent' }).waitFor({ timeout: 5000 })
+    await viewer.waitForTimeout(300)
+    const desk = await chip(viewer)
+    assert.deepEqual(desk, { inBar: false, inside: true, hit: true, overlaps: [], barAway: false }, `desktop: ${JSON.stringify(desk)}`)
+  } finally {
+    await viewer.close()
+  }
 })
 
 // The owner on the public app: a passkey (Chromium's virtual authenticator), a session, and private pages

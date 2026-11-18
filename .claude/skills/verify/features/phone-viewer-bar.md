@@ -8,7 +8,7 @@ On a phone-width screen (≤ 720 px) the viewer bar slides away while the reader
 - `desktop`: wider than 720 px the class is never added.
 - `page can hide it`: any page can post a `place` report with a large `scrollY`.
 - `sign-in state`: the public gallery's 帳號 link and `/account`'s 登出 / 登出所有裝置 are not in a sliding bar.
-- `visibility`: the tailnet gallery card's 公開 mark (`.public-mark`), and in the viewer the 公開 chip `#public-link`.
+- `visibility`: the tailnet gallery card's 公開 mark (`.public-mark`), and in the viewer the 公開 chip `#public-link`. The chip is a sibling after the bar's `<header>`, not inside it: `position: fixed` at the bar's right end (`top: 9px`), and while it shows the bar keeps `--chip-w` of padding on its right for it (`public/app.css`). The same chip appears in the owner's viewer on the public app.
 
 ## How to get to it (user POV)
 
@@ -29,14 +29,14 @@ All positions come from `inViewport(page, selector)` (`getBoundingClientRect` ag
 - (b) The same page at 1200 px: after the wheel the bar is still on screen, no `bar-away`.
 - (c) A short page whose script, 600 ms after `load`, posts `{ __artifact: 1, report: { type: 'place', path: location.pathname, hash: '', scrollY: 5000 } }`: the bar goes away, and a wheel up does not bring it back. This is the documented property, expected to pass.
 - (d) Owner enrolled in a 390 px context: the public gallery's `a[href="/account"]` is on screen, `/account`'s `#logout` and `#logout-all` are on screen and enabled, and neither page has a `.viewer-bar`.
-- (e) The (c) page made public with `artifact visibility <id> public`: the tailnet gallery card's `.public-mark` is on screen at 390 px; in the viewer, control first: `#public-link` on screen while the bar shows; then after the page's forged report hides the bar, a visibility indicator must still be on screen. All indicators and their rects are saved in `visibility-indicators.json`.
+- (e) The (c) page made public with `artifact visibility <id> public`: the tailnet gallery card's `.public-mark` is on screen at 390 px; in the viewer, control first: `#public-link` on screen while the bar shows; then after the page's forged report hides the bar, the chip is still on screen, outside `.viewer-bar`, hit-testable (`elementFromPoint` at its centre returns it) and links to the public URL. The owner (enrolled in (d)) opens the same page on the public app and gets the same result. All indicators and their rects are saved in `visibility-indicators.json`; the 公開 page's viewer is then shot at 390 px and 1280 px in light and dark.
 
-Evidence: `01-phone-bar-away.png` … `07-public-page-bar-hidden.png`, `visibility-indicators.json`, `cli.log`, `result.json`.
+Evidence: `01-phone-bar-away.png` … `08-owner-viewer-bar-hidden.png`, `09-viewer-public-{390,1280}-{light,dark}.png`, `visibility-indicators.json`, `cli.log`, `result.json`.
 
 ## Gotchas
 
-- **Check (e) is red today, a product finding.** In the viewer the only visibility indicator is the 公開 chip `#public-link`, and it sits inside `.bar-actions` in the sliding bar (`src/pages.ts`). Measured at 390 px: with the bar showing it is at top 48 / bottom 81 (on screen); after the page's forged report it is at top -44 / bottom -11 with `body.bar-away`, and no other indicator exists. The AGENTS.md rule ("keep controls that must stay reachable (sign-in state, visibility) out of that bar") came in 5bec792; the chip was added into the bar afterwards in 0169de7. The owner decides: move the chip out of the bar, or reword the rule to exempt an indicator that only mirrors state set with the CLI. Do not loosen the check.
+- Check (e) was red until the chip moved out of the bar: in `.bar-actions` it sat at top -44 / bottom -11 at 390 px once the page's forged report hid the bar. (c) still passes on purpose: a page can hide the bar; what (e) guards is that the visibility mark is not in it. Don't move the chip back into `.viewer-bar`, and keep `--chip-w` at least the chip's width or it covers the bar's last control (the e2e test checks for overlap).
 - The forged report must land after the bridge's own: the bridge posts `scrollY: 0` on `DOMContentLoaded`, and a report below 80 removes the class. Hence the `load` + 600 ms delay and the `#sent` marker the journey waits for.
 - Wait ~700 ms after a wheel: the bridge throttles scroll reports to 250 ms and the slide transition takes 0.2 s.
 - `page.mouse.wheel` over the frame does scroll the cross-origin sandboxed frame in the headless shell (frame `scrollY` 800 observed); no keyboard fallback needed.
-- The owner viewer on the public app has the same bar; it is not driven here because the owner has no sign-in control in it (the 帳號 link is on the gallery).
+- The owner viewer on the public app has the same bar and the same chip; (e) drives it for the chip. The owner has no sign-in control in that bar (the 帳號 link is on the gallery).

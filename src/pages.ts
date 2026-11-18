@@ -60,7 +60,6 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     <select id="version"></select>
   </label>
   <div class="bar-actions">
-    <a id="public-link" class="button public-chip" href="#" target="_blank" rel="noopener" title="任何人拿到連結都能看(唯讀)" hidden>公開</a>
     <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
     <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
     <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
@@ -73,6 +72,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     <button id="menu-delete" class="icon-button danger" type="button" title="刪除">🗑</button>
   </div>
 </header>
+<a id="public-link" class="button public-chip" href="#" target="_blank" rel="noopener" title="任何人拿到連結都能看(唯讀)" hidden>公開</a>
 <div class="viewer">
   <section id="editor" class="editor" aria-label="編輯簡報" hidden>
     <div class="comments-head">

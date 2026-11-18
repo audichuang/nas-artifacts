@@ -26,6 +26,13 @@ addEventListener('load', () => setTimeout(() => {
 </script>`
 
 const barAway = (page) => page.evaluate(() => document.body.classList.contains('bar-away'))
+// The 公開 chip as the reader meets it: its rect, whether it sits in the sliding bar, and whether a tap at its
+// centre reaches it (a chip under the sticky bar or the frame would be on screen yet unusable).
+const chipState = (page) => page.locator('#public-link').evaluate((el) => {
+  const r = el.getBoundingClientRect()
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+  return { inBar: Boolean(el.closest('.viewer-bar')), hit: Boolean(hit && el.contains(hit)), top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) }
+})
 const frameScrollY = (page) => contentFrame(page, V.content).evaluate(() => scrollY)
 async function wheelOverFrame(page, dy) {
   const box = await page.locator('#frame').boundingBox()
@@ -99,7 +106,6 @@ try {
   const enabled = (await owner.locator('#logout').isEnabled()) && (await owner.locator('#logout-all').isEnabled())
   c.ok(logout.inside && logoutAll.inside && enabled && (await owner.locator('.viewer-bar').count()) === 0, '(d) /account at 390px: 登出 and 登出所有裝置 on screen and enabled, no sliding bar', `${JSON.stringify(logout)} ${JSON.stringify(logoutAll)}`)
   await shot(owner, F, '05-account-phone')
-  await ownerCtx.close()
 
   // (e) visibility while a page has hidden the bar.
   const vis = cli(F, ['visibility', hostile.id, 'public'])
@@ -116,6 +122,7 @@ try {
   await pub.locator('#public-link:not([hidden])').waitFor({ timeout: 5000 })
   const chipBefore = await inViewport(pub, '#public-link')
   c.ok(chipBefore.inside && !(await barAway(pub)), '(e) control: with the bar showing, the 公開 chip (#public-link) is on screen at 390px', JSON.stringify(chipBefore))
+  await shot(pub, F, '07a-public-page-bar-showing')
   await pub.frameLocator('#frame').locator('#sent', { hasText: 'forged report sent' }).waitFor({ timeout: 5000 })
   await pub.waitForTimeout(500)
   const chipAfter = await inViewport(pub, '#public-link')
@@ -125,8 +132,34 @@ try {
   }))
   save(F, 'visibility-indicators.json', { barAway: await barAway(pub), indicators })
   log(F, `visibility indicators in the viewer after the page hid the bar: ${JSON.stringify(indicators)}`)
+  const chipHit = await chipState(pub)
   c.ok(chipAfter.inside, '(e) after the page hid the bar, a visibility indicator is still on screen in the viewer', `bar-away ${await barAway(pub)} #public-link ${JSON.stringify(chipAfter)}`)
+  c.ok(!chipHit.inBar && chipHit.hit && (await pub.locator('#public-link').getAttribute('href')) === `${V.publicApp}/a/${hostile.id}`, '(e) the 公開 chip is outside .viewer-bar, a tap at its centre reaches it, and it links to the public URL', JSON.stringify(chipHit))
   await shot(pub, F, '07-public-page-bar-hidden')
+
+  // (e) the owner's viewer on the public app shows the same chip; the page hides that bar too.
+  await owner.goto(`${V.publicApp}/a/${hostile.id}`)
+  await owner.frameLocator('#frame').locator('#sent', { hasText: 'forged report sent' }).waitFor({ timeout: 5000 })
+  await owner.waitForTimeout(500)
+  const ownerChip = await inViewport(owner, '#public-link')
+  const ownerHit = await chipState(owner)
+  c.ok((await barAway(owner)) && ownerChip.inside && !ownerHit.inBar && ownerHit.hit, '(e) owner viewer on the public app at 390px: the page hid the bar, the 公開 chip is still on screen and tappable', `bar-away ${await barAway(owner)} ${JSON.stringify(ownerHit)}`)
+  await shot(owner, F, '08-owner-viewer-bar-hidden')
+  await ownerCtx.close()
+
+  // Evidence for the eye: the public page's tailnet viewer at 390px (bar hidden by the page) and 1280px, light and dark.
+  for (const colorScheme of ['light', 'dark']) {
+    for (const viewport of [PHONE, { width: 1280, height: 800 }]) {
+      const ctx = await browser.newContext({ viewport, colorScheme })
+      const page = await ctx.newPage()
+      await page.goto(hostile.url)
+      await page.frameLocator('#frame').locator('#sent', { hasText: 'forged report sent' }).waitFor({ timeout: 5000 })
+      await page.waitForTimeout(500)
+      log(F, `${viewport.width}px ${colorScheme}: bar-away ${await barAway(page)} chip ${JSON.stringify(await chipState(page))}`)
+      await shot(page, F, `09-viewer-public-${viewport.width}-${colorScheme}`)
+      await ctx.close()
+    }
+  }
   save(F, 'ids.json', { long: long.id, hostile: hostile.id })
   for (const id of [long.id, hostile.id]) cli(F, ['delete', id, '--yes'], { quiet: true })
   c.finish()
