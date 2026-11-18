@@ -143,7 +143,7 @@ textarea { resize: vertical; }
   .viewer-bar .version-picker select { width: 100%; }
   /* Reading down a page, the bar slides away and the frame takes its room; scrolling up brings it back. */
   .viewer-bar { transition: margin-top 0.2s ease; }
-  .viewer { transition: height 0.2s ease; }
+  .viewer { transition: height 0.2s ease, margin-top 0.2s ease; }
   body.bar-away .viewer-bar { position: relative; margin-top: calc(-1 * var(--bar-h)); }
   body.bar-away .viewer { height: 100%; }
 }
@@ -198,7 +198,6 @@ body:has(#public-link:not([hidden])) .viewer-bar { padding-right: calc(16px + va
 @media (max-width: 720px) {
   #public-link { right: 12px; }
   body:has(#public-link:not([hidden])) .viewer-bar { padding-right: calc(12px + var(--chip-w) + 8px); }
-  .viewer { transition: margin-top 0.2s ease; }
   body.bar-away #public-link { top: 6px; }
   body.bar-away:has(#public-link:not([hidden])) .viewer { margin-top: var(--chip-strip); height: calc(100% - var(--chip-strip)); }
 }

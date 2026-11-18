@@ -62,6 +62,8 @@ try {
   await phone.waitForTimeout(400)
   const barStart = await inViewport(phone, '.viewer-bar')
   c.ok(barStart.inside && !(await barAway(phone)), '(a) 390px: the viewer bar starts on screen', JSON.stringify(barStart))
+  const slides = await phone.locator('.viewer').evaluate((el) => getComputedStyle(el).transitionProperty)
+  c.ok(/\bheight\b/.test(slides) && /\bmargin-top\b/.test(slides), '(a) 390px: the frame animates its height and top margin with the sliding bar', `.viewer transition-property: ${slides}`)
   await wheelOverFrame(phone, 800)
   const scrolled = await frameScrollY(phone)
   const awayBar = await inViewport(phone, '.viewer-bar')

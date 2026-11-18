@@ -1179,6 +1179,9 @@ addEventListener('load', () => setTimeout(() => {
     await viewer.locator('#public-link:not([hidden])').waitFor({ timeout: 5000 })
     const shown = await chip(viewer)
     assert.deepEqual(shown, { coversFrame: false, inBar: false, inside: true, hit: true, overlaps: [], barAway: false }, `bar showing: ${JSON.stringify(shown)}`)
+    // The frame's height and top margin follow the sliding bar: one `transition` must name both, or the later rule drops one.
+    const slides = await viewer.locator('.viewer').evaluate((el) => getComputedStyle(el).transitionProperty.split(/,\s*/).sort())
+    assert.deepEqual(slides, ['height', 'margin-top'], `.viewer transition-property: ${slides}`)
     await viewer.frameLocator('#frame').locator('#sent', { hasText: 'sent' }).waitFor({ timeout: 5000 })
     await viewer.waitForFunction(() => document.body.classList.contains('bar-away'), null, { timeout: 3000 })
     await viewer.waitForTimeout(400) // the 0.2 s slide
