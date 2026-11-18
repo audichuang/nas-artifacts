@@ -131,7 +131,7 @@ tailnet 上原本的兩個 port 在三個階段都**完全不變**：既有網�
   - 授權頁要求 passkey 登入（階段 2 的 session），顯示 client 名稱與 redirect host，擁有者按「允許」才發碼。同意送出用 fetch 加 `x-artifact-client` 標頭（擋 CSRF），不是表單。
   - access token 1 小時，refresh token 30 天、每次換新（rotation）、重用舊的就撤銷整串，沒有寬限期（Claude Code 跨行程序列化 refresh；回應遺失就要重新授權）。
   - CORS 只開在 `/.well-known/*` 與 `/oauth/{token,register,revoke}`、`/mcp`；同意頁與擁有者路由沒有。token 只存摘要。設定頁可撤銷某個 client 的全部 token。
-- **publish token 停用時程**：MCP 上線並在三個 client 實測過後，SKILL.md 改教 MCP；CLI 保留一段相容期（各機器 aghub 更新完），之後由擁有者決定何時從伺服器移除 token。停用前不動 tailnet 的 token 路由。
+- **publish token 停用時程**：MCP 在 Claude Code 與 Codex 實測過後（claude.ai 連接器擁有者決定不測），SKILL.md 以 CLI 為主，沒有 tailnet／CLI 時改走 MCP；CLI 保留一段相容期（各機器 aghub 更新完），之後由擁有者決定何時從伺服器移除 token。停用前不動 tailnet 的 token 路由。
 
 ## 安全面的改變
 
