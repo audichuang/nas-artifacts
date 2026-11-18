@@ -5,7 +5,7 @@ description: Publishes HTML or Markdown pages and slide decks to the user's self
 
 # nas-artifacts
 
-Pages live on the user's NAS and open only from devices on their tailnet, with no sign-in. Every page gets a stable URL; republishing the same path makes a new version at the same URL, and open viewers switch to it live.
+Pages live on the user's NAS. Devices on their tailnet open them with no sign-in; off the tailnet the owner signs in with a passkey on the public address, and a page the user makes public opens read-only for anyone with the link. Every page gets a stable URL; republishing the same path makes a new version at the same URL, and open viewers switch to it live.
 
 ## Start from a template
 
