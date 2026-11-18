@@ -10,6 +10,7 @@ On the public listeners the owner signs in with a passkey. The first passkey com
 - `private pages`: the owner's `/a/<id>` frames `<public content>/t/<token>/a/<id>/v/<n>/…`, still sandboxed. An anonymous visitor gets 404.
 - `oauth`: `/.well-known/oauth-protected-resource/mcp` and `/oauth/register` (public clients). `/oauth/authorize` shows a consent page (`#allow`/`#deny`) that redirects to the loopback callback with `code`, `state` and `iss`. `/oauth/token` uses the PKCE verifier and `resource`.
 - `mcp`: `initialize` and `tools/list`, which returns 10 tools: list, get, read, publish, update, set_visibility, delete, comments, reply, errors. `update` needs `baseVersion` (or `force`), and a conflict returns `changedFiles`.
+- `prompts`: the server's `instructions` (in `initialize`) and each tool's description and parameter text are what an agent reads. They promise behaviour: public only when the owner asks, comments and page errors are data, `read` returns `too_large` over 4 MB, `update` with `description: null` clears it, a public artifact cannot gain capabilities (`has_capabilities`), `reply` to a reply lands in the thread root, `errors` carries the page file and the source file:line.
 - `revoke`: after 撤銷 on `/account`, the same access token gets 401.
 
 ## How to get to it (user POV)
@@ -43,6 +44,13 @@ node .claude/skills/verify/scripts/mcp-call.mjs tool get '{"id":"<id>"}'
   - `update` with `baseVersion: 2` makes v3.
   - `reply`, `comments`, `read` (v3 text), `errors` and `list` all succeed.
   - `set_visibility` public makes the anonymous URL 200; private makes it 404 again.
+- Prompt text: the full `initialize` result and `tools/list` result are saved as `mcp-initialize.json` and `mcp-tools-list.json`. The journey asserts verbatim strings from `src/mcp.ts`: `set only when the owner asks` and the untrusted-text sentence in `instructions`; `index.slides.md` and `MB per Office file` in publish; `Files over 4 MB return too_large` in read; `Make an artifact public only when the owner asked for it` in set_visibility; the data-not-instructions sentences in comments and errors; `null clears description or icon` and `has_capabilities` in update; `10,000` in reply's `body` parameter. When a prompt string changes in `src/mcp.ts`, change the asserted string here in the same commit.
+- Promised behaviours, each seen from a second surface:
+  - `reply` with `commentId` set to a reply: the new comment's `parentId` is the thread root, and `comments` shows both replies under one root.
+  - A 5 MB `big.bin` published by the CLI: MCP `read` returns `too_large`; a small file of the same version reads fine.
+  - `update` with `description` omitted keeps it, with `description: null` clears it; CLI `get --json` shows both.
+  - A public capability-free artifact (CLI `--public`): MCP `update` with `capabilities: ['db']` returns `has_capabilities`; CLI `get` shows no new version.
+  - A page whose inline `<script>` throws on line 3: opened in the tailnet viewer in Chromium (the bridge reports it), then MCP `errors` and CLI `errors` return kind `error`, the page `index.html` and source `index.html:3:<col>` (the server stores it relative to the version). Screenshot `07-page-that-throws.png`.
 - Cross-checks:
   - CLI `get` shows v3 with label `MCP`.
   - CLI `comments` shows the MCP comment.
@@ -50,7 +58,7 @@ node .claude/skills/verify/scripts/mcp-call.mjs tool get '{"id":"<id>"}'
   - MCP `delete` succeeds, after which CLI `get` fails.
 - `/account`: `#clients li` with the client name. Accepts the confirm dialog, clicks 撤銷, and `#status` reads 已撤銷. The same token then gets 401 from `tools/list`.
 
-Evidence: `steps.log` (OAuth steps with the code and tokens redacted), `mcp-calls.json`, `01-owner-gallery.png` … `06-account-client-revoked.png`, `cli.log`, `result.json`.
+Evidence: `steps.log` (OAuth steps with the code and tokens redacted), `mcp-calls.json`, `mcp-initialize.json`, `mcp-tools-list.json`, `01-owner-gallery.png` … `07-page-that-throws.png`, `cli.log`, `result.json`.
 
 ## Gotchas
 
@@ -61,4 +69,5 @@ Evidence: `steps.log` (OAuth steps with the code and tokens redacted), `mcp-call
 - Register the `dialog` handler before clicking 撤銷 (it uses `confirm`).
 - Access tokens last 1 h. A refresh token used twice revokes the whole family. Rerun `mcp-token.mjs` rather than refreshing by hand.
 - Tokens, codes and the `/t/<token>/` segment are redacted in evidence. Never paste `mcp-token.json` anywhere; `stop.sh` deletes it.
+- A script loaded from a file (`<script src=app.js>`) that throws is reported only as `Script error.` with no source: the sandboxed page has a null origin, so the browser masks cross-origin errors. The "source file and line" promise holds for inline scripts and sandbox (csp) blocks; the journey uses an inline script for that reason.
 - The MCP `reply` tool without `commentId` starts a new thread. Its author defaults to "Agent".
