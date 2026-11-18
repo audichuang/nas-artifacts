@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# The artifact CLI pinned to the local verify instance. Use this, never the bare CLI: the bare CLI defaults to
+# the production URL and reads the real publish token from ~/.config/nas-artifacts/config.json.
+# Usage: scripts/artifact <cli args…>     VERIFY_CLI_DIR=<dir> acts as a second machine (own state.json).
+set -euo pipefail
+. "$(dirname "$0")/env.sh"
+
+# Assigned unconditionally: whatever the caller exported is overridden.
+ARTIFACTS_URL="${VERIFY_APP_ORIGIN}"
+ARTIFACTS_TOKEN="${VERIFY_TOKEN}"
+ARTIFACTS_CONFIG_DIR="${VERIFY_CLI_DIR:-${VERIFY_RUN}/cli}"
+ARTIFACTS_MACHINE="verify-local"
+
+case "${ARTIFACTS_URL}" in
+  http://localhost:*|http://127.0.0.1:*) ;;
+  *) echo "verify/artifact: refusing non-loopback URL ${ARTIFACTS_URL}" >&2; exit 64 ;;
+esac
+mkdir -p "${ARTIFACTS_CONFIG_DIR}"
+config_dir="$(cd "${ARTIFACTS_CONFIG_DIR}" && pwd -P)"
+real_dir="$(cd "${HOME}/.config/nas-artifacts" 2>/dev/null && pwd -P || true)"
+if [ -n "${real_dir}" ] && [ "${config_dir}" = "${real_dir}" ]; then
+  echo "verify/artifact: refusing the real CLI config dir ${ARTIFACTS_CONFIG_DIR}" >&2; exit 64
+fi
+export ARTIFACTS_URL ARTIFACTS_TOKEN ARTIFACTS_CONFIG_DIR ARTIFACTS_MACHINE
+exec node "${VERIFY_ROOT}/skill/nas-artifacts/scripts/artifact.mjs" "$@"

@@ -1,0 +1,3 @@
+overrides:
+  # pptxgenjs depends on image-size but never loads it; this only clears GHSA-w3rx-r6r6-pgpr and its sibling advisory.
+  image-size: 2.0.3

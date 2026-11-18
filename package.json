@@ -2,7 +2,7 @@
   "name": "nas-artifacts",
   "version": "0.1.0",
   "private": true,
-  "description": "Self-hosted, tailnet-only artifact publishing: HTML/Markdown pages with versions, assets and page capabilities.",
+  "description": "Self-hosted artifact publishing (tailnet, plus optional public links and owner sign-in): HTML/Markdown pages with versions, assets and page capabilities.",
   "license": "MIT",
   "type": "module",
   "engines": {
