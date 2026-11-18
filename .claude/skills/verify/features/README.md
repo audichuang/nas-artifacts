@@ -26,7 +26,7 @@ This directory is the maintained source for verifying what users and agents can 
 | pins | viewer `#pin` + gallery in two contexts + CLI | ☆→★ survives reload, another device lists it first with ★, unpin reverses | [pins.md](pins.md) |
 | phone-viewer-bar | viewer and public app at 390x844 | bar slides away and back on a phone, not on desktop; a page can hide it; sign-in and visibility stay reachable | [phone-viewer-bar.md](phone-viewer-bar.md) |
 | page-errors | viewer ⚠ dialog + CLI `errors` | throw, sandbox block, rejection, missing picture with page files; repeats counted; per version | [page-errors.md](page-errors.md) |
-| delete-and-blobs | CLI delete/asset + API asset delete + viewer | delete needs --yes, viewer told, URLs 404, shared bytes survive; asset delete token-only | [delete-and-blobs.md](delete-and-blobs.md) |
+| delete-and-blobs | CLI delete/asset delete + viewer; 401 over HTTP | delete needs --yes, viewer told, URLs 404, shared bytes survive; asset delete token-only | [delete-and-blobs.md](delete-and-blobs.md) |
 
 ## Full pass, in order
 

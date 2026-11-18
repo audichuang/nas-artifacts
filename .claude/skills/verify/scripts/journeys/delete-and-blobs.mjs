@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Journey: deleting an artifact and an asset. Two artifacts share an identical file (one content-addressed blob).
 // Deleting one needs --yes, tells its open viewer, and makes its URLs 404, while the other still serves the shared
-// bytes. An uploaded asset with the same bytes is deleted through the token-only API (the CLI has no command for
-// it): 401 without the token, 204 with it, then its URL is 404 and the published file with those bytes survives.
+// bytes. An uploaded asset with the same bytes is deleted with `asset delete` (the token-only API route: 401 without the
+// token over HTTP, 204 through the CLI), then its URL is 404 and the published file with those bytes survives.
 // Usage: node .claude/skills/verify/scripts/journeys/delete-and-blobs.mjs
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -89,8 +89,10 @@ try {
   c.ok(noToken.status === 401 && (await get(assetUrl)).status === 200, 'DELETE asset without a token -> 401, the asset still serves', noToken.status)
   const viewerOnly = await fetch(route, { method: 'DELETE', headers: { 'x-artifact-client': 'viewer' } })
   c.ok(viewerOnly.status === 401 && (await get(assetUrl)).status === 200, 'DELETE asset with only x-artifact-client: viewer -> 401, the asset still serves', viewerOnly.status)
-  const withToken = await fetch(route, { method: 'DELETE', headers: { authorization: `Bearer ${V.token}` } })
-  c.ok(withToken.status === 204, 'DELETE asset with the publish token -> 204', withToken.status)
+  const del = cli(F, ['asset', 'delete', b.id, assetId])
+  c.ok(del.code === 0 && del.stdout.trim() === `deleted asset ${assetId}`, 'asset delete through the CLI prints deleted asset <id>', `${del.code} ${del.stdout.trim()} ${del.stderr.trim()}`)
+  const delAgain = cli(F, ['asset', 'delete', b.id, assetId])
+  c.ok(delAgain.code !== 0 && delAgain.stderr.includes('asset_not_found'), 'asset delete of the same id again fails with asset_not_found', `${delAgain.code} ${delAgain.stderr.trim()}`)
   const assetsAfter = cli(F, ['asset', 'list', b.id]).stdout.trim()
   const assetGone = await get(assetUrl)
   c.ok(assetsAfter === '(no assets)' && assetGone.status === 404, 'asset list is empty and the asset URL is 404', `${assetsAfter} ${assetGone.status}`)

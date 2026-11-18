@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -268,6 +269,37 @@ describe('page checks', () => {
     assert.match(out, /localStorage/)
     assert.doesNotMatch(out, /data\.js|data:image|#top/)
     assert.equal(out.match(/fetch/g)?.length, 1)
+  })
+
+  test('asset delete removes the asset, keeps a blob a page still uses, and needs the token', async () => {
+    const bytes = 'shared bytes for the asset delete test'
+    const { id } = page(bytes)
+    const file = join(dir, 'to-delete.html')
+    writeFileSync(file, bytes)
+    const up = await cli(['asset', 'upload', id, file, '--json'])
+    assert.equal(up.code, 0, up.stderr)
+    const assetId = JSON.parse(up.stdout).id as string
+
+    const noToken = await cli(['asset', 'delete', id, assetId], { ARTIFACTS_TOKEN: '', ARTIFACTS_CONFIG_DIR: join(dir, 'empty-config') })
+    assert.equal(noToken.code, 1)
+    assert.match(noToken.stderr, /no token/)
+    assert.equal(store.listAssets(id).length, 1)
+
+    const run = await cli(['asset', 'delete', id, assetId])
+    assert.equal(run.code, 0, run.stderr)
+    assert.match(run.stdout, new RegExp(`deleted asset ${assetId}`))
+    assert.equal(store.listAssets(id).length, 0)
+    assert.throws(() => store.getAsset(id, assetId), /No asset/)
+    assert.equal((await cli(['asset', 'list', id])).stdout.trim(), '(no assets)')
+    // The published index.html holds the same bytes, so the blob stays.
+    assert.equal(store.blobs.read(createHash('sha256').update(bytes).digest('hex')).toString(), bytes)
+
+    const again = await cli(['asset', 'delete', id, assetId])
+    assert.equal(again.code, 1)
+    assert.match(again.stderr, /asset_not_found/)
+    const usage = await cli(['asset', 'delete', id])
+    assert.equal(usage.code, 1)
+    assert.match(usage.stderr, /asset delete <id> <assetId>/)
   })
 
   test('asset URLs pass the check only on the content origin and for this artifact', async () => {
