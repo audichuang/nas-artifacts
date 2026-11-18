@@ -7,7 +7,6 @@ set -euo pipefail
 fresh=0
 if [ "${1:-}" = "--fresh" ]; then fresh=1; elif [ -n "${1:-}" ]; then echo "usage: launch.sh [--fresh]" >&2; exit 64; fi
 
-mkdir -p "${VERIFY_RUN}"
 pid="$(verify_server_pid)"
 if [ -n "${pid}" ]; then
   if [ "${fresh}" = 1 ]; then echo "launch: already running (pid ${pid}); run stop.sh before --fresh" >&2; exit 1; fi
@@ -22,6 +21,7 @@ for port in ${VERIFY_PORTS}; do
   if [ -n "${holders}" ]; then echo "launch: port ${port} is held by pid ${holders} (not ours; not killing it). Use another VERIFY_PORT_BASE." >&2; busy=1; fi
 done
 [ "${busy}" = 0 ] || exit 1
+mkdir -p "${VERIFY_RUN}"
 
 if [ "${fresh}" = 1 ]; then rm -rf "${VERIFY_RUN}/data"; fi
 mkdir -p "${VERIFY_RUN}/data" "${VERIFY_RUN}/cli"

@@ -56,7 +56,7 @@ try {
   c.ok((await frame.evaluate(() => origin)) === 'null', 'page frame runs with an opaque origin (sandbox without allow-same-origin)')
   await page.waitForTimeout(1500)
   const leak = await frame.locator('#leak').textContent()
-  c.ok(leak !== 'leaked', 'in-page fetch to the app API did not succeed', leak)
+  c.ok(leak === 'blocked', 'in-page fetch to the app API was rejected (marker reads blocked)', leak)
   const doc = frameResponses.find((r) => /\/v\/1\/(index\.html)?$/.test(r.url()))
   const csp = doc?.headers()['content-security-policy'] ?? ''
   save(F, 'headers.json', { viewer: viewerResponse.headers(), frameDocument: doc?.headers() })
