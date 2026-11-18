@@ -123,7 +123,8 @@ try {
   c.ok(!unshared.isError && (await fetch(`${V.publicApp}/a/${id}`)).status === 404, 'set_visibility private -> anonymous 404 again')
 
   const cliGet = JSON.parse(cli(F, ['get', id, '--json']).stdout)
-  c.ok(cliGet.currentVersion === 3 && cliGet.versions.some((v) => v.label === 'MCP'), 'CLI get sees the MCP-written v3 (label MCP)', cliGet.versions.map((v) => `v${v.version}:${v.label}`).join(' '))
+  // v1 (MCP publish) is labelled MCP as well, so the label is checked on v3 itself, and v2 (the CLI's) must not carry it.
+  c.ok(cliGet.currentVersion === 3 && cliGet.versions.find((v) => v.version === 3)?.label === 'MCP' && cliGet.versions.find((v) => v.version === 2)?.label !== 'MCP', 'CLI get sees the MCP-written v3 labelled MCP, and the CLI-written v2 not', cliGet.versions.map((v) => `v${v.version}:${v.label}`).join(' '))
   c.ok(cli(F, ['comments', id]).stdout.includes(`note from mcp ${nonce}`), 'CLI comments sees the MCP comment')
   const viewer = await browser.newPage({ viewport: { width: 1200, height: 800 } })
   await viewer.goto(`${V.app}/a/${id}`)
@@ -196,7 +197,7 @@ try {
   const cliErrors = cli(F, ['errors', bad.id])
   const cliLine = cliErrors.stdout.split('\n').find((l) => l.includes(`verify boom ${nonce}`)) ?? ''
   c.ok(cliErrors.code === 0 && /^\[error\] index\.html ×\d+  .*verify boom .*  \(index\.html:3(:\d+)?\)$/.test(cliLine), 'CLI errors line: [error] <page file> ×N message (source), page file and source anchored separately', cliErrors.stdout.trim())
-  for (const x of [big.id, pub.id, bad.id]) cli(F, ['delete', x], { quiet: true })
+  for (const x of [big.id, pub.id, bad.id]) cli(F, ['delete', x, '--yes'], { quiet: true })
 
   const deleted = await step('delete', { id })
   c.ok(!deleted.isError && cli(F, ['get', id]).code !== 0, 'tools/call delete; CLI get then fails', JSON.stringify(deleted.value))

@@ -50,12 +50,12 @@ Read-only (starts, writes, kills nothing; prints no token). Checks Node >= 24, `
 **Journeys**: each mapped feature has a script that drives it end to end and records evidence. Read `features/README.md` for the map, the order and what each proves.
 
 ```bash
-.claude/skills/verify/scripts/journeys/run-all.sh                     # all seven, in order
+.claude/skills/verify/scripts/journeys/run-all.sh                     # all fourteen, in order
 .claude/skills/verify/scripts/journeys/run-all.sh comments office-files  # some
 node .claude/skills/verify/scripts/journeys/public-sharing.mjs         # one
 ```
 
-Exit codes are the result: a journey exits 0 only if every check passed, `run-all.sh` exits 1 if any journey failed, and its last line is the verdict (`run-all: PASS 7/7 journeys (exit 0)` or `run-all: FAIL … failed: <features> (exit 1)`), above it the `== summary` block with one `pass`/`FAIL` line per journey. Don't pipe a run through `tail` or `head`: the exit status you then see is the pipe's last command's, and the tool shell (zsh) has no `$PIPESTATUS`. Redirect to a file, print `rc=$?`, then read the file. The same holds for `launch.sh`, `doctor.sh` and `stop.sh`.
+Exit codes are the result: a journey exits 0 only if every check passed, `run-all.sh` exits 1 if any journey failed, and its last line is the verdict (`run-all: PASS 14/14 journeys (exit 0)` or `run-all: FAIL … failed: <features> (exit 1)`), above it the `== summary` block with one `pass`/`FAIL` line per journey. Don't pipe a run through `tail` or `head`: the exit status you then see is the pipe's last command's, and the tool shell (zsh) has no `$PIPESTATUS`. Redirect to a file, print `rc=$?`, then read the file. The same holds for `launch.sh`, `doctor.sh` and `stop.sh`.
 
 No test-only endpoints exist and none may be added: every action goes through the CLI, a browser or HTTP. Helpers never import `src/` or touch the store.
 
@@ -93,7 +93,7 @@ All executable, in `.claude/skills/verify/scripts/`:
 | `stop.sh` | `stop.sh` stop our server, keep evidence, drop `.verify/run`; exit 1 if a foreign PID still holds a port |
 | `env.sh` | `. env.sh` (sourced) ports, origins, `verify_ready`, `verify_server_pid` |
 | `artifact` | `artifact <cli args…>` CLI pinned to the local instance; `VERIFY_CLI_DIR=<dir>` = second machine |
-| `browser.mjs` | module: `V` (origins, paths), `launch()`, `cli()`, `cliBackground()`, `contentFrame()`, `withAuthenticator()`, `enrolOwner()`, `shot()`, `save()`, `log()`, `checks()`, `redact()`, `findChromium()` |
+| `browser.mjs` | module: `V` (origins, paths, throwaway `token`), `launch()`, `cli()`, `cliBackground()`, `contentFrame()`, `withAuthenticator()`, `enrolOwner()`, `inViewport()` (rect vs viewport), `withCookie()` (Node GET replaying a session cookie), `shot()`, `save()`, `log()`, `checks()`, `secret()`, `redact()`, `findChromium()` |
 | `mcp-token.mjs` | `node mcp-token.mjs` enrol + OAuth, writes `.verify/run/mcp-token.json` (0600), prints client id and expiry only; module: `authorizeClient(page, feature, name)` |
 | `mcp-call.mjs` | `node mcp-call.mjs tools/list` · `node mcp-call.mjs tool get '{"id":"…"}'` prints status + JSON; module: `rpc()`, `tool()` |
 | `make-office.mjs` | `node make-office.mjs <dir>` writes `verify.pptx`, `verify.docx`, `verify.xlsx` |
@@ -107,6 +107,6 @@ node .claude/skills/verify/scripts/mcp-token.mjs
 node .claude/skills/verify/scripts/mcp-call.mjs tool publish '{"title":"Hi","files":[{"path":"index.html","content":"<h1>hi</h1>"}]}'
 ```
 
-Access tokens last 1 h. Using a refresh token twice revokes the whole sign-in, so rerun `mcp-token.mjs` instead of refreshing by hand.
+Access tokens last 1 h. Using a refresh token twice revokes the whole sign-in, so rerun `mcp-token.mjs` instead of refreshing by hand; the `oauth-refresh` journey drives rotation, replay and revocation on clients of its own.
 
 Shell notes: the scripts are bash files that also run under macOS bash 3.2 (no associative arrays, no `${!var}`). The agent tool shell may be zsh, so call the scripts; don't paste their bodies.

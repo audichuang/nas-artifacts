@@ -62,8 +62,13 @@ try {
 
   await tab1.frameLocator('#frame').locator('#up').click()
   await tab1.frameLocator('#frame').locator('#upload').filter({ hasText: `/a/${art.id}/assets/` }).waitFor({ timeout: 5000 })
+  const uploadedUrl = (await tab1.frameLocator('#frame').locator('#upload').textContent()).trim()
+  const uploaded = await fetch(uploadedUrl)
+  const uploadedBody = await uploaded.text()
+  c.ok(uploaded.status === 200 && uploadedBody === 'hello from the page', 'the URL the page got back serves the uploaded bytes (200, "hello from the page")', `${uploaded.status} ${JSON.stringify(uploadedBody.slice(0, 60))} ${uploadedUrl}`)
   const assets = cli(F, ['asset', 'list', art.id])
-  c.ok(assets.code === 0 && /\bpage\b/.test(assets.stdout), 'asset list shows the upload with source page', assets.stdout.trim())
+  const assetLine = assets.stdout.split('\n').find((line) => line.includes(uploadedUrl)) ?? ''
+  c.ok(assets.code === 0 && /\bpage\b/.test(assetLine) && assetLine.trim().endsWith(uploadedUrl), 'asset list shows the same URL with source page', assets.stdout.trim())
   await shot(tab1, F, '04-uploaded')
 
   const tab3 = await browser.newPage({ viewport: { width: 900, height: 600 } })
