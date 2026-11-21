@@ -10,7 +10,7 @@ fail() { echo "FAIL  $1"; echo "      fix: $2"; fails=1; }
 warn() { echo "warn  $1"; }
 
 major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-if [ "${major}" -ge 24 ] 2>/dev/null; then ok "node $(node -v)"; else fail "node >= 24 needed (server runs .ts directly), found ${major}" "install Node 24+"; fi
+if [ "${major}" -ge 26 ] 2>/dev/null; then ok "node $(node -v)"; else fail "node >= 26 needed (the image runs Node 26; .node-version pins it), found ${major}" "install Node 26 (mise picks it up from .node-version)"; fi
 
 for mod in hono playwright-core pptxgenjs; do
   if [ -d "${VERIFY_ROOT}/node_modules/${mod}" ]; then ok "node_modules/${mod}"; else fail "node_modules/${mod} missing" "pnpm install --frozen-lockfile (in ${VERIFY_ROOT})"; fi
