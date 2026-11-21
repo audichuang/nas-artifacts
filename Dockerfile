@@ -12,7 +12,11 @@ COPY package.json ./
 COPY src ./src
 COPY public ./public
 COPY content ./content
-RUN mkdir -p /data && chown node:node /data
+# The server runs plain node; the base image's bundled npm and corepack are never used at runtime,
+# and npm's own dependencies (undici, brace-expansion) were every HIGH finding Trivy reported here.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+      /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+  && mkdir -p /data && chown node:node /data
 USER node
 VOLUME ["/data"]
 EXPOSE 8790 8791
