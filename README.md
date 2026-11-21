@@ -63,7 +63,7 @@ Image:`ghcr.io/audichuang/nas-artifacts`(CI 在 main 每次 push 時建置,標�
 
 ## 開發
 
-伺服器需要 Node 24+(直接執行 `.ts`);CLI 只需要 Node 20+。
+伺服器需要 Node 26+(直接執行 `.ts`);CLI 只需要 Node 20+。
 
 ```bash
 pnpm install
