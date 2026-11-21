@@ -8,6 +8,6 @@ updates:
     schedule:
       interval: weekly
     ignore:
-      # The image runs Node 24 and @types/node follows it (AGENTS.md); a new major is a deliberate move.
+      # The image runs Node 26 and @types/node follows it (AGENTS.md); a new major is a deliberate move.
       - dependency-name: node
         update-types: ["version-update:semver-major"]

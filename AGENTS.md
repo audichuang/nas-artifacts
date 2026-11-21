@@ -22,7 +22,7 @@ Pages agents publish for one person to read on his own devices over Tailscale: n
 
 ## Two things ship separately
 
-- The **server** ships as an image: push to `main` → CI (`.github/workflows/ci.yml`) runs `tc` + tests and pushes `ghcr.io/audichuang/nas-artifacts:sha-<full sha>`. It is live only after the nas-ops repo pins that digest in `hosts/ttnas/artifacts/compose.yaml` and Komodo deploys it (`nas-container` skill; record it in that folder's `deployments.md`). This repo holds no deploy config. The image runs Node 24 (`Dockerfile`), so `@types/node` stays on 24.x even when `pnpm outdated` lists a newer major.
+- The **server** ships as an image: push to `main` → CI (`.github/workflows/ci.yml`) runs `tc` + tests and pushes `ghcr.io/audichuang/nas-artifacts:sha-<full sha>`. It is live only after the nas-ops repo pins that digest in `hosts/ttnas/artifacts/compose.yaml` and Komodo deploys it (`nas-container` skill; record it in that folder's `deployments.md`). This repo holds no deploy config. The image runs Node 26 (`Dockerfile`), so `@types/node` stays on 26.x even when `pnpm outdated` lists a newer major.
 - The **skill + CLI** (`skill/nas-artifacts/`) ship to every agent on every machine through aghub (`aghub-cli -g source sync audichuang/nas-artifacts --update --yes`). Machines update at different times, so a server change must keep working with the previous CLI, or land the CLI side first.
 - The CLI stays a single dependency-free file runnable on Node 20+; agents run it straight from the installed skill folder. `SKILL.md` is read by Claude Code, Codex, omp, grok and Antigravity alike — write it agent-neutral, with no tool names from one harness.
 
