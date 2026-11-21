@@ -179,8 +179,8 @@ importers:
   .:
     dependencies:
       '@hono/node-server':
-        specifier: 2.1.8
-        version: 2.1.8(hono@4.13.18)
+        specifier: 2.1.9
+        version: 2.1.9(hono@4.13.19)
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
@@ -191,17 +191,17 @@ importers:
         specifier: 11.12.0
         version: 11.12.0
       hono:
-        specifier: 4.13.18
-        version: 4.13.18
+        specifier: 4.13.19
+        version: 4.13.19
       marked:
-        specifier: 18.2.0
-        version: 18.2.0
+        specifier: 18.2.1
+        version: 18.2.1
       marked-alert:
         specifier: 2.1.2
-        version: 2.1.2(marked@18.2.0)
+        version: 2.1.2(marked@18.2.1)
       marked-footnote:
         specifier: 1.4.0
-        version: 1.4.0(marked@18.2.0)
+        version: 1.4.0(marked@18.2.1)
       pele:
         specifier: 1.13.0
         version: 1.13.0
@@ -227,8 +227,8 @@ packages:
   '@hexagon/base64@1.1.28':
     resolution: {integrity: sha512-lhqDEAvWixy3bZ+UOYbPwUbBkwBq5C1LAJ/xPC8Oi+lL54oyakv/npbA0aU2hgCsx/1NUd4IBvV03+aUBWxerw==}
 
-  '@hono/node-server@2.1.8':
-    resolution: {integrity: sha512-jdf7FHh6A1lzjpHHQUgxsg2GeER2vMetnAOfeActzcoli6jamlK+NAwL6Dsr5Fl3BS3tYUQzCdtZjU8Qxv7bEA==}
+  '@hono/node-server@2.1.9':
+    resolution: {integrity: sha512-Sk4NQd3GFY0WZWCzndwFMPwJhtD0y9qjsQ+pjID0/03nK9pxyBCUoUHCho8QYBLBVhi0ssL8UkNPHqbgSOFPIQ==}
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4 || ^5.0.0-0
@@ -607,8 +607,8 @@ packages:
     resolution: {integrity: sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==}
     engines: {node: '>=12.0.0'}
 
-  hono@4.13.18:
-    resolution: {integrity: sha512-H9q/E1XizaWstJxUW881dmLxEj+t/TrGGnyxINkm4+sK0qUwsMtFdo2BWI9Vs3cIS19MU6b6iCijoUoEf4f3DA==}
+  hono@4.13.19:
+    resolution: {integrity: sha512-KmXvQAXwcAHV+muzbIwoJ23niEB5nMoDVr9WcRkU8mvjUECm/1+7v4Jgp7P7a+H6MLFrh+vXrGonGrGS+RQfkA==}
     engines: {node: '>=16.9.0'}
 
   http-errors@2.0.1:
@@ -675,8 +675,8 @@ packages:
     peerDependencies:
       marked: '>=7.0.0'
 
-  marked@18.2.0:
-    resolution: {integrity: sha512-KaeL+tAbtvI930q7HE2PN5lYXYdT8EiSmxHlN6F3rsfb57wd5mp5W5TLazpdj4inTQBJdgjYwbs40W/0VUGU+Q==}
+  marked@18.2.1:
+    resolution: {integrity: sha512-ii4bxCTCqqwpT86XZWgJNs+ZnAIZksmLGYMViWA7PDIXYIeNo1x6cDdX3JOip9NM/cI6p8z57FxliACboTruMA==}
     engines: {node: '>= 20'}
     hasBin: true
 
@@ -903,15 +903,15 @@ snapshots:
 
   '@hexagon/base64@1.1.28': {}
 
-  '@hono/node-server@2.1.8(hono@4.13.18)':
+  '@hono/node-server@2.1.9(hono@4.13.19)':
     dependencies:
-      hono: 4.13.18
+      hono: 4.13.19
 
   '@levischuck/tiny-cbor@0.2.11': {}
 
   '@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 2.1.8(hono@4.13.18)
+      '@hono/node-server': 2.1.9(hono@4.13.19)
       ajv: 8.20.0
       ajv-formats: 3.0.1
       content-type: 1.0.5
@@ -921,7 +921,7 @@ snapshots:
       eventsource-parser: 3.1.1
       express: 5.3.0
       express-rate-limit: 8.7.4(express@5.3.0)
-      hono: 4.13.18
+      hono: 4.13.19
       jose: 6.2.17
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -1323,7 +1323,7 @@ snapshots:
 
   highlight.js@11.12.0: {}
 
-  hono@4.13.18: {}
+  hono@4.13.19: {}
 
   http-errors@2.0.1:
     dependencies:
@@ -1372,15 +1372,15 @@ snapshots:
     dependencies:
       immediate: 3.0.6
 
-  marked-alert@2.1.2(marked@18.2.0):
+  marked-alert@2.1.2(marked@18.2.1):
     dependencies:
-      marked: 18.2.0
+      marked: 18.2.1
 
-  marked-footnote@1.4.0(marked@18.2.0):
+  marked-footnote@1.4.0(marked@18.2.1):
     dependencies:
-      marked: 18.2.0
+      marked: 18.2.1
 
-  marked@18.2.0: {}
+  marked@18.2.1: {}
 
   math-intrinsics@1.1.0: {}
 

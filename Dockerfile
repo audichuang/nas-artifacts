@@ -1,10 +1,10 @@
-FROM node:24.22.3-alpine3.24 AS deps
+FROM node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS deps
 WORKDIR /app
 # pnpm-workspace.yaml carries the pnpm overrides recorded in the lockfile; without it --frozen-lockfile fails.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN npm install -g pnpm@12.21.0 && pnpm install --prod --frozen-lockfile
 
-FROM node:24.22.3-alpine3.24
+FROM node:24.22.3-alpine3.24@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
 ENV NODE_ENV=production DATA_DIR=/data APP_PORT=8790 CONTENT_PORT=8791
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules

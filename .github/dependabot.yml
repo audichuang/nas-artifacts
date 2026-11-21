@@ -1,0 +1,13 @@
+# Base image only: the Dockerfile pins node by version and digest, and nothing else would say a new
+# one exists. npm and Actions stay manual: the 3-day release cooldown lives in the maintainer's pnpm
+# config, not in this repo, so Dependabot would propose same-day releases.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # The image runs Node 24 and @types/node follows it (AGENTS.md); a new major is a deliberate move.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
