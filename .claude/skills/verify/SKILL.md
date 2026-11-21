@@ -33,7 +33,7 @@ Ready means usable, all four within ~10 s, else launch prints the log tail and e
 .claude/skills/verify/scripts/doctor.sh     # exit 0 = all ok, 1 = a FAIL line says what to fix
 ```
 
-Read-only (starts, writes, kills nothing; prints no token). Checks Node >= 24, `hono`/`playwright-core`/`pptxgenjs` installed, a Chromium (`CHROMIUM_PATH`, else the newest Playwright `chromium_headless_shell-*` on macOS or Linux, else `/usr/bin/chromium*`), who holds the four ports (ours, free, or a foreign PID it will not touch), a non-loopback `ARTIFACTS_URL` in your shell, whether a real CLI config exists (not read), `.verify/` in `.gitignore`, and when running, the four ready checks. Run it first whenever anything looks off.
+Read-only (starts, writes, kills nothing; prints no token). Checks Node >= 26 (pinned by `.node-version`), `hono`/`playwright-core`/`pptxgenjs` installed, a Chromium (`CHROMIUM_PATH`, else the newest Playwright `chromium_headless_shell-*` on macOS or Linux, else `/usr/bin/chromium*`), who holds the four ports (ours, free, or a foreign PID it will not touch), a non-loopback `ARTIFACTS_URL` in your shell, whether a real CLI config exists (not read), `.verify/` in `.gitignore`, and when running, the four ready checks. Run it first whenever anything looks off.
 
 ## Drive
 
