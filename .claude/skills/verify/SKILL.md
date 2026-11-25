@@ -25,6 +25,8 @@ Starts `node src/server.ts` directly (not `pnpm dev`: `node --watch` would make 
 
 `VERIFY_PORT_BASE` (default 28790) shifts the block. Launch records it in `.verify/run/port-base`, and from then on every helper uses the recorded block even if your shell still exports another value (it prints `ignoring exported VERIFY_PORT_BASE=…`), so a stale export never reaches another worktree's instance. To move to another block, run `stop.sh`, then `launch.sh` with the new value. 18790-18799 belongs to the e2e suite (`test/bridge.e2e.test.ts`) and is refused. Log: `.verify/run/server.log`, PID: `.verify/run/server.pid`. If our server is already up and ready, launch says so and exits 0.
 
+The server reads `content/` (bridge, markdown CSS, deck runtime) once at start, so after editing those run `stop.sh` then `launch.sh` to see the change; `public/` is reread per request. `stop.sh` drops the data dir, so publish the scratch pages again.
+
 Ready means usable, all four within ~10 s, else launch prints the log tail and exits 1: `/healthz` 200 on the four ports; both `artifacts: app …` and `artifacts: public app …` log lines; `scripts/artifact list` exits 0; `POST /mcp` without a token answers 401 with `WWW-Authenticate`.
 
 ## Doctor
