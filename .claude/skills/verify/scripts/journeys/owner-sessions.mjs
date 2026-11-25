@@ -25,6 +25,27 @@ async function tokenUrlFor(page, id) {
   secret(/\/t\/([^/]+)\//.exec(url)?.[1])
   return url
 }
+/**
+ * Records every WebAuthn Signal API call the pages make in this context, then passes it on to Chromium. Defined
+ * even where Chromium lacks the method, so the check is about what the page asks for, not the browser version.
+ */
+async function spySignals(context) {
+  const calls = []
+  await context.exposeBinding('__recordSignal', (_source, name, arg) => calls.push({ name, ...arg }))
+  await context.addInitScript(() => {
+    if (!window.PublicKeyCredential) return
+    for (const name of ['signalUnknownCredential', 'signalAllAcceptedCredentials']) {
+      const original = PublicKeyCredential[name]
+      PublicKeyCredential[name] = async (arg) => {
+        await window.__recordSignal(name, JSON.parse(JSON.stringify(arg)))
+        return original?.call(PublicKeyCredential, arg)
+      }
+    }
+  })
+  return calls
+}
+const RP_ID = new URL(V.publicApp).hostname
+
 async function signIn(page, label) {
   await page.goto(`${V.publicApp}/login`)
   await page.locator('#go').click()
@@ -39,6 +60,7 @@ let browser
 try {
   browser = await launch()
   const ctxA = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const signalsA = await spySignals(ctxA)
   const pageA = await ctxA.newPage()
   await enrolOwner(pageA, F, `device A ${nonce}`)
 
@@ -122,6 +144,7 @@ try {
 
   // 5. A second device enrols, then device A removes its passkey.
   const ctxB = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const signalsB = await spySignals(ctxB)
   const pageB = await ctxB.newPage()
   await enrolOwner(pageB, F, `device B ${nonce}`)
   const cookieDevB = await sessionCookie(ctxB)
@@ -138,10 +161,17 @@ try {
   const disabledAll = await pageA.locator('#passkeys li button').evaluateAll((buttons) => buttons.map((b) => b.disabled))
   c.ok(rows >= 2 && disabledAll.every((d) => d === false), `/account lists ${rows} passkeys (data dir is shared with other journeys), each 刪除 enabled`, JSON.stringify(disabledAll))
   await shot(pageA, F, '06-account-two-devices')
+  const ids = await pageA.evaluate(async () => (await (await fetch('/api/account')).json()).passkeys.map((key) => key.id))
+  const listed = signalsA.filter((call) => call.name === 'signalAllAcceptedCredentials').at(-1)
+  c.ok(listed && listed.rpId === RP_ID && listed.userId && JSON.stringify(listed.allAcceptedCredentialIds) === JSON.stringify(ids), '/account load signals the full passkey list (signalAllAcceptedCredentials, server rpId and userId)', JSON.stringify(listed && { rpId: listed.rpId, n: listed.allAcceptedCredentialIds.length, of: ids.length }))
+  const idB = await pageA.evaluate(async (label) => (await (await fetch('/api/account')).json()).passkeys.find((key) => key.name === label).id, `device B ${nonce}`)
+  const signalsBefore = signalsA.length
   pageA.once('dialog', (dialog) => dialog.accept())
   await rowB.locator('button', { hasText: '刪除' }).click()
   await pageA.waitForURL(`${V.publicApp}/login?next=/account`, { timeout: 5000 })
   c.ok(true, 'removing device B lands device A on /login?next=/account (removal ends every session)')
+  const afterRemoval = signalsA.slice(signalsBefore).find((call) => call.name === 'signalAllAcceptedCredentials')
+  c.ok(afterRemoval && afterRemoval.rpId === RP_ID && afterRemoval.allAcceptedCredentialIds.length === ids.length - 1 && !afterRemoval.allAcceptedCredentialIds.includes(idB), 'before leaving /account, the removal signals the remaining list without device B', JSON.stringify(afterRemoval && afterRemoval.allAcceptedCredentialIds.length))
   const deadDevB = await withCookie(pageUrl, cookieDevB)
   const deadA2 = await withCookie(pageUrl, cookieA2)
   const deadTokB = await withCookie(tokenUrlB, null)
@@ -153,6 +183,8 @@ try {
   const statusB = (await pageB.locator('#status').textContent()) ?? ''
   c.ok(statusB.includes('這把 passkey 沒有註冊在這裡') && pageB.url() === `${V.publicApp}/login`, 'device B can no longer sign in: #status 這把 passkey 沒有註冊在這裡, stays on /login', `${statusB} @ ${pageB.url()}`)
   await shot(pageB, F, '07-device-b-refused')
+  const unknown = signalsB.find((call) => call.name === 'signalUnknownCredential')
+  c.ok(unknown && unknown.rpId === RP_ID && unknown.credentialId === idB, 'the 404 for device B makes /login signal it unknown (signalUnknownCredential, server rpId, its id)', JSON.stringify(unknown && { rpId: unknown.rpId, match: unknown.credentialId === idB }))
   await pageA.locator('#go').click()
   await pageA.waitForURL(`${V.publicApp}/account`, { timeout: 10_000 })
   await rowA.waitFor({ timeout: 5000 })

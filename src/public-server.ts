@@ -8,7 +8,7 @@ import { escapeHtml } from './content-render.ts'
 import { decodeRequestPath, isOfficePath } from './file-paths.ts'
 import { mountMcp } from './mcp.ts'
 import { mountOAuth, OAuthServer } from './oauth.ts'
-import { readCookie, sessionCookie, SESSION_COOKIE, type OwnerAuth } from './owner-auth.ts'
+import { OWNER_USER_ID, readCookie, sessionCookie, SESSION_COOKIE, type OwnerAuth } from './owner-auth.ts'
 
 /** Pages of the public app that run a script of their own (sign-in, account): own files only, no frames. */
 const SCRIPT_PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
@@ -187,7 +187,7 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
   <p id="status" class="muted small" role="status"></p>
 </main>`, 'account.js'))
     })
-    owner.get('/api/account', (c) => c.json({ passkeys: auth.listPasskeys(), sessions: auth.sessionCount(), clients: oauth.grantedClients() }))
+    owner.get('/api/account', (c) => c.json({ rpId: auth.rpID, userId: OWNER_USER_ID, passkeys: auth.listPasskeys(), sessions: auth.sessionCount(), clients: oauth.grantedClients() }))
     owner.delete('/api/account/clients/:id', (c) => {
       requireClient(c)
       oauth.revokeClient(c.req.param('id'))
@@ -197,7 +197,8 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
       requireClient(c)
       if (auth.listPasskeys().length <= 1) throw new ArtifactError(409, 'last_passkey', '不能刪掉最後一把 passkey。')
       auth.removePasskey(c.req.param('id'))
-      return c.body(null, 204)
+      // The session just ended, so the page cannot ask again: hand it the list the passkey provider should keep.
+      return c.json({ rpId: auth.rpID, userId: OWNER_USER_ID, passkeys: auth.listPasskeys().map((key) => key.id) })
     })
     owner.post('/auth/logout-all', (c) => {
       requireClient(c)

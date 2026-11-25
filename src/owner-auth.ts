@@ -26,6 +26,37 @@ const sha256 = (value: string): string => createHash('sha256').update(value).dig
 const randomToken = (): string => randomBytes(32).toString('base64url')
 const nowIso = (): string => new Date().toISOString()
 
+/** The one account every passkey is registered to, as WebAuthn's user handle. */
+export const OWNER_USER_ID = Buffer.from('artifacts-owner').toString('base64url')
+
+/**
+ * Default passkey names by AAGUID, from the community registry (passkeydeveloper/passkey-authenticator-aaguids).
+ * A UX hint only: the AAGUID of a platform passkey is not attested, so nothing may depend on it.
+ */
+const PROVIDERS: Record<string, string> = {
+  'fbfc3007-154e-4ecc-8c0b-6e020557d7bd': 'Apple 密碼',
+  'dd4ec289-e01d-41c9-bb89-70fa845d4bf2': 'Apple 密碼',
+  'ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4': 'Google 密碼管理工具',
+  'adce0002-35bc-c60a-648b-0b25f1f05503': 'Chrome on Mac',
+  '771b48fd-d3d4-4f74-9232-fc157ab0507a': 'Edge on Mac',
+  'd3452668-01fd-4c12-926c-83a4204853aa': 'Microsoft 密碼管理工具',
+  '08987058-cadc-4b81-b6e1-30de50dcbe96': 'Windows Hello',
+  '9ddd1817-af5a-4672-a2b9-3e3dd95000a9': 'Windows Hello',
+  '6028b017-b1d4-4c02-b4b3-afcdafc96bb2': 'Windows Hello',
+  '53414d53-554e-4700-0000-000000000000': 'Samsung Pass',
+  'bada5566-a7aa-401f-bd96-45619a55120d': '1Password',
+  'd548826e-79b4-db40-a3d8-11116f7e8349': 'Bitwarden',
+  '531126d6-e717-415c-9320-3d9aa6981239': 'Dashlane',
+  '50726f74-6f6e-5061-7373-50726f746f6e': 'Proton Pass',
+  'b84e4048-15dc-4dd0-8640-f4f60813c8af': 'NordPass',
+  'f3809540-7f14-49c1-a8b3-8f813b225541': 'Enpass',
+  'fdb141b2-5d84-443e-8a35-4698c205a502': 'KeePassXC'
+}
+
+export function passkeyProvider(aaguid: string | undefined): string | undefined {
+  return aaguid ? PROVIDERS[aaguid.toLowerCase()] : undefined
+}
+
 export type PasskeyRow = { id: string; name: string; createdAt: string; lastUsedAt: string | null }
 
 type Challenge = { challenge: string; kind: 'register' | 'login'; expires: number; linkHash?: string }
@@ -206,7 +237,7 @@ export class OwnerAuth {
       rpID: this.rpID,
       userName: 'owner',
       userDisplayName: 'Artifacts 擁有者',
-      userID: new TextEncoder().encode('artifacts-owner'),
+      userID: Buffer.from(OWNER_USER_ID, 'base64url'),
       attestationType: 'none',
       excludeCredentials: existing.map((row) => ({ id: String(row.id), transports: row.transports ? JSON.parse(String(row.transports)) : undefined })),
       authenticatorSelection: { residentKey: 'required', userVerification: 'required' }
@@ -228,13 +259,13 @@ export class OwnerAuth {
       requireUserVerification: true
     }).catch(() => ({ verified: false as const }))
     if (!verification.verified) throw new ArtifactError(400, 'passkey_rejected', '無法驗證這把 passkey。')
-    const { credential } = verification.registrationInfo
+    const { credential, aaguid } = verification.registrationInfo
     if (challenge.linkHash) {
       // The link is spent by the first passkey it enrols.
       const spent = this.db.prepare('DELETE FROM login_links WHERE hash = ? AND expires_at > ?').run(challenge.linkHash, Date.now())
       if (spent.changes === 0) throw new ArtifactError(403, 'link_expired', '這個註冊連結無效或已過期，請重新產生。')
     }
-    const label = typeof name === 'string' && name.trim() ? name.trim().slice(0, 60) : `passkey ${this.listPasskeys().length + 1}`
+    const label = typeof name === 'string' && name.trim() ? name.trim().slice(0, 60) : (passkeyProvider(aaguid) ?? `passkey ${this.listPasskeys().length + 1}`)
     this.db
       .prepare('INSERT INTO passkeys (id, public_key, counter, transports, name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(credential.id, credential.publicKey, credential.counter, credential.transports ? JSON.stringify(credential.transports) : null, label, nowIso())
@@ -250,7 +281,8 @@ export class OwnerAuth {
     const challenge = this.takeChallenge(flow, 'login')
     const id = (response as { id?: unknown } | null)?.id
     const row = typeof id === 'string' ? this.db.prepare('SELECT * FROM passkeys WHERE id = ?').get(id) : undefined
-    if (!row) throw new ArtifactError(400, 'passkey_rejected', '這把 passkey 沒有註冊在這裡。')
+    // 404, not 400: the page then tells the passkey provider to forget the credential (WebAuthn Signal API).
+    if (!row) throw new ArtifactError(404, 'unknown_passkey', '這把 passkey 沒有註冊在這裡。')
     const verification = await verifyAuthenticationResponse({
       response: response as AuthenticationResponseJSON,
       expectedChallenge: challenge.challenge,
@@ -267,7 +299,7 @@ export class OwnerAuth {
     if (!verification.verified || !verification.authenticationInfo) throw new ArtifactError(400, 'passkey_rejected', '無法驗證這把 passkey。')
     // Verification awaited: the passkey may have been removed meanwhile, and a removed passkey signs nobody in.
     const still = this.db.prepare('UPDATE passkeys SET counter = ?, last_used_at = ? WHERE id = ?').run(verification.authenticationInfo.newCounter, nowIso(), row.id)
-    if (still.changes === 0) throw new ArtifactError(400, 'passkey_rejected', '這把 passkey 已被移除。')
+    if (still.changes === 0) throw new ArtifactError(404, 'unknown_passkey', '這把 passkey 已被移除。')
   }
 }
 

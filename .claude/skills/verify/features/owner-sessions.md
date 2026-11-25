@@ -9,6 +9,7 @@ The owner signs in on the public app with a passkey and signs out again, on one 
 - `logout-all`: `#logout-all` (behind `confirm`) → `POST /auth/logout-all` deletes every session and writes a new `content_token_key` in the same transaction.
 - `sessions`: `#sessions` counts live sessions.
 - `remove passkey`: each `#passkeys li` has a 刪除 button (behind `confirm`), disabled when only one passkey is left. `DELETE /api/account/passkeys/:id` removes it and ends all sessions (rotating the key); the page goes to `/login?next=/account`.
+- `passkey provider sync` (WebAuthn Signal API, feature-detected): `/account` load calls `signalAllAcceptedCredentials` with the server's `rpId`, `userId` and full list; a removal calls it with the list the DELETE response returns (the session is already gone); a sign-in the server answers 404 (unknown credential) calls `signalUnknownCredential`.
 
 ## How to get to it (user POV)
 
@@ -29,7 +30,7 @@ node .claude/skills/verify/scripts/journeys/owner-sessions.mjs
 - Same page, `/login` → `#go` → `/` (the authenticator kept the credential). The private page renders; cookie B ≠ A.
 - `ctxA.clearCookies()`, sign in again → cookie C; `tokenUrl2` from a fresh frame; `#sessions` ≥ 2. B, C and `tokenUrl2` → 200 before; then `#logout-all` (dialog accepted) → `/login`; B and C → 404; `tokenUrl1` and `tokenUrl2` → 404.
 - Sign in again: the passkey survives; the frame's new token URL differs and serves `data.txt`; `#sessions` reads exactly `1`.
-- Context B enrols `device B <nonce>` from a second login-link; its cookie and token URL → 200. On page A's `/account` every 刪除 is enabled; accept the dialog and click 刪除 on the device B row → `/login?next=/account`. Device B's cookie, device A's pre-removal cookie and device B's token URL → 404. Device B on `/login` → `#status` 這把 passkey 沒有註冊在這裡, URL stays `/login`. Device A signs in → `/account`: device B's row is gone, device A's remains, and each 刪除 is disabled exactly when one row is left.
+- Context B enrols `device B <nonce>` from a second login-link; its cookie and token URL → 200. On page A's `/account` every 刪除 is enabled; accept the dialog and click 刪除 on the device B row → `/login?next=/account`. Device B's cookie, device A's pre-removal cookie and device B's token URL → 404. Device B on `/login` → `#status` 這把 passkey 沒有註冊在這裡, URL stays `/login`. Signal calls are recorded by `spySignals` (an init script that wraps, or defines, the two methods and reports through an exposed binding): the two-device `/account` load lists exactly `/api/account`'s ids, the removal lists them without device B, and device B's refused sign-in signals its id unknown, all with `rpId` `localhost`. Device A signs in → `/account`: device B's row is gone, device A's remains, and each 刪除 is disabled exactly when one row is left.
 
 Evidence: `steps.log` (cookies and tokens redacted), `cli.log`, `01-owner-private-page.png` … `08-account-after-removal.png`, `result.json`.
 
