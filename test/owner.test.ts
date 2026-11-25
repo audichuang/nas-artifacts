@@ -248,6 +248,8 @@ describe('passkey sign-in', () => {
 
   test('an unknown passkey gets a 404, so the page can tell the provider to forget it', async () => {
     const key = softwarePasskey('pub-app.test', PUBLIC_APP)
+    // Another passkey is registered here, so this server knows its passkeys and this one is not among them.
+    auth.db.prepare('INSERT INTO passkeys (id, public_key, counter, name, created_at) VALUES (?, ?, 0, ?, ?)').run('another-passkey', key.cose, 'other', '2026-01-01')
     const { flow, options } = await auth.loginOptions()
     const verify = await publicApp.request(`${PUBLIC_APP}/auth/login/verify`, {
       method: 'POST',
@@ -259,6 +261,20 @@ describe('passkey sign-in', () => {
     assert.match(((await verify.json()) as { error: { message: string } }).error.message, /沒有註冊在這裡/)
     // The signal needs the server's RP ID, never the page's hostname.
     assert.equal(options.rpId, 'pub-app.test')
+    // Straight from the table: removePasskey would also end every session the later tests use.
+    auth.db.prepare('DELETE FROM passkeys WHERE id = ?').run('another-passkey')
+  })
+
+  test('with no passkey registered at all (a wrong or empty auth.db), an unknown one is only rejected, not declared unknown', async () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'owner-empty-'))
+    try {
+      const empty = new OwnerAuth(emptyDir, PUBLIC_APP)
+      const key = softwarePasskey('pub-app.test', PUBLIC_APP)
+      const { flow, options } = await empty.loginOptions()
+      await assert.rejects(empty.login(flow, key.assert(options.challenge, 1)), (error: { status?: number; code?: string }) => error.status === 400 && error.code === 'passkey_rejected')
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true })
+    }
   })
 })
 

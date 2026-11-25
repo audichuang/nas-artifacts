@@ -282,7 +282,12 @@ export class OwnerAuth {
     const id = (response as { id?: unknown } | null)?.id
     const row = typeof id === 'string' ? this.db.prepare('SELECT * FROM passkeys WHERE id = ?').get(id) : undefined
     // 404, not 400: the page then tells the passkey provider to forget the credential (WebAuthn Signal API).
-    if (!row) throw new ArtifactError(404, 'unknown_passkey', '這把 passkey 沒有註冊在這裡。')
+    // Not when no passkey is registered at all: that is a server started on the wrong or an empty auth.db,
+    // and the owner's only way in must not be hidden from their password manager because of it.
+    if (!row) {
+      if (this.listPasskeys().length === 0) throw new ArtifactError(400, 'passkey_rejected', '這把 passkey 沒有註冊在這裡。')
+      throw new ArtifactError(404, 'unknown_passkey', '這把 passkey 沒有註冊在這裡。')
+    }
     const verification = await verifyAuthenticationResponse({
       response: response as AuthenticationResponseJSON,
       expectedChallenge: challenge.challenge,
