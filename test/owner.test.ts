@@ -8,7 +8,7 @@ import { createAppServer } from '../src/app-server.ts'
 import { ArtifactStore } from '../src/artifact-store.ts'
 import type { Config } from '../src/config.ts'
 import { createContentServer } from '../src/content-server.ts'
-import { CONTENT_TOKEN_HOURS, OwnerAuth, SESSION_COOKIE } from '../src/owner-auth.ts'
+import { CONTENT_TOKEN_HOURS, OwnerAuth, passkeyProvider, SESSION_COOKIE } from '../src/owner-auth.ts'
 import { createPublicAppServer, publicContentConfig, safeNext } from '../src/public-server.ts'
 
 const TOKEN = 'test-token-0123456789'
@@ -242,8 +242,52 @@ describe('passkey sign-in', () => {
     const pending = auth.login(second.flow, key.assert(second.options.challenge, 2))
     await new Promise((resolve) => setImmediate(resolve))
     auth.removePasskey(key.id)
-    await assert.rejects(pending, /已被移除/)
+    await assert.rejects(pending, (error: { status?: number; message?: string }) => error.status === 404 && /已被移除/.test(error.message ?? ''))
     cookie = `${SESSION_COOKIE}=${auth.createSession()}`
+  })
+
+  test('an unknown passkey gets a 404, so the page can tell the provider to forget it', async () => {
+    const key = softwarePasskey('pub-app.test', PUBLIC_APP)
+    const { flow, options } = await auth.loginOptions()
+    const verify = await publicApp.request(`${PUBLIC_APP}/auth/login/verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-artifact-client': 'viewer' },
+      body: JSON.stringify({ flow, response: key.assert(options.challenge, 1) })
+    })
+    assert.equal(verify.status, 404)
+    assert.equal(verify.headers.get('set-cookie'), null)
+    assert.match(((await verify.json()) as { error: { message: string } }).error.message, /沒有註冊在這裡/)
+    // The signal needs the server's RP ID, never the page's hostname.
+    assert.equal(options.rpId, 'pub-app.test')
+  })
+})
+
+describe('the account page', () => {
+  test('names the RP ID and the user handle passkeys are registered to, for the Signal API', async () => {
+    const account = (await (await publicApp.request(`${PUBLIC_APP}/api/account`, { headers: { cookie } })).json()) as { rpId: string; userId: string }
+    const { options } = await auth.registrationOptions({ signedIn: true })
+    assert.equal(account.rpId, options.rp.id)
+    assert.equal(account.userId, options.user.id)
+    assert.match(account.userId, /^[A-Za-z0-9_-]+$/)
+  })
+
+  test('removing a passkey answers with the list that remains, since the session it ends cannot ask again', async () => {
+    for (const id of ['a2VlcC0x', 'Z29uZS0x']) auth.db.prepare('INSERT INTO passkeys (id, public_key, counter, name, created_at) VALUES (?, x\'00\', 0, ?, ?)').run(id, id, '2026-01-02')
+    const removed = await publicApp.request(`${PUBLIC_APP}/api/account/passkeys/Z29uZS0x`, { method: 'DELETE', headers: { cookie, 'x-artifact-client': 'viewer' } })
+    assert.equal(removed.status, 200)
+    const body = (await removed.json()) as { rpId: string; userId: string; passkeys: string[] }
+    assert.equal(body.rpId, 'pub-app.test')
+    assert.deepEqual(body.passkeys, auth.listPasskeys().map((key) => key.id))
+    assert.ok(body.passkeys.includes('a2VlcC0x') && !body.passkeys.includes('Z29uZS0x'))
+    auth.db.prepare("DELETE FROM passkeys WHERE id = 'a2VlcC0x'").run()
+    cookie = `${SESSION_COOKIE}=${auth.createSession()}`
+  })
+
+  test('a passkey enrolled without a name is named after its provider, when the AAGUID is known', () => {
+    assert.equal(passkeyProvider('FBFC3007-154E-4ECC-8C0B-6E020557D7BD'), 'Apple 密碼')
+    assert.equal(passkeyProvider('ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4'), 'Google 密碼管理工具')
+    assert.equal(passkeyProvider('00000000-0000-0000-0000-000000000000'), undefined)
+    assert.equal(passkeyProvider(undefined), undefined)
   })
 })
 

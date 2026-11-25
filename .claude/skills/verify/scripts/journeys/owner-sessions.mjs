@@ -5,7 +5,7 @@
 // Usage: node .claude/skills/verify/scripts/journeys/owner-sessions.mjs
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { SESSION_COOKIE, V, checks, cli, contentFrame, enrolOwner, launch, log, redact, save, scratch, secret, shot, withCookie } from '../browser.mjs'
+import { SESSION_COOKIE, V, checks, cli, contentFrame, enrolOwner, launch, log, redact, save, scratch, secret, shot, withAuthenticator, withCookie } from '../browser.mjs'
 
 const F = 'owner-sessions'
 const c = checks(F)
@@ -25,6 +25,27 @@ async function tokenUrlFor(page, id) {
   secret(/\/t\/([^/]+)\//.exec(url)?.[1])
   return url
 }
+/**
+ * Records every WebAuthn Signal API call the pages make in this context, then passes it on to Chromium. Defined
+ * even where Chromium lacks the method, so the check is about what the page asks for, not the browser version.
+ */
+async function spySignals(context) {
+  const calls = []
+  await context.exposeBinding('__recordSignal', (_source, name, arg) => calls.push({ name, ...arg }))
+  await context.addInitScript(() => {
+    if (!window.PublicKeyCredential) return
+    for (const name of ['signalUnknownCredential', 'signalAllAcceptedCredentials']) {
+      const original = PublicKeyCredential[name]
+      PublicKeyCredential[name] = async (arg) => {
+        await window.__recordSignal(name, JSON.parse(JSON.stringify(arg)))
+        return original?.call(PublicKeyCredential, arg)
+      }
+    }
+  })
+  return calls
+}
+const RP_ID = new URL(V.publicApp).hostname
+
 async function signIn(page, label) {
   await page.goto(`${V.publicApp}/login`)
   await page.locator('#go').click()
@@ -39,6 +60,7 @@ let browser
 try {
   browser = await launch()
   const ctxA = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const signalsA = await spySignals(ctxA)
   const pageA = await ctxA.newPage()
   await enrolOwner(pageA, F, `device A ${nonce}`)
 
@@ -122,6 +144,7 @@ try {
 
   // 5. A second device enrols, then device A removes its passkey.
   const ctxB = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const signalsB = await spySignals(ctxB)
   const pageB = await ctxB.newPage()
   await enrolOwner(pageB, F, `device B ${nonce}`)
   const cookieDevB = await sessionCookie(ctxB)
@@ -138,10 +161,17 @@ try {
   const disabledAll = await pageA.locator('#passkeys li button').evaluateAll((buttons) => buttons.map((b) => b.disabled))
   c.ok(rows >= 2 && disabledAll.every((d) => d === false), `/account lists ${rows} passkeys (data dir is shared with other journeys), each 刪除 enabled`, JSON.stringify(disabledAll))
   await shot(pageA, F, '06-account-two-devices')
+  const ids = await pageA.evaluate(async () => (await (await fetch('/api/account')).json()).passkeys.map((key) => key.id))
+  const listed = signalsA.filter((call) => call.name === 'signalAllAcceptedCredentials').at(-1)
+  c.ok(listed && listed.rpId === RP_ID && listed.userId && JSON.stringify(listed.allAcceptedCredentialIds) === JSON.stringify(ids), '/account load signals the full passkey list (signalAllAcceptedCredentials, server rpId and userId)', JSON.stringify(listed && { rpId: listed.rpId, n: listed.allAcceptedCredentialIds.length, of: ids.length }))
+  const idB = await pageA.evaluate(async (label) => (await (await fetch('/api/account')).json()).passkeys.find((key) => key.name === label).id, `device B ${nonce}`)
+  const signalsBefore = signalsA.length
   pageA.once('dialog', (dialog) => dialog.accept())
   await rowB.locator('button', { hasText: '刪除' }).click()
   await pageA.waitForURL(`${V.publicApp}/login?next=/account`, { timeout: 5000 })
   c.ok(true, 'removing device B lands device A on /login?next=/account (removal ends every session)')
+  const afterRemoval = signalsA.slice(signalsBefore).find((call) => call.name === 'signalAllAcceptedCredentials')
+  c.ok(afterRemoval && afterRemoval.rpId === RP_ID && afterRemoval.allAcceptedCredentialIds.length === ids.length - 1 && !afterRemoval.allAcceptedCredentialIds.includes(idB), 'before leaving /account, the removal signals the remaining list without device B', JSON.stringify(afterRemoval && afterRemoval.allAcceptedCredentialIds.length))
   const deadDevB = await withCookie(pageUrl, cookieDevB)
   const deadA2 = await withCookie(pageUrl, cookieA2)
   const deadTokB = await withCookie(tokenUrlB, null)
@@ -153,6 +183,8 @@ try {
   const statusB = (await pageB.locator('#status').textContent()) ?? ''
   c.ok(statusB.includes('這把 passkey 沒有註冊在這裡') && pageB.url() === `${V.publicApp}/login`, 'device B can no longer sign in: #status 這把 passkey 沒有註冊在這裡, stays on /login', `${statusB} @ ${pageB.url()}`)
   await shot(pageB, F, '07-device-b-refused')
+  const unknown = signalsB.find((call) => call.name === 'signalUnknownCredential')
+  c.ok(unknown && unknown.rpId === RP_ID && unknown.credentialId === idB, 'the 404 for device B makes /login signal it unknown (signalUnknownCredential, server rpId, its id)', JSON.stringify(unknown && { rpId: unknown.rpId, match: unknown.credentialId === idB }))
   await pageA.locator('#go').click()
   await pageA.waitForURL(`${V.publicApp}/account`, { timeout: 10_000 })
   await rowA.waitFor({ timeout: 5000 })
@@ -162,6 +194,42 @@ try {
   c.ok(goneB === 0 && rowsAfter === rows - 1, 'device A signs back in at /account; device B is gone, device A remains', `${rows} -> ${rowsAfter}`)
   c.ok(disabledAfter.every((d) => d === (rowsAfter <= 1)), '刪除 is disabled exactly when one passkey is left', `${rowsAfter} rows ${JSON.stringify(disabledAfter)}`)
   await shot(pageA, F, '08-account-after-removal')
+  // Device D: a browser without the native WebAuthn JSON helpers (older Safari, Firefox), so the hand-rolled
+  // conversions in webauthn.js carry enrolment and sign-in. Its second tab opens the same login-link and finishes
+  // after the first tab spent it: the server refuses (403) and the page signals the orphaned credential unknown.
+  const ctxD = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const signalsD = await spySignals(ctxD)
+  await ctxD.addInitScript(() => {
+    if (!window.PublicKeyCredential) return
+    PublicKeyCredential.parseCreationOptionsFromJSON = undefined
+    PublicKeyCredential.parseRequestOptionsFromJSON = undefined
+    PublicKeyCredential.prototype.toJSON = undefined
+  })
+  const link = cli(F, ['login-link', '--json'], { quiet: true })
+  const linkUrl = JSON.parse(link.stdout).url
+  secret(linkUrl.split('#')[1])
+  const pageD = await ctxD.newPage()
+  const pageD2 = await ctxD.newPage()
+  await withAuthenticator(pageD)
+  await withAuthenticator(pageD2)
+  const optionsLoaded = (page) => page.waitForResponse((r) => r.url().endsWith('/auth/register/options'))
+  await Promise.all([optionsLoaded(pageD2), pageD2.goto(linkUrl)])
+  c.ok((await pageD2.evaluate(() => typeof PublicKeyCredential.prototype.toJSON)) === 'undefined', 'control: in context D the native toJSON is gone')
+  await Promise.all([optionsLoaded(pageD), pageD.goto(linkUrl)])
+  await pageD.locator('#name').fill(`device D ${nonce}`)
+  await pageD.locator('#go').click()
+  await pageD.waitForURL(`${V.publicApp}/`, { timeout: 10_000 }).catch(() => {})
+  c.ok(pageD.url() === `${V.publicApp}/`, 'without native JSON helpers, enrolment from a login-link lands on the gallery', pageD.url())
+  await ctxD.clearCookies()
+  c.ok(await signIn(pageD, 'device D fallback sign-in'), 'without native JSON helpers, the passkey signs in again at /login')
+  await pageD2.locator('#name').fill(`device D2 ${nonce}`)
+  await pageD2.locator('#go').click()
+  await pageD2.locator('#status', { hasText: '註冊連結' }).waitFor({ timeout: 10_000 }).catch(() => {})
+  const statusD2 = (await pageD2.locator('#status').textContent()) ?? ''
+  const orphan = signalsD.find((call) => call.name === 'signalUnknownCredential')
+  c.ok(statusD2.includes('註冊連結') && orphan && orphan.rpId === RP_ID && orphan.credentialId, 'the second tab, finishing with a spent link, is refused and signals its new credential unknown', JSON.stringify({ status: statusD2, rpId: orphan?.rpId }))
+  await ctxD.close()
+
   save(F, 'ids.json', { artifact: art.id })
   cli(F, ['delete', art.id, '--yes'], { quiet: true })
   await ctxB.close()

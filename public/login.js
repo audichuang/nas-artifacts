@@ -1,4 +1,4 @@
-import { createPasskey, describe, getPasskey, post } from './webauthn.js'
+import { createPasskey, describe, getPasskey, post, signalUnknown, unsupported } from './webauthn.js'
 
 const card = document.querySelector('.auth-card')
 const button = document.getElementById('go')
@@ -29,10 +29,19 @@ async function run() {
     ready = null
     if (mode === 'enroll') {
       const response = await createPasskey(options)
-      await post('/auth/register/verify', { flow, response, name: document.getElementById('name').value })
+      // Refused by this server (4xx with its error code), so stored nowhere: the device should not keep offering it. A 5xx or a lost response may
+      // come after the passkey was stored, so those leave it alone.
+      await post('/auth/register/verify', { flow, response, name: document.getElementById('name').value }).catch(async (error) => {
+        if (error.code && error.status >= 400 && error.status < 500) await signalUnknown(options.rp.id, response.id)
+        throw error
+      })
     } else {
       const response = await getPasskey(options)
-      await post('/auth/login/verify', { flow, response })
+      await post('/auth/login/verify', { flow, response }).catch(async (error) => {
+        // By code, not status alone: a 404 from the tunnel in front says nothing about the passkey.
+        if (error.code === 'unknown_passkey') await signalUnknown(options.rpId, response.id)
+        throw error
+      })
     }
     status.textContent = '完成，正在前往…'
     location.replace(card.dataset.next || '/')
@@ -43,5 +52,7 @@ async function run() {
   }
 }
 
-if (mode !== 'enroll' || code) prepare()
-button.addEventListener('click', run)
+if (!unsupported(button)) {
+  if (mode !== 'enroll' || code) prepare()
+  button.addEventListener('click', run)
+}
