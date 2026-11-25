@@ -237,6 +237,16 @@ describe('content origin', () => {
     assert.doesNotMatch(/<nav class="toc"[\s\S]*<\/nav>/.exec(html)?.[0] ?? '', /#報告/)
   })
 
+  test('markdown table cells say whether they are short (kept on one line) or long, and keep their alignment', async () => {
+    const md = `| 裝置 | 金額 |\n|---|---:|\n| iPhone 12 Pro Max | 1,200 |\n| ${'很長的備註'.repeat(3)} | **3** |\n`
+    const { id } = await publish({ 'index.md': md })
+    const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
+    assert.match(html, /<th class="cell-short">裝置<\/th>/)
+    assert.match(html, /<td class="cell-short">iPhone 12 Pro Max<\/td>/)
+    assert.match(html, /<td class="cell-long">很長的備註很長的備註很長的備註<\/td>/)
+    assert.match(html, /<td class="cell-short" align="right"><strong>3<\/strong><\/td>/)
+  })
+
   test('markdown code blocks are highlighted on the server; unknown languages are only escaped', async () => {
     const md = '```js\nconst a = "<b>"\n```\n\n```nosuchlang\n<b>raw</b>\n```\n'
     const { id } = await publish({ 'index.md': md })

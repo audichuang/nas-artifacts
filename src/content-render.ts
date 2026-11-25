@@ -16,7 +16,7 @@ const packageVersion = (name: string) =>
  * Library upgrades count themselves; bump the leading tags when you change what renderMarkdown (md) or
  * the Office renderers in pptx.ts, docx.ts and xlsx.ts emit.
  */
-export const RENDER_VERSION = ['md-3', 'pptx-6', 'docx-8', 'xlsx-7', ...['marked', 'marked-alert', 'marked-footnote', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
+export const RENDER_VERSION = ['md-4', 'pptx-6', 'docx-8', 'xlsx-7', ...['marked', 'marked-alert', 'marked-footnote', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)
@@ -97,6 +97,15 @@ export function markdownParser(options: { anchors: boolean; toc?: TocEntry[]; di
         const id = seen === 0 ? base : `${base}-${seen}`
         if (depth === 2 || depth === 3) options.toc?.push({ depth, id, html })
         return `<h${depth} id="${escapeHtml(id)}"><a class="anchor" href="#${escapeHtml(id)}" aria-hidden="true" tabindex="-1">#</a>${html}</h${depth}>\n`
+      },
+      // Pages only: short cells stay on one line and long ones keep a readable width, so a wide table scrolls
+      // sideways on a phone instead of squeezing every column to its floor (slides fit their tables by shrinking text).
+      tablecell(token: Tokens.TableCell) {
+        if (!options.anchors) return false
+        const units = [...token.text].reduce((sum, char) => sum + (/[\u2e80-\uffff]/.test(char) ? 2 : 1), 0)
+        const tag = token.header ? 'th' : 'td'
+        const align = token.align ? ` align="${token.align}"` : ''
+        return `<${tag} class="${units <= 24 ? 'cell-short' : 'cell-long'}"${align}>${this.parser.parseInline(token.tokens)}</${tag}>\n`
       },
       code({ text, lang }: Tokens.Code) {
         const language = (lang ?? '').trim().split(/\s+/)[0].toLowerCase()
