@@ -71,7 +71,7 @@
   function reportPlace() {
     reportTimer = null
     const y = mainScroller ? mainScroller.scrollTop : scrollY
-    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: location.hash.length <= 3000 ? location.hash : '', scrollY: Math.round(y) } }, APP_ORIGIN)
+    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: location.hash.length <= 3000 ? location.hash : '', scrollY: Math.round(y), height: Math.round(mainScroller ? mainScroller.scrollHeight : document.documentElement.scrollHeight) } }, APP_ORIGIN)
   }
   // Content drawn by scripts may not be tall enough yet, so keep trying briefly unless the reader scrolls first.
   function restoreScroll(target) {

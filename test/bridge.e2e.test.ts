@@ -1086,6 +1086,30 @@ test('asking for a version that does not exist says the latest is shown instead'
   await viewer.close()
 })
 
+test('on a phone a 100vh block keeps its height while the bar slides away and back', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const html = `<!doctype html><title>x</title><style>body{margin:0}.hero{min-height:100vh;background:#47a}</style><div class="hero">hero</div>${'<p>段落</p>'.repeat(200)}`
+  const { id } = store.publish({ title: '滿版', files: { 'index.html': { content: Buffer.from(html) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  await viewer.frameLocator('#frame').locator('.hero').waitFor()
+  const frame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  const heights: number[] = []
+  const sample = async () => heights.push(await frame.evaluate(() => Math.round(document.querySelector('.hero')!.getBoundingClientRect().height)))
+  await viewer.waitForTimeout(500)
+  await sample()
+  for (let y = 200; y <= 1600; y += 200) await frame.evaluate((top) => scrollTo(0, top), y)
+  await viewer.waitForFunction(() => document.body.classList.contains('bar-away'))
+  await viewer.waitForTimeout(400)
+  await sample()
+  for (let y = 1400; y >= 0; y -= 200) await frame.evaluate((top) => scrollTo(0, top), y)
+  await viewer.waitForFunction(() => !document.body.classList.contains('bar-away'))
+  await viewer.waitForTimeout(400)
+  await sample()
+  assert.equal(new Set(heights).size, 1, `hero height changed: ${heights.join(' -> ')}`)
+  await viewer.close()
+})
+
 test('on a phone the bar stays away at the bottom of a page instead of bouncing', { skip: !chromiumPath && 'no Chromium found' }, async () => {
   const md = `# 長文\n\n${'段落文字。\n\n'.repeat(120)}<div style="min-height:100vh">結尾</div>\n`
   const { id } = store.publish({ title: '頁尾', files: { 'index.md': { content: Buffer.from(md) } } })

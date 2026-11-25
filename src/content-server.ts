@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { Hono } from 'hono'
+import { compress } from 'hono/compress'
 import type { ArtifactStore, FileEntry } from './artifact-store.ts'
 import { ArtifactError } from './artifact-store.ts'
 import type { Config } from './config.ts'
-import { BRIDGE_PATH, MARKDOWN_CSS_PATH, RENDER_VERSION, injectBridge, renderMarkdown } from './content-render.ts'
+import { sendAsset } from './assets.ts'
+import { BRIDGE_HASH, BRIDGE_PATH, MARKDOWN_CSS_HASH, MARKDOWN_CSS_PATH, RENDER_VERSION, injectBridge, renderMarkdown } from './content-render.ts'
 import { renderDocxPage } from './docx.ts'
 import { decodeRequestPath, isDocxPath, isHtmlPath, isMarkdownPath, isOfficePath, isPagePath, isPptxPath, isServableType, isXlsxPath } from './file-paths.ts'
 import { OFFICE_MEDIA_SEGMENT, officeMedia } from './office.ts'
@@ -63,6 +65,8 @@ export function createContentServer(
   options: { renderVersion?: string; publicOnly?: boolean; contentTokens?: ContentTokens } = {}
 ): Hono<Env> {
   const app = new Hono<Env>()
+  // Rendered Office files and Markdown are large and repetitive HTML; the tailnet path has no proxy compressing them.
+  app.use('*', compress())
   const prefixOf = (c: { env: Env['Bindings'] | undefined }): string => c.env?.contentGrant?.prefix ?? ''
   const bridge = staticFile('bridge.js').replace('__APP_ORIGIN__', JSON.stringify(config.appOrigin))
   const markdownCss = staticFile('markdown.css')
@@ -131,14 +135,8 @@ export function createContentServer(
     })
   }
 
-  app.get(BRIDGE_PATH, (c) => {
-    c.header('Cache-Control', 'no-cache')
-    return c.body(bridge, 200, { 'Content-Type': 'text/javascript; charset=utf-8' })
-  })
-  app.get(MARKDOWN_CSS_PATH, (c) => {
-    c.header('Cache-Control', 'no-cache')
-    return c.body(markdownCss, 200, { 'Content-Type': 'text/css; charset=utf-8' })
-  })
+  app.get(BRIDGE_PATH, (c) => sendAsset(c, bridge, 'text/javascript; charset=utf-8', BRIDGE_HASH))
+  app.get(MARKDOWN_CSS_PATH, (c) => sendAsset(c, markdownCss, 'text/css; charset=utf-8', MARKDOWN_CSS_HASH))
 
   // Every picture of an Office file is read from the file: keep the last few in memory, not one read per picture.
   const officeFiles = new Map<string, Buffer>()

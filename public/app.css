@@ -152,6 +152,8 @@ textarea { resize: vertical; }
   .viewer { transition: height 0.2s ease, margin-top 0.2s ease; }
   body.bar-away .viewer-bar { position: relative; margin-top: calc(-1 * var(--bar-h)); }
   body.bar-away .viewer { height: 100%; }
+  body.frame-tall { overflow: hidden; }
+  body.frame-tall .viewer:not(.editing) { height: 100%; }
 }
 .error-dialog { width: min(560px, calc(100vw - 32px)); max-height: 70vh; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 .error-dialog[open] { display: flex; flex-direction: column; }
@@ -206,6 +208,7 @@ body:has(#public-link:not([hidden])) .viewer-bar { padding-right: calc(16px + va
   body:has(#public-link:not([hidden])) .viewer-bar { padding-right: calc(12px + var(--chip-w) + 8px); }
   body.bar-away #public-link { top: 6px; }
   body.bar-away:has(#public-link:not([hidden])) .viewer { margin-top: var(--chip-strip); height: calc(100% - var(--chip-strip)); }
+  body.frame-tall:has(#public-link:not([hidden])) .viewer:not(.editing) { height: calc(100% - var(--chip-strip)); }
 }
 @media (prefers-color-scheme: dark) { .public-mark, .public-chip { color: #3fb950; } }
 .public-bar .artifact-icon:empty { display: none; }

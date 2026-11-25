@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import { compress } from 'hono/compress'
 import { createAppServer, VIEWER_HEADER } from './app-server.ts'
 import { ArtifactError, type ArtifactStore } from './artifact-store.ts'
 import type { Config } from './config.ts'
@@ -72,6 +73,7 @@ export function createPublicAppServer(store: ArtifactStore, config: Config, auth
   const pair = config.public
   if (!pair) throw new Error('createPublicAppServer needs config.public.')
   const app = new Hono()
+  app.use('*', compress())
   const staticRoot = new URL('../public/', import.meta.url)
   const ownerConfig: Config = { ...config, appOrigin: pair.appOrigin, contentOrigin: pair.contentOrigin, tokens: [], office: undefined }
   const ownerApp = auth ? createAppServer(store, ownerConfig, { owner: { auth } }) : null

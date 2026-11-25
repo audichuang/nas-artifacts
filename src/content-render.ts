@@ -1,12 +1,18 @@
 import { readFileSync } from 'node:fs'
+import { hashOf } from './assets.ts'
 import hljs from 'highlight.js/lib/common'
-import { Marked, type Tokens } from 'marked'
+import { Marked, Renderer, type Tokens } from 'marked'
 import markedAlert from 'marked-alert'
 import markedFootnote from 'marked-footnote'
 import { render as renderDiagram } from 'pele'
 
 export const BRIDGE_PATH = '/_/bridge.js'
 export const MARKDOWN_CSS_PATH = '/_/markdown.css'
+const contentHash = (name: string) => hashOf(readFileSync(new URL(`../content/${name}`, import.meta.url)))
+/** Hashes of the shared files pages load; their URLs carry them, so browsers keep the files until they change. */
+export const BRIDGE_HASH = contentHash('bridge.js')
+export const MARKDOWN_CSS_HASH = contentHash('markdown.css')
+export const MARKDOWN_CSS_URL = `${MARKDOWN_CSS_PATH}?v=${MARKDOWN_CSS_HASH}`
 
 const packageVersion = (name: string) =>
   (JSON.parse(readFileSync(new URL(`../node_modules/${name}/package.json`, import.meta.url), 'utf8')) as { version: string }).version
@@ -16,7 +22,7 @@ const packageVersion = (name: string) =>
  * Library upgrades count themselves; bump the leading tags when you change what renderMarkdown (md) or
  * the Office renderers in pptx.ts, docx.ts and xlsx.ts emit.
  */
-export const RENDER_VERSION = ['md-4', 'pptx-6', 'docx-9', 'xlsx-7', ...['marked', 'marked-alert', 'marked-footnote', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
+export const RENDER_VERSION = ['md-5', 'pptx-6', 'docx-9', 'xlsx-8', ...['marked', 'marked-alert', 'marked-footnote', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)
@@ -24,7 +30,7 @@ export function escapeHtml(value: string): string {
 
 /** Puts the capability bridge first in <head>, so page scripts can use window.artifact immediately. */
 export function injectBridge(html: string): string {
-  const tag = `<script src="${BRIDGE_PATH}"></script>`
+  const tag = `<script src="${BRIDGE_PATH}?v=${BRIDGE_HASH}"></script>`
   const head = /<head(\s[^>]*)?>/i.exec(html)
   if (head) {
     const at = head.index + head[0].length
@@ -84,6 +90,7 @@ export type TocEntry = { depth: number; id: string; html: string }
 export function markdownParser(options: { anchors: boolean; toc?: TocEntry[]; diagramPrefix?: string }): Marked {
   const slugs = new Map<string, number>()
   let diagrams = 0
+  let images = 0
   // GitHub-style alerts (> [!NOTE]) and footnotes ([^1]), as readers of GitHub Markdown expect.
   return new Marked(markedAlert({ variants: ALERTS }), markedFootnote({ description: '註腳' }), {
     gfm: true,
@@ -106,6 +113,11 @@ export function markdownParser(options: { anchors: boolean; toc?: TocEntry[]; di
         const tag = token.header ? 'th' : 'td'
         const align = token.align ? ` align="${token.align}"` : ''
         return `<${tag} class="${units <= 24 ? 'cell-short' : 'cell-long'}"${align}>${this.parser.parseInline(token.tokens)}</${tag}>\n`
+      },
+      // Pages only: past the first picture (the likely largest paint), pictures load as the reader nears them.
+      image(token: Tokens.Image) {
+        if (!options.anchors || images++ === 0) return false
+        return Renderer.prototype.image.call(this, token).replace(/^<img /, '<img loading="lazy" decoding="async" ')
       },
       code({ text, lang }: Tokens.Code) {
         const language = (lang ?? '').trim().split(/\s+/)[0].toLowerCase()
@@ -135,6 +147,6 @@ export function renderMarkdown(markdown: string, title: string): string {
   return injectBridge(`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
-<link rel="stylesheet" href="${MARKDOWN_CSS_PATH}">
+<link rel="stylesheet" href="${MARKDOWN_CSS_URL}">
 </head><body><div class="markdown-layout${nav ? ' has-toc' : ''}">${nav}<main class="markdown-body">${main}</main></div></body></html>`)
 }

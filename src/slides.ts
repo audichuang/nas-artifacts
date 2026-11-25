@@ -1,5 +1,5 @@
 import { lexer } from 'marked'
-import { MARKDOWN_CSS_PATH, escapeHtml, injectBridge, markdownParser } from './content-render.ts'
+import { MARKDOWN_CSS_URL, escapeHtml, injectBridge, markdownParser } from './content-render.ts'
 
 /** A deck is a Markdown file named *.slides.md: one slide per `---` line, speaker notes after `???`. */
 export const isSlidesPath = (path: string): boolean => /\.slides\.md$/i.test(path)
@@ -103,7 +103,7 @@ export function deckPage(html: string, title: string, assets: DeckAssets, head =
   return injectBridge(`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
-<link rel="stylesheet" href="${MARKDOWN_CSS_PATH}">
+<link rel="stylesheet" href="${MARKDOWN_CSS_URL}">
 <style>${assets.css}</style>${head}
 </head><body class="deck">
 <main class="deck-stage" id="deck">${html}</main>

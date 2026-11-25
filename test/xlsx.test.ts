@@ -254,7 +254,7 @@ describe('reading Excel workbooks', () => {
     assert.match(html, /\/\^#sheet-\(\\d\+\)\$\//)
     assert.doesNotMatch(html, /id="sheet-\d/)
     assert.match(html, /<meta name="viewport"/)
-    assert.match(html, /^<!doctype html><html lang="zh-Hant"><head><script src="\/_\/bridge\.js"><\/script>/)
+    assert.match(html, /^<!doctype html><html lang="zh-Hant"><head><script src="\/_\/bridge\.js\?v=[0-9a-f]{12}"><\/script>/)
   })
 
   test('styles inherit: the Normal font, cell style xfs, row styles over empty cells, column styles', () => {
@@ -315,7 +315,7 @@ describe('reading Excel workbooks', () => {
     assert.match(first, /class="x10 rc"[^>]*><span class="vt">直排<\/span>/)
     // Shrink to fit: the page script scales the span down to the column once the sheet is shown.
     assert.match(first, /<td class="x12 sh"><span>縮小以適合欄寬<\/span><\/td>/)
-    assert.match(html, /querySelectorAll\('td\.sh'\)/)
+    assert.match(html, /all\('td\.sh'\)/)
   })
 
   test('merged cells, frozen panes, hidden rows and columns, widths and heights', () => {
@@ -790,6 +790,9 @@ describe('big workbooks', () => {
       const started = Date.now()
       await page.setContent(html)
       const took = Date.now() - started
+      // Rows past the first screenfuls arrive from templates after the first paint, and are fitted as they come.
+      assert.match(html, /<template class="xl-more"><tr/)
+      await page.waitForFunction(() => !document.querySelector('template.xl-more'))
       const result = await page.evaluate(() => {
         const cells = [...document.querySelectorAll<HTMLElement>('td.n')]
         const sh = document.querySelector<HTMLElement>('td.sh')!

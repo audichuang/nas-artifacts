@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { Hono, type Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import { compress } from 'hono/compress'
 import { streamSSE } from 'hono/streaming'
 import {
   ArtifactError,
@@ -13,6 +14,7 @@ import {
 } from './artifact-store.ts'
 import type { Config } from './config.ts'
 import { decodeRequestPath, isPptxPath, normalizeFilePath } from './file-paths.ts'
+import { sendAsset } from './assets.ts'
 import { galleryPage, notFoundPage, viewerPage } from './pages.ts'
 import { isSlidesPath, renderSlides } from './slides.ts'
 import { deckToPptx } from './slides-pptx.ts'
@@ -91,6 +93,7 @@ export type AppServerOptions = {
 
 export function createAppServer(store: ArtifactStore, config: Config, options: AppServerOptions = {}): Hono {
   const app = new Hono()
+  app.use('*', compress())
   const owner = options.owner
   const tokenDigests = owner ? [] : config.tokens.map(digest)
   const staticRoot = new URL('../public/', import.meta.url)
@@ -206,8 +209,7 @@ export function createAppServer(store: ArtifactStore, config: Config, options: A
     } catch {
       return c.text('Not found', 404)
     }
-    c.header('Cache-Control', 'no-cache')
-    return c.body(new Uint8Array(body), 200, { 'Content-Type': `${type}; charset=utf-8` })
+    return sendAsset(c, body, `${type}; charset=utf-8`)
   })
   app.get('/healthz', (c) => c.text('ok'))
 

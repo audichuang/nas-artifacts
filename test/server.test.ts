@@ -215,13 +215,48 @@ describe('store hardening', () => {
 })
 
 describe('content origin', () => {
+  test('rendered pages and shared files are gzipped for browsers that ask, and still revalidate to 304', async () => {
+    const { id } = await publish({ 'index.md': `# 大表\n\n${'| 欄 | 值 |\n|---|---|\n'}${'| 一列內容 | 1234 |\n'.repeat(400)}` })
+    const url = `http://content.test/a/${id}/v/1/`
+    const plain = await content.request(url)
+    const zipped = await content.request(url, { headers: { 'accept-encoding': 'gzip, deflate, br' } })
+    assert.equal(zipped.headers.get('content-encoding'), 'gzip')
+    assert.match(zipped.headers.get('vary') ?? '', /Accept-Encoding/)
+    const raw = Buffer.from(await plain.arrayBuffer())
+    const packed = Buffer.from(await zipped.arrayBuffer())
+    assert.ok(packed.length < raw.length / 4, `${packed.length} of ${raw.length}`)
+    const etag = zipped.headers.get('etag')!
+    assert.equal((await content.request(url, { headers: { 'accept-encoding': 'gzip', 'if-none-match': etag } })).status, 304)
+  })
+
+  test('the bridge and markdown CSS are named by their hash: that URL is kept for good, any other revalidates', async () => {
+    const { id } = await publish({ 'index.md': '# 頁\n' })
+    const html = await (await content.request(`http://content.test/a/${id}/v/1/`)).text()
+    for (const src of [/src="(\/_\/bridge\.js\?v=[0-9a-f]+)"/.exec(html)![1], /href="(\/_\/markdown\.css\?v=[0-9a-f]+)"/.exec(html)![1]]) {
+      const kept = await content.request(`http://content.test${src}`)
+      assert.equal(kept.status, 200)
+      assert.match(kept.headers.get('cache-control') ?? '', /immutable/)
+      const bare = await content.request(`http://content.test${src.split('?')[0]}`)
+      assert.equal(bare.headers.get('cache-control'), 'no-cache')
+      assert.equal((await content.request(`http://content.test${src.split('?')[0]}`, { headers: { 'if-none-match': bare.headers.get('etag')! } })).status, 304)
+    }
+  })
+
+  test('markdown pictures after the first load lazily', async () => {
+    const { id } = await publish({ 'index.md': '# 圖\n\n![一](a.png)\n\n![二](b.png)\n\n![三](c.png)\n' })
+    const imgs = (await (await content.request(`http://content.test/a/${id}/v/1/`)).text()).match(/<img[^>]*>/g)!
+    assert.doesNotMatch(imgs[0], /loading=/)
+    assert.match(imgs[1], /loading="lazy"/)
+    assert.match(imgs[2], /loading="lazy"/)
+  })
+
   test('pages are sandboxed, framed only by the app, and get the bridge', async () => {
     const { id } = await publish({ 'index.html': '<html><head><title>x</title></head><body>hi</body></html>' })
     const response = await content.request(`http://content.test/a/${id}/v/1/`)
     assert.equal(response.headers.get('content-security-policy'), contentSecurityPolicy('http://app.test', 'http://content.test', id))
     assert.match(response.headers.get('content-security-policy') ?? '', /^sandbox allow-scripts/)
     assert.doesNotMatch(response.headers.get('content-security-policy') ?? '', /allow-same-origin/)
-    assert.match(await response.text(), /<head><script src="\/_\/bridge\.js"><\/script><title>/)
+    assert.match(await response.text(), /<head><script src="\/_\/bridge\.js\?v=[0-9a-f]{12}"><\/script><title>/)
   })
 
   test('markdown entries render to HTML', async () => {
@@ -632,5 +667,18 @@ describe('version diff', () => {
     const first = (await (await call(`/api/artifacts/${id}/diff?to=1`)).json()) as { from: number | null; files: { status: string }[] }
     assert.equal(first.from, null)
     assert.ok(first.files.every((f) => f.status === 'added'))
+  })
+})
+
+describe('app static files', () => {
+  test('pages name app.css and their script by hash; that URL is kept for good, the bare one answers 304', async () => {
+    const html = await (await call('/')).text()
+    const href = /href="(\/static\/app\.css\?v=[0-9a-f]+)"/.exec(html)![1]
+    assert.match(html, /src="\/static\/gallery\.js\?v=[0-9a-f]+"/)
+    assert.match((await call(href)).headers.get('cache-control') ?? '', /immutable/)
+    const bare = await call('/static/app.css')
+    assert.equal(bare.headers.get('cache-control'), 'no-cache')
+    const again = await app.request('http://app.test/static/app.css', { headers: { 'if-none-match': bare.headers.get('etag')! } })
+    assert.equal(again.status, 304)
   })
 })

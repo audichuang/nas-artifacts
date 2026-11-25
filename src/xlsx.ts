@@ -25,6 +25,8 @@ export const XLSX_LIMITS = {
 }
 
 const EMU_PER_PX = 9525
+const XLSX_ROWS_FIRST = 150
+const XLSX_ROWS_SLICE = 200
 const EMU_PER_PT = 12700
 const UNSUPPORTED = '網頁版未支援,請下載原始檔查看'
 
@@ -3145,9 +3147,14 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
     }
     parts.push('<tbody>')
   }
+  let drawn = 0
   for (const r of visibleRows) {
     const row = rows.get(r)
     if (wantHtml) {
+      // Past the first screenfuls, rows wait in inert templates the page script adds in slices after the first
+      // paint: parsing and laying out a 100,000-cell table at once held a phone's main thread for seconds.
+      if (drawn >= XLSX_ROWS_FIRST && (drawn - XLSX_ROWS_FIRST) % XLSX_ROWS_SLICE === 0) parts.push(drawn === XLSX_ROWS_FIRST ? '<template class="xl-more">' : '</template><template class="xl-more">')
+      drawn++
       const frozenRow = r <= freezeRows
       parts.push(`<tr style="height:${rowPx(r)}px">${showHeaders ? `<th${frozenRow ? ` class="fr" style="top:${rowTopOf.get(r)}px"` : ''}>${r}</th>` : ''}`)
     }
@@ -3327,6 +3334,7 @@ function renderWorksheet(wb: Workbook, entry: SheetEntry, budget: Budget, wantHt
     }
   }
   if (!wantHtml) return { html: '', text, css: usedXfs, tabColor }
+  if (drawn > XLSX_ROWS_FIRST) parts.push('</template>')
   parts.push('</tbody></table>')
   const notes: string[] = []
   if (empty) notes.push('這個工作表是空的。')
@@ -3494,14 +3502,17 @@ a.xl-link{color:inherit;cursor:pointer}
  * accepts only letters, digits, '-' and '_' there. Panels use other ids, so no hash scrolls the page.
  */
 const PAGE_SCRIPT = `(()=>{const tabs=[...document.querySelectorAll('.xl-tab')];const sheets=[...document.querySelectorAll('.xl-sheet')];if(!sheets.length)return;const first=Number(document.body.dataset.active)||1;
-function fit(root){if(root.dataset.fitted)return;root.dataset.fitted='1';const writes=[];
-for(const td of root.querySelectorAll('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4,w=s.offsetWidth;if(room>0&&w>room)writes.push([s,(parseFloat(getComputedStyle(s).fontSize)*room/w).toFixed(2)+'px'])}
+function fit(root){if(root.dataset){if(root.dataset.fitted)return;root.dataset.fitted='1'}const roots=root.dataset?[root]:root,all=s=>roots.flatMap(r=>[...r.querySelectorAll(s)]);const writes=[];
+for(const td of all('td.sh')){const s=td.firstElementChild;if(!s)continue;const room=td.clientWidth-4,w=s.offsetWidth;if(room>0&&w>room)writes.push([s,(parseFloat(getComputedStyle(s).fontSize)*room/w).toFixed(2)+'px'])}
 const ctx=document.createElement('canvas').getContext('2d'),hash={};
 let last='';const use=f=>{if(f!==last){ctx.font=f;last=f}};
 const looks={},groups={};const lookOf=td=>{const st=td.getAttribute('style')||'',k=td.className+(/font/.test(st)?st:'');let l=looks[k];if(!l){const cs=getComputedStyle(td);l=looks[k]={cs,font:cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily,px:parseFloat(cs.fontSize),pad:parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight)}}return l};
-for(const td of root.querySelectorAll('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const lk=lookOf(td);if(!over&&t.length*lk.px*0.7+lk.pad<cw)continue;const cs=lk.cs,font=lk.font;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+lk.pad}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){const g=td.offsetLeft+'|'+((/\\bx\\d+\\b/.exec(td.className)||[''])[0])+'|'+font;groups[g]=Math.min(groups[g]??1,k);writes.push([td,g,null,parseFloat(cs.fontSize)])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
+for(const td of all('td.n:not(.sh)')){let sw=td.scrollWidth;const cw=td.clientWidth,t=td.textContent,over=sw>cw+1;if(!over&&!/\\d/.test(t))continue;const lk=lookOf(td);if(!over&&t.length*lk.px*0.7+lk.pad<cw)continue;const cs=lk.cs,font=lk.font;if(/\\d/.test(t)){use(font);const a=ctx.measureText(t).width,z=ctx.measureText(t.replace(/\\d/g,'0')).width;if(over){if(a>0)sw*=z/a}else sw=z+lk.pad}if(sw<=cw+1)continue;const k=cw/sw;if(k>=0.7){const g=td.offsetLeft+'|'+((/\\bx\\d+\\b/.exec(td.className)||[''])[0])+'|'+font;groups[g]=Math.min(groups[g]??1,k);writes.push([td,g,null,parseFloat(cs.fontSize)])}else if(!td.querySelector('*')){if(!(font in hash)){use(font);hash[font]=ctx.measureText('#').width||7}writes.push([td,null,'#'.repeat(Math.max(1,Math.floor((cw-4)/hash[font])))])}}
 for(const w of writes){const el=w[0];if(w.length===4){el.style.fontSize=(w[3]*groups[w[1]]*0.97).toFixed(2)+'px'}else if(w[1])el.style.fontSize=w[1];else{el.title=el.textContent;el.textContent=w[2]}}}
-function show(n){if(!(n>=1&&n<=sheets.length))n=first;sheets.forEach((s,i)=>{s.hidden=i!==n-1});tabs.forEach((t,i)=>{t.setAttribute('aria-selected',String(i===n-1));t.tabIndex=i===n-1?0:-1});const tab=tabs[n-1];if(tab){const bar=tab.parentElement;const l=tab.offsetLeft-bar.offsetLeft;if(l<bar.scrollLeft||l+tab.offsetWidth>bar.scrollLeft+bar.clientWidth)bar.scrollLeft=l-16}fit(sheets[n-1])}
+const pause=()=>globalThis.scheduler?.yield?scheduler.yield():new Promise(r=>setTimeout(r,0));
+function grow(sheet){if(sheet.dataset.grown)return;sheet.dataset.grown='1';requestAnimationFrame(()=>setTimeout(async()=>{for(const t of sheet.querySelectorAll('template.xl-more')){if(!t.isConnected)continue;await pause();const fresh=[...t.content.children];t.replaceWith(t.content);fit(fresh)}}))}
+addEventListener('beforeprint',()=>{for(const t of document.querySelectorAll('template.xl-more')){const fresh=[...t.content.children];t.replaceWith(t.content);fit(fresh)}});
+function show(n){if(!(n>=1&&n<=sheets.length))n=first;sheets.forEach((s,i)=>{s.hidden=i!==n-1});tabs.forEach((t,i)=>{t.setAttribute('aria-selected',String(i===n-1));t.tabIndex=i===n-1?0:-1});const tab=tabs[n-1];if(tab){const bar=tab.parentElement;const l=tab.offsetLeft-bar.offsetLeft;if(l<bar.scrollLeft||l+tab.offsetWidth>bar.scrollLeft+bar.clientWidth)bar.scrollLeft=l-16}fit(sheets[n-1]);grow(sheets[n-1])}
 function fromHash(){const m=/^#sheet-(\\d+)$/.exec(location.hash);show(m?Number(m[1]):first)}
 addEventListener('hashchange',fromHash);fromHash()})()`
 

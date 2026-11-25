@@ -1,5 +1,6 @@
 import type { ArtifactDetail } from './artifact-store.ts'
 import type { Config } from './config.ts'
+import { staticUrl } from './assets.ts'
 import { escapeHtml } from './content-render.ts'
 
 function inlineJson(value: unknown): string {
@@ -14,12 +15,12 @@ function shell(title: string, body: string, script: string, data: unknown): stri
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <link rel="icon" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="${staticUrl('app.css')}">
 </head>
 <body>
 ${body}
 <script id="page-data" type="application/json">${inlineJson(data)}</script>
-<script type="module" src="/static/${script}"></script>
+<script type="module" src="${staticUrl(script)}"></script>
 </body>
 </html>`
 }
@@ -38,7 +39,8 @@ export function galleryPage(config: Config, options: { account?: boolean } = {})
   <p id="status" class="muted" role="status"></p>
   <ul id="list" class="cards"></ul>
   <button id="more" class="button" hidden>載入更多</button>
-</main>`,
+</main>
+<script type="speculationrules">{"prefetch":[{"where":{"href_matches":"/a/*"},"eagerness":"moderate"}]}</script>`,
     'gallery.js',
     { appOrigin: config.appOrigin }
   )
@@ -52,7 +54,7 @@ export function notFoundPage(): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>找不到這個頁面</title>
 <link rel="icon" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="${staticUrl('app.css')}">
 </head>
 <body>
 <header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Artifacts</a></header>

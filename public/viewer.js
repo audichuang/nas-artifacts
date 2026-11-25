@@ -141,6 +141,7 @@ function show(v, path, hash = '') {
   const row = artifact.versions.find((candidate) => candidate.version === v)
   titleEl.textContent = row?.title || artifact.title
   document.title = titleEl.textContent
+  document.body.classList.remove('frame-tall')
   frame.src = contentUrl(v, path) + hash
   versionSelect.value = String(v)
   place = { path: path ?? null, hash, scrollY: 0 }
@@ -193,7 +194,15 @@ function slideBar(delta, scrollY) {
   if (keep || delta < -24) document.body.classList.remove('bar-away')
   else if (delta > 24) document.body.classList.add('bar-away')
 }
-phone.addEventListener('change', () => document.body.classList.remove('bar-away'))
+phone.addEventListener('change', () => document.body.classList.remove('bar-away', 'frame-tall'))
+// A page that scrolls even with the bar gone keeps a full-height frame on phones while the bar slides over it,
+// the way a phone browser keeps 100vh fixed under its address bar: resizing the frame would lay the page out
+// again and push everything below a 100vh block down and up by the bar's height. Short pages keep the
+// resizing frame, so nothing of theirs ever sits below the screen.
+function settleFrameHeight(height) {
+  const bar = document.querySelector('.viewer-bar')
+  if (phone.matches && Number.isFinite(height) && bar && height >= innerHeight + bar.offsetHeight) document.body.classList.add('frame-tall')
+}
 
 // The page is untrusted: its report only picks which of this version's files the address bar names.
 function onPlaceReport(report) {
@@ -202,6 +211,8 @@ function onPlaceReport(report) {
   const next = path === currentEntry() ? null : path
   const hash = validHash(report.hash)
   const moved = next !== place.path || hash !== place.hash
+  if (next !== place.path) document.body.classList.remove('frame-tall')
+  settleFrameHeight(report.height)
   slideBar(next === place.path ? report.scrollY - place.scrollY : 0, report.scrollY)
   place = { path: next, hash, scrollY: Math.max(0, report.scrollY) }
   if (moved) {
