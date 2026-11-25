@@ -300,6 +300,21 @@ describe('pie and doughnut', () => {
     assert.ok(radius('111111') < radius('222222'))
   })
 
+  test('outside labels of many small neighbouring slices stack without overlapping, inside the chart, with leader lines', () => {
+    const values = [24, ...Array(8).fill(0.5), 24, 24, 24]
+    const dLbls = '<c:dLbls><c:dLblPos val="bestFit"/><c:showVal val="0"/><c:showCatName val="1"/><c:showPercent val="1"/></c:dLbls>'
+    const { svg } = draw(chart(`<c:pieChart><c:varyColors val="1"/>${ser('S', values, values.map((_, at) => `項目${at + 1}`))}${dLbls}</c:pieChart>`))
+    const [W, H] = /viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg)!.slice(1).map(Number)
+    const outside = [...svg.matchAll(/<text x="([-\d.]+)" y="([-\d.]+)" font-size="([\d.]+)" text-anchor="(start|end)"/g)].map((m) => ({ x: +m[1], y: +m[2], fs: +m[3], side: m[4] }))
+    assert.ok(outside.length >= 8, String(outside.length))
+    for (const side of ['start', 'end']) {
+      const ys = outside.filter((l) => l.side === side).map((l) => l.y).sort((a, b) => a - b)
+      for (let i = 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] >= outside[0].fs * 1.2 - 0.02, `${side}: ${ys.join(',')}`)
+    }
+    for (const l of outside) assert.ok(l.x >= 0 && l.x <= W && l.y > 0 && l.y <= H, JSON.stringify(l))
+    assert.ok(count(svg, /<polyline [^>]*data-leader/g) > 0)
+  })
+
   test('a single full slice still draws', () => {
     const { svg } = draw(chart(`<c:pieChart><c:varyColors val="1"/>${ser('S', [5, 0, 0], ['X', 'Y', 'Z'])}</c:pieChart>`))
     assert.ok(count(svg, /data-slice/g) >= 1)

@@ -849,13 +849,17 @@ function renderTextBody(txBody: XmlNode, styles: TextStyles, ctx: Ctx, options: 
 
     // Paragraph box
     const pStyle: string[] = []
-    const algn = firstAttr(pNodes, 'algn') ?? 'l'
+    // algn is physical even in a right-to-left paragraph; only a missing one follows the start side.
+    const rtl = truthy(firstAttr(pNodes, 'rtl'))
+    const algn = firstAttr(pNodes, 'algn') ?? (rtl ? 'r' : 'l')
+    if (rtl) pStyle.push('direction:rtl')
     pStyle.push(`text-align:${{ l: 'left', ctr: 'center', r: 'right', just: 'justify', dist: 'justify', thaiDist: 'justify', justLow: 'justify' }[algn] ?? 'left'}`)
+    // marL/marR and indent are on the start/end sides: mirrored in rtl (text-indent and the leading bullet already follow direction).
     const marL = Number(firstAttr(pNodes, 'marL') ?? 0) / EMU_PER_PT
     const indent = Number(firstAttr(pNodes, 'indent') ?? 0) / EMU_PER_PT
-    if (marL) pStyle.push(`padding-left:${pt(marL)}`)
+    if (marL) pStyle.push(`padding-inline-start:${pt(marL)}`)
     const marR = Number(firstAttr(pNodes, 'marR') ?? 0) / EMU_PER_PT
-    if (marR) pStyle.push(`padding-right:${pt(marR)}`)
+    if (marR) pStyle.push(`padding-inline-end:${pt(marR)}`)
     if (indent) pStyle.push(`text-indent:${pt(indent)}`)
     pStyle.push(`font-size:${pt(firstSize)}`)
     const lnSpc = firstChild(pNodes, ['lnSpc'])
