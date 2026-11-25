@@ -132,7 +132,7 @@ textarea { resize: vertical; }
   .viewer.editing #frame { height: 42%; flex: none; }
   .editor { order: 1; width: auto; min-width: 0; flex: 1; min-height: 0; border-right: 0; border-top: 1px solid var(--border); }
   /* Under 16px, iOS zooms the page when the field takes focus. */
-  .editor textarea { font-size: 16px; }
+  .editor textarea, .comment-form textarea { font-size: 16px; }
   .comments { position: fixed; inset: var(--bar-h) 0 0 auto; width: min(100%, 360px); z-index: 3; }
   .search { max-width: none; }
   #fullscreen, #copy, #print { display: none; }

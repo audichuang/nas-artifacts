@@ -18,6 +18,10 @@ describe('slide source', () => {
     ])
   })
 
+  test('a deck of only separators still has one blank slide', () => {
+    assert.deepEqual(splitSlides('---\n\n---\n'), [{ body: '', notes: '' }])
+  })
+
   test('CRLF line endings split the same', () => {
     assert.equal(splitSlides('# A\r\n---\r\n# B\r\n').length, 2)
   })

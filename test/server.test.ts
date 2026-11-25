@@ -76,6 +76,13 @@ describe('publishing', () => {
     assert.equal((await content.request(`http://content.test/a/${id}/v/2/a.css`)).status, 200)
   })
 
+  test('the viewer for an id that does not exist is a readable 404 page, not JSON', async () => {
+    const response = await call('/a/doesNotExist1')
+    assert.equal(response.status, 404)
+    assert.match(response.headers.get('content-type') ?? '', /text\/html/)
+    assert.match(await response.text(), /找不到這個頁面/)
+  })
+
   test('PUT without baseVersion is rejected unless forced', async () => {
     const { id } = await publish({ 'index.html': 'x' })
     const missing = await call(`/api/artifacts/${id}`, { method: 'PUT', token: TOKEN, json: { files: { 'index.html': { content: 'y' } } } })

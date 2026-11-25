@@ -31,12 +31,14 @@ function splitLines(text: string, separator: RegExp, limit = Infinity): string[]
 }
 
 export function splitSlides(source: string): SlideSource[] {
-  return splitLines(source.replace(/\r\n?/g, '\n'), /^---\s*$/)
+  const slides = splitLines(source.replace(/\r\n?/g, '\n'), /^---\s*$/)
     .map((chunk) => {
       const [body, notes = ''] = splitLines(chunk, /^\?\?\?\s*$/, 2)
       return { body: body.trim(), notes: notes.trim() }
     })
-    .filter((slide, index, all) => slide.body || slide.notes || all.length === 1)
+    .filter((slide) => slide.body || slide.notes)
+  // A deck of only separators still gets one (blank) slide, so the stage and counter show something.
+  return slides.length ? slides : [{ body: '', notes: '' }]
 }
 
 const LAYOUT_COMMENT = /<!--\s*layout:\s*([a-z-]+)\s*-->/i

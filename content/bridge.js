@@ -149,7 +149,9 @@
 :where(a[href], button, label, [onclick], [role="button"]) img, body.overview :is(img, .diagram svg) { cursor: inherit; }
 .table-zoom { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 6px; padding: 6px 10px; min-height: 32px; border: 1px solid var(--border, #d1d9e0); border-radius: 6px; background: var(--surface, #f6f8fa); color: var(--text, #1f2328); font: 13px system-ui, sans-serif; cursor: pointer; }
 .table-zoom[hidden] { display: none; }
-@media (max-width: 600px) { .artifact-lightbox .lb-item, .artifact-lightbox .lb-sheet { margin: 8px; } }
+/* A sheet starts below the fixed close button instead of under it. */
+.artifact-lightbox .lb-sheet { margin-top: 64px; }
+@media (max-width: 600px) { .artifact-lightbox .lb-item, .artifact-lightbox .lb-sheet { margin: 8px; } .artifact-lightbox .lb-sheet { margin-top: 60px; } }
 @media print { .table-zoom { display: none !important; } }`
   let lightbox = null
 

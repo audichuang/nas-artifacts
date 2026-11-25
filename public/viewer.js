@@ -484,8 +484,11 @@ let replyTo = null
 
 function setReply(comment) {
   replyTo = comment
-  replyTarget.textContent = comment ? `回覆 ${comment.author}` : ''
-  if (comment) bodyInput.focus()
+  replyTarget.replaceChildren()
+  if (!comment) return
+  // Escape cancels on a keyboard; phones need a button.
+  replyTarget.append(`回覆 ${comment.author} `, actionButton('取消', () => setReply(null)))
+  bodyInput.focus()
 }
 
 function commentNode(comment) {
@@ -549,7 +552,7 @@ function renderComments() {
   if (visible.length === 0) {
     const empty = document.createElement('li')
     empty.className = 'muted'
-    empty.textContent = '還沒有留言。'
+    empty.textContent = roots.length ? '留言都已解決。勾選「顯示已解決」可以再看。' : '還沒有留言。'
     threadsEl.append(empty)
   }
 }

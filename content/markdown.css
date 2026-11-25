@@ -142,5 +142,7 @@ body { margin: 0; background: var(--bg); color: var(--text); }
   .markdown-body { max-width: none; padding: 0; }
   .markdown-body pre, .markdown-body table, .markdown-body img, .markdown-body .diagram, .markdown-body .markdown-alert { break-inside: avoid; }
   .markdown-body table { display: table; }
+  /* Paper cannot scroll sideways: long code lines wrap instead of being cut at the margin. */
+  .markdown-body pre, .markdown-body pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
   .markdown-body h1, .markdown-body h2, .markdown-body h3 { break-after: avoid; }
 }

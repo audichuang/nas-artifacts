@@ -13,7 +13,7 @@ import {
 } from './artifact-store.ts'
 import type { Config } from './config.ts'
 import { decodeRequestPath, isPptxPath, normalizeFilePath } from './file-paths.ts'
-import { galleryPage, viewerPage } from './pages.ts'
+import { galleryPage, notFoundPage, viewerPage } from './pages.ts'
 import { isSlidesPath, renderSlides } from './slides.ts'
 import { deckToPptx } from './slides-pptx.ts'
 import { mountOfficeEditor } from './office-editor.ts'
@@ -178,7 +178,13 @@ export function createAppServer(store: ArtifactStore, config: Config, options: A
     return c.html(galleryPage(config, { account: Boolean(owner) }))
   })
   app.get('/a/:id', (c) => {
-    const detail = store.detail(c.req.param('id'))
+    let detail
+    try {
+      detail = store.detail(c.req.param('id'))
+    } catch (error) {
+      if (error instanceof ArtifactError && error.status === 404) return c.html(notFoundPage(), 404)
+      throw error
+    }
     const requested = Number(c.req.query('v') ?? detail.currentVersion)
     const version = detail.versions.find((row) => row.version === requested)?.version ?? detail.currentVersion
     // Under content tokens the frame may move to a renewed token's path; each token still opens only this artifact.

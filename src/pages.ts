@@ -44,6 +44,27 @@ export function galleryPage(config: Config, options: { account?: boolean } = {})
   )
 }
 
+export function notFoundPage(): string {
+  return `<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>找不到這個頁面</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Artifacts</a></header>
+<main class="gallery">
+  <h1>找不到這個頁面</h1>
+  <p class="muted">它可能已經被刪除,或網址不完整。</p>
+  <p><a class="button" href="/">回到列表</a></p>
+</main>
+</body>
+</html>`
+}
+
 /** `grant`: on the owner's public app, where the frame reads files (under a content token) and until when. */
 export function viewerPage(config: Config, detail: ArtifactDetail, version: number, path?: string, grant?: { contentBase: string; expiresAt: number }): string {
   const row = detail.versions.find((candidate) => candidate.version === version)
