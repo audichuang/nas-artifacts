@@ -115,10 +115,11 @@ let pendingScroll = null
 
 // A hash the page or the address bar names: an anchor or a slide number, nothing that could be a URL.
 function validHash(hash) {
-  if (typeof hash !== 'string' || hash.length > 400) return ''
+  if (typeof hash !== 'string' || hash.length > 3000) return ''
   try {
     const decoded = decodeURIComponent(hash)
-    return /^#[\p{L}\p{N}_-]{1,100}$/u.test(decoded) ? decoded : ''
+    // Heading slugs keep letters, combining marks, digits, _ and -; HTML pages also use dotted ids.
+    return /^#[\p{L}\p{M}\p{N}._-]{1,300}$/u.test(decoded) ? decoded : ''
   } catch {
     return ''
   }
@@ -972,7 +973,10 @@ if (storage.get('artifacts.commentsOpen') === '1') {
   commentsPanel.hidden = false
   toggleComments.setAttribute('aria-expanded', 'true')
 }
+// The server falls back to the current version for a ?v= it does not have; say so instead of silently.
+const askedVersion = new URLSearchParams(location.search).get('v')
 show(version, data.path, validHash(location.hash))
+if (askedVersion !== null && askedVersion !== String(version)) toast(`沒有 v${askedVersion.slice(0, 12)},顯示最新版 v${version}`)
 loadComments().catch(() => {})
 
 // Before the content token runs out, take a new one and reopen the frame where the reader is.

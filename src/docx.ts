@@ -3100,6 +3100,7 @@ class DocxRenderer {
 
 const PAGE_CSS = `:root{color-scheme:light}
 html,body{margin:0;background:#e8eaed}
+@media screen and (prefers-color-scheme:dark){html,body{background:#2b2d31}}
 body{padding:16px 10px 40px;font-family:Arial,'PingFang TC','Noto Sans TC','Microsoft JhengHei',sans-serif;-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .dx-doc{max-width:100%;margin:0 auto}
 .dx-sheet{--il:var(--ml);position:relative;box-sizing:border-box;width:min(100%,var(--pw));margin:0 auto 20px;color:#000;box-shadow:0 1px 3px rgba(60,64,67,.3),0 4px 12px rgba(60,64,67,.12);container-type:inline-size;isolation:isolate;overflow-wrap:break-word;overflow:clip}

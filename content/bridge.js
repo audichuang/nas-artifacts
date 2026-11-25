@@ -71,7 +71,7 @@
   function reportPlace() {
     reportTimer = null
     const y = mainScroller ? mainScroller.scrollTop : scrollY
-    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: location.hash.slice(0, 400), scrollY: Math.round(y) } }, APP_ORIGIN)
+    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: location.hash.length <= 3000 ? location.hash : '', scrollY: Math.round(y) } }, APP_ORIGIN)
   }
   // Content drawn by scripts may not be tall enough yet, so keep trying briefly unless the reader scrolls first.
   function restoreScroll(target) {
@@ -172,6 +172,7 @@
     dialog.append(item, close)
 
     let base = 0
+    let fitsByHeight = false
     let scale = 1
     const maxScale = () => Math.max(4, (natural || 0) / base)
     function setScale(next, clientX = innerWidth / 2, clientY = innerHeight / 2) {
@@ -192,6 +193,7 @@
       const gutter = innerWidth <= 600 ? 16 : 32
       const room = { w: innerWidth - gutter, h: innerHeight - gutter }
       base = Math.max(1, Math.min(room.w, room.h * ratio, natural || Infinity))
+      fitsByHeight = room.h * ratio < Math.min(room.w, natural || Infinity)
       item.style.width = `${Math.round(base * scale)}px`
     }
 
@@ -251,7 +253,8 @@
     dialog.showModal()
     // When the fitted size is about what the page already showed (a full-width picture on a phone),
     // open zoomed in, around the point that was tapped, so the first tap visibly enlarges it.
-    if (zoomable && shown && base < shown * 1.25) {
+    // A tall picture (a phone screenshot) fits by height: opening it whole is the point, so it is not zoomed.
+    if (zoomable && shown && base < shown * 1.25 && !fitsByHeight) {
       const more = natural && natural > base * 1.05 ? natural / base : 2
       setScale(Math.min(2.5, more), at?.x, at?.y)
     }

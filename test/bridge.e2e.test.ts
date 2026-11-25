@@ -1043,6 +1043,49 @@ test('on a phone the first tap on a full-width picture already shows it larger',
   await viewer.close()
 })
 
+test('on a phone a tall screenshot opens whole, not zoomed into its top half', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const tallPicture = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1170" height="2532"><rect width="1170" height="2532" fill="#47a"/></svg>')
+  const { id } = store.publish({ title: '直式截圖', files: { 'index.md': { content: Buffer.from('# 圖\n\n![直圖](shot.svg)\n') }, 'shot.svg': { content: tallPicture } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 390, height: 760 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('img[alt="直圖"]').click()
+  await frame.locator('dialog.artifact-lightbox[open] img').waitFor({ timeout: 5000 })
+  const pageFrame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  const state = await pageFrame.evaluate(() => {
+    const img = document.querySelector('dialog.artifact-lightbox[open] img')!.getBoundingClientRect()
+    return { zoomed: document.querySelector('dialog.artifact-lightbox')!.classList.contains('zoomed'), bottom: img.bottom, innerHeight }
+  })
+  assert.equal(state.zoomed, false)
+  assert.ok(state.bottom <= state.innerHeight + 1, `picture runs past the screen: ${state.bottom} > ${state.innerHeight}`)
+  await viewer.close()
+})
+
+test('the viewer URL keeps anchors with dots, combining marks and long Chinese headings', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const long = '第一章-從單體到事件驅動架構的完整遷移計畫與風險評估以及後續維運交接的詳細說明與注意事項整理'
+  const html = `<!doctype html><title>x</title><p><a id="go1" href="#v1.2">a</a> <a id="go2" href="#${long}">b</a> <a id="go3" href="#café">c</a></p><div style="height:3000px"></div><h2 id="v1.2">x</h2><div style="height:3000px"></div><h2 id="${long}">y</h2><h2 id="café">z</h2><div style="height:3000px"></div>`
+  const { id } = store.publish({ title: '錨點', files: { 'index.html': { content: Buffer.from(html) } } })
+  const viewer = await browser.newPage()
+  await viewer.setViewportSize({ width: 1280, height: 800 })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  for (const [link, hash] of [['#go1', '#v1.2'], ['#go2', `#${long}`], ['#go3', '#café']]) {
+    await frame.locator(link).click()
+    await viewer.waitForFunction((want) => decodeURIComponent(location.hash) === want, hash, { timeout: 5000 })
+  }
+  await viewer.close()
+})
+
+test('asking for a version that does not exist says the latest is shown instead', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const { id } = store.publish({ title: '版本', files: { 'index.html': { content: Buffer.from('<!doctype html><title>x</title><p>hi</p>') } } })
+  const viewer = await browser.newPage()
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}?v=99`)
+  await viewer.locator('#toast:not([hidden])').waitFor({ timeout: 5000 })
+  assert.match(await viewer.locator('#toast').textContent() ?? '', /沒有 v99,顯示最新版 v1/)
+  await viewer.close()
+})
+
 test('on a phone the bar stays away at the bottom of a page instead of bouncing', { skip: !chromiumPath && 'no Chromium found' }, async () => {
   const md = `# 長文\n\n${'段落文字。\n\n'.repeat(120)}<div style="min-height:100vh">結尾</div>\n`
   const { id } = store.publish({ title: '頁尾', files: { 'index.md': { content: Buffer.from(md) } } })
