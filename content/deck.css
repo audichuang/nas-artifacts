@@ -53,11 +53,13 @@ body.show-notes .deck-stage { bottom: calc(var(--bar-h) + var(--notes-h)); }
 .slide-inner strong { font-weight: 700; }
 .slide-inner mark { background: var(--accent-soft); color: inherit; padding: 0 0.15em; border-radius: 0.15em; }
 .slide-inner code { font: 0.85em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 0.25em; }
-.slide-inner pre { margin: 0.5em 0; padding: 0.7em 0.9em; background: var(--code-bg); border-radius: 0.35em; overflow: hidden; font-size: 0.72em; line-height: 1.45; }
+/* flex-shrink 0: a squeezed pre hid its overflow from fit(), so long code was cut off without shrinking or a report. */
+.slide-inner pre { flex-shrink: 0; margin: 0.5em 0; padding: 0.7em 0.9em; background: var(--code-bg); border-radius: 0.35em; overflow: hidden; font-size: 0.72em; line-height: 1.45; }
 .slide-inner pre code { background: none; padding: 0; font-size: 1em; }
 .slide-inner blockquote { margin: 0.5em 0; padding: 0.1em 0 0.1em 0.8em; border-left: 0.18em solid var(--accent); color: var(--muted); }
 .slide-inner table { border-collapse: collapse; margin: 0.5em 0; font-size: 0.82em; max-width: 100%; }
-.slide-inner :is(th, td) { padding: 0.35em 0.8em; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.slide-inner :is(th, td) { padding: 0.35em 0.8em; border-bottom: 1px solid var(--border); vertical-align: top; }
+.slide-inner :is(th, td):not([align]) { text-align: left; }
 .slide-inner th { font-weight: 700; border-bottom: 0.1em solid var(--accent); }
 .slide-inner hr { border: 0; border-top: 1px solid var(--border); margin: 0.8em 0; }
 .slide-inner img, .slide-inner video { display: block; max-width: 100%; max-height: 52cqh; margin: 0.4em auto; border-radius: 0.25em; object-fit: contain; }
@@ -161,6 +163,8 @@ body.overview .deck-notes { display: none; }
 /* Print / PDF: one slide per page. */
 @page { size: 13.333in 7.5in; margin: 0; }
 @media print {
+  /* markdown.css resets the text to dark for paper; the slide colours follow, or a dark-mode print is black on navy. */
+  :root { --accent: #2563eb; --accent-soft: #dbe7ff; --deck-bg: #e8ebf0; --slide-bg: #ffffff; }
   html, body.deck { height: auto; overflow: visible; background: none; }
   .deck-bar, .deck-notes { display: none !important; }
   .deck-stage, body.overview .deck-stage { position: static; display: block; container-type: normal; padding: 0; overflow: visible; }

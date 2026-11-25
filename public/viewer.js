@@ -623,7 +623,8 @@ let previewSeq = 0
 let previewTimer
 
 const canEditPptx = () => data.officeEnabled && place.path === null && /\.pptx$/i.test(currentEntry()) && artifact.capabilities.length === 0 && version === artifact.currentVersion
-const canEdit = () => (isMarkdownDeck() || canEditPptx()) && artifact.capabilities.length === 0
+// The editor opens the latest version, so a Markdown deck is editable only while the latest is one too.
+const canEdit = () => ((isMarkdownDeck() && /\.slides\.md$/i.test(artifact.entry)) || canEditPptx()) && artifact.capabilities.length === 0
 const exportLink = document.getElementById('export-pptx')
 const printButton = document.getElementById('print')
 printButton.addEventListener('click', () => notifyPage({ type: 'print' }))

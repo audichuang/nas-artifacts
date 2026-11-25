@@ -136,7 +136,8 @@ textarea { resize: vertical; }
   .comments { position: fixed; inset: var(--bar-h) 0 0 auto; width: min(100%, 360px); z-index: 3; }
   .search { max-width: none; }
   #fullscreen, #copy, #print { display: none; }
-  :root { --bar-h: 92px; }
+  /* Only the viewer's bar wraps to two rows; the gallery's top bar stays one row. */
+  :root:has(.viewer-bar) { --bar-h: 92px; }
   .viewer-bar { flex-wrap: wrap; align-content: center; gap: 6px 8px; padding: 6px 12px; }
   .viewer-bar .viewer-title { flex: 1 0 calc(100% - 40px); }
   .viewer-bar .version-picker { flex: 1 1 0; min-width: 0; }
