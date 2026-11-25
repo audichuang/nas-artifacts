@@ -50,6 +50,8 @@ try {
 
   const download = async (kind, path) => {
     const button = page.locator('#export-pptx')
+    // Downloads live in the viewer's ⋮ menu.
+    await page.locator('#more-actions').click()
     await button.waitFor({ state: 'visible', timeout: 5000 })
     const label = (await button.textContent()).trim()
     const [file] = await Promise.all([page.waitForEvent('download'), button.click()])

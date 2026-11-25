@@ -655,6 +655,8 @@ test('a deck prints one slide per page, and the toolbar offers it as .pptx', { s
   assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.deck-bar')!).display), 'none')
   await viewer.emulateMedia({ media: 'screen' })
 
+  // Downloads live in the ⋮ menu.
+  await viewer.click('#more-actions')
   const link = viewer.locator('#export-pptx')
   assert.equal(await link.isVisible(), true)
   const [download] = await Promise.all([viewer.waitForEvent('download'), link.click()])
@@ -800,7 +802,7 @@ test('a PowerPoint file shows as a deck at its own size: pictures load inside th
   await viewer.keyboard.press('Escape')
   await frame.locator('dialog.artifact-lightbox').waitFor({ state: 'detached', timeout: 5000 })
   assert.equal(await viewer.locator('#edit').isHidden(), true)
-  assert.equal(await viewer.locator('#export-pptx').isVisible(), true)
+  assert.equal(await viewer.locator('#export-pptx').getAttribute('hidden'), null)
   assert.deepEqual(store.listErrors(id, 1), [])
   await viewer.close()
 })
@@ -1008,10 +1010,11 @@ test('a report page prints from the viewer bar, and a Markdown page offers its s
   await viewer.frameLocator('#frame').locator('h1').waitFor()
   const pageFrame = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
   await pageFrame.evaluate(() => { window.print = () => { document.body.dataset.printed = 'yes' } })
+  await viewer.click('#more-actions')
   await viewer.locator('#print').click()
   await pageFrame.waitForFunction(() => document.body.dataset.printed === 'yes', null, { timeout: 3000 })
   const source = viewer.locator('#export-pptx')
-  assert.equal(await source.textContent(), 'MD')
+  assert.match((await source.textContent())!, /MD/)
   assert.match((await source.getAttribute('href'))!, new RegExp(`/api/artifacts/${id}/files/index\\.md\\?v=1$`))
   await viewer.close()
 
@@ -1021,7 +1024,7 @@ test('a report page prints from the viewer bar, and a Markdown page offers its s
   await second.setViewportSize({ width: 1200, height: 800 })
   await second.goto(`http://localhost:${APP_PORT}/a/${deck.id}`)
   await second.frameLocator('#frame').locator('.slide.active').waitFor()
-  assert.equal(await second.locator('#print').isHidden(), true)
+  assert.notEqual(await second.locator('#print').getAttribute('hidden'), null)
   await second.close()
 })
 

@@ -1,10 +1,10 @@
 # Pins
 
-Any tailnet reader can pin an artifact so it stays at the top of the gallery. The pin is kept on the server, so every device sees it. The control is the ☆/★ button in the viewer bar; the gallery has no pin control, it only marks pinned cards with ★ and lists them first.
+Any tailnet reader can pin an artifact so it stays at the top of the gallery. The pin is kept on the server, so every device sees it. The control is the star button in the viewer bar (its icon fills when pinned); the gallery has no pin control, it only marks pinned cards with ★ and lists them first.
 
 ## Sub-features
 
-- `pin`: viewer `#pin` (☆ / ★, `aria-pressed`) → `PATCH /api/artifacts/<id>` `{ pinned }` (no token, viewer header).
+- `pin`: viewer `#pin` (star icon filled when pinned, `aria-pressed`) → `PATCH /api/artifacts/<id>` `{ pinned }` (no token, viewer header).
 - `gallery`: pinned cards carry `.pinned-mark` (★, title 已釘選) and sort first (`ORDER BY pinned DESC, updated_at DESC`), also within a search.
 - `CLI`: no pin command; `artifact get --json` and `list --json` carry `pinned`.
 

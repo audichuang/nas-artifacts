@@ -1,11 +1,16 @@
 import type { ArtifactDetail } from './artifact-store.ts'
 import type { Config } from './config.ts'
+import { readFileSync } from 'node:fs'
 import { staticUrl } from './assets.ts'
 import { escapeHtml } from './content-render.ts'
 
 function inlineJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c')
 }
+
+// Lucide icons (ISC), inlined once per page so `<use href="#i-…">` needs no request and no CSP source.
+const ICONS = readFileSync(new URL('../public/icons.svg', import.meta.url), 'utf8')
+const icon = (name: string): string => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`
 
 function shell(title: string, body: string, script: string, data: unknown): string {
   return `<!doctype html>
@@ -18,7 +23,7 @@ function shell(title: string, body: string, script: string, data: unknown): stri
 <link rel="stylesheet" href="${staticUrl('app.css')}">
 </head>
 <body>
-${body}
+${ICONS}${body}
 <script id="page-data" type="application/json">${inlineJson(data)}</script>
 <script type="module" src="${staticUrl(script)}"></script>
 </body>
@@ -32,8 +37,10 @@ export function galleryPage(config: Config, options: { account?: boolean } = {})
   <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Artifacts</a>
   <label class="search">
     <span class="visually-hidden">搜尋</span>
+    ${icon('search')}
     <input id="search" type="search" placeholder="搜尋標題、內文或來源資料夾" autocomplete="off">
-  </label>${options.account ? '\n  <a class="button" href="/account" title="passkey、登出">帳號</a>' : ''}
+    <kbd aria-hidden="true">/</kbd>
+  </label>${options.account ? `\n  <a class="icon-button" href="/account" title="帳號:passkey、登出" aria-label="帳號">${icon('user-round')}</a>` : ''}
 </header>
 <main class="gallery">
   <p id="status" class="muted" role="status"></p>
@@ -73,26 +80,32 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
   return shell(
     row?.title ?? detail.title,
     `<header class="topbar viewer-bar">
-  <a class="icon-button" href="/" title="所有 Artifacts" aria-label="所有 Artifacts">←</a>
+  <a class="icon-button" href="/" title="所有 Artifacts" aria-label="所有 Artifacts">${icon('arrow-left')}</a>
   <div class="viewer-title">
-    <span class="artifact-icon" aria-hidden="true">${escapeHtml(detail.icon ?? '')}</span>
+    <span class="artifact-icon" aria-hidden="true" style="view-transition-name: a-${escapeHtml(detail.id)}">${escapeHtml(detail.icon ?? '')}</span>
     <h1 id="title">${escapeHtml(row?.title ?? detail.title)}</h1>
   </div>
   <label class="version-picker">
     <span class="visually-hidden">版本</span>
     <select id="version"></select>
   </label>
-  <div class="bar-actions">
-    <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選">☆</button>
-    <button id="copy" class="icon-button" type="button" title="複製連結">⧉</button>
-    <button id="fullscreen" class="icon-button" type="button" title="全螢幕" aria-label="全螢幕">⛶</button>
-    <button id="print" class="button" type="button" title="列印或存成 PDF" hidden>列印</button>
-    <a id="export-pptx" class="button" href="#" download title="下載成 PowerPoint(.pptx)" hidden>PPTX</a>
-    <button id="edit" class="button" type="button" aria-expanded="false" title="編輯這份簡報" hidden>編輯</button>
-    <button id="changes" class="icon-button" type="button" title="這版改了什麼" aria-label="這版改了什麼" hidden>±</button>
-    <button id="errors" class="button danger" type="button" title="這頁執行時發生的錯誤" hidden>⚠ <span id="error-count"></span></button>
-    <button id="toggle-comments" class="button" type="button" aria-expanded="false">留言 <span id="comment-count"></span></button>
-    <button id="menu-delete" class="icon-button danger" type="button" title="刪除">🗑</button>
+  <div class="bar-actions" role="toolbar" aria-label="這份 Artifact" focusgroup="toolbar wrap">
+    <button id="pin" class="icon-button" type="button" aria-pressed="false" title="釘選" aria-label="釘選">${icon('star')}</button>
+    <button id="edit" class="button" type="button" aria-expanded="false" title="編輯這份簡報" hidden>${icon('pencil')}<span class="label">編輯</span></button>
+    <button id="changes" class="icon-button" type="button" title="這版改了什麼" aria-label="這版改了什麼" hidden>${icon('git-compare')}</button>
+    <button id="errors" class="button danger" type="button" title="這頁執行時發生的錯誤" hidden>${icon('triangle-alert')}<span id="error-count"></span></button>
+    <button id="toggle-comments" class="button" type="button" aria-expanded="false" title="留言">${icon('message-circle')}<span class="label">留言</span><span id="comment-count" class="count"></span></button>
+    <button id="more-actions" class="icon-button" type="button" popovertarget="more-menu" aria-haspopup="menu" aria-expanded="false" title="更多" aria-label="更多動作">${icon('ellipsis-vertical')}</button>
+  </div>
+  <div id="more-menu" class="menu" popover>
+    <div role="menu" aria-label="更多動作" focusgroup="menu nomemory">
+      <button id="copy" class="menu-item" type="button" role="menuitem">${icon('link')}複製連結</button>
+      <button id="fullscreen" class="menu-item" type="button" role="menuitem">${icon('maximize-2')}全螢幕</button>
+      <button id="print" class="menu-item" type="button" role="menuitem" hidden>${icon('printer')}列印或存成 PDF</button>
+      <a id="export-pptx" class="menu-item" href="#" download role="menuitem" hidden>${icon('file-down')}<span class="label">下載成 PowerPoint(PPTX)</span></a>
+      <hr>
+      <button id="menu-delete" class="menu-item danger" type="button" role="menuitem">${icon('trash-2')}刪除</button>
+    </div>
   </div>
 </header>
 <a id="public-link" class="button public-chip" href="#" target="_blank" rel="noopener" title="任何人拿到連結都能看(唯讀)" hidden>公開</a>
@@ -102,7 +115,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
       <h2>編輯簡報</h2>
       <div class="comments-head-actions">
         <span id="editor-status" class="muted small" role="status"></span>
-        <button id="close-editor" class="icon-button" type="button" aria-label="關閉編輯" title="關閉編輯">×</button>
+        <button id="close-editor" class="icon-button" type="button" aria-label="關閉編輯" title="關閉編輯">${icon('x')}</button>
       </div>
     </div>
     <textarea id="editor-source" spellcheck="false" aria-label="簡報原始碼(Markdown)"></textarea>
@@ -119,7 +132,7 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
       <h2>留言</h2>
       <div class="comments-head-actions">
         <label class="muted small"><input id="show-resolved" type="checkbox"> 顯示已解決</label>
-        <button id="close-comments" class="icon-button" type="button" aria-label="關閉留言" title="關閉留言">×</button>
+        <button id="close-comments" class="icon-button" type="button" aria-label="關閉留言" title="關閉留言">${icon('x')}</button>
       </div>
     </div>
     <ol id="threads" class="threads"></ol>
@@ -132,18 +145,18 @@ export function viewerPage(config: Config, detail: ArtifactDetail, version: numb
     </form>
   </aside>
 </div>
-<dialog id="error-dialog" class="error-dialog">
+<dialog id="error-dialog" class="error-dialog" closedby="any">
   <div class="comments-head">
     <h2>頁面錯誤</h2>
-    <button id="close-errors" class="icon-button" type="button" aria-label="關閉" title="關閉">×</button>
+    <button id="close-errors" class="icon-button" type="button" aria-label="關閉" title="關閉" commandfor="error-dialog" command="close">${icon('x')}</button>
   </div>
   <p class="muted small error-hint">這個版本被開啟時發生的錯誤。Agent 可用 <code>artifact errors ${escapeHtml(detail.id)}</code> 讀取。</p>
   <ol id="error-list" class="threads"></ol>
 </dialog>
-<dialog id="diff-dialog" class="error-dialog diff-dialog">
+<dialog id="diff-dialog" class="error-dialog diff-dialog" closedby="any">
   <div class="comments-head">
     <h2 id="diff-title">這版改了什麼</h2>
-    <button id="close-diff" class="icon-button" type="button" aria-label="關閉" title="關閉">×</button>
+    <button id="close-diff" class="icon-button" type="button" aria-label="關閉" title="關閉" commandfor="diff-dialog" command="close">${icon('x')}</button>
   </div>
   <p id="diff-meta" class="muted small error-hint"></p>
   <div id="diff-files" class="diff-files"></div>

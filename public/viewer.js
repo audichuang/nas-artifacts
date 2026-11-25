@@ -261,7 +261,6 @@ async function refreshArtifact() {
   syncPublicLink(artifact.publicUrl)
   renderVersions()
   syncChangesButton()
-  pinButton.textContent = artifact.pinned ? '★' : '☆'
   pinButton.setAttribute('aria-pressed', String(artifact.pinned))
 }
 
@@ -414,7 +413,6 @@ async function openDiff() {
 }
 
 changesButton.addEventListener('click', openDiff)
-document.getElementById('close-diff').addEventListener('click', () => diffDialog.close())
 
 // Page errors: the page reports what broke, the server keeps a bounded log per version.
 
@@ -487,7 +485,59 @@ function renderErrors() {
 }
 
 errorsButton.addEventListener('click', () => errorDialog.showModal())
-document.getElementById('close-errors').addEventListener('click', () => errorDialog.close())
+// Invoker commands close the dialogs declaratively; older browsers get the same from a click handler.
+if (!('commandForElement' in HTMLButtonElement.prototype)) {
+  for (const button of document.querySelectorAll('button[commandfor][command="close"]')) {
+    button.addEventListener('click', () => document.getElementById(button.getAttribute('commandfor'))?.close())
+  }
+}
+// Light dismiss (a click on the backdrop) where closedby="any" is not supported yet.
+if (!('closedBy' in HTMLDialogElement.prototype)) {
+  for (const dialog of document.querySelectorAll('dialog[closedby="any"]')) {
+    dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close() })
+  }
+}
+
+// The overflow menu: a popover anchored to its ⋮ button. Its items keep their own handlers; picking one closes it.
+const moreButton = document.getElementById('more-actions')
+const moreMenu = document.getElementById('more-menu')
+moreMenu.addEventListener('toggle', (event) => {
+  const open = event.newState === 'open'
+  moreButton.setAttribute('aria-expanded', String(open))
+  if (open) moreMenu.querySelector('.menu-item:not([hidden])')?.focus()
+  // Without anchor positioning the popover would sit at the viewport's corner: place it under its button.
+  if (open && !CSS.supports('position-area', 'block-end')) {
+    const at = moreButton.getBoundingClientRect()
+    const box = moreMenu.getBoundingClientRect()
+    moreMenu.style.top = `${at.bottom + box.height + 6 <= innerHeight ? at.bottom + 6 : Math.max(6, at.top - box.height - 6)}px`
+    moreMenu.style.left = `${Math.max(6, Math.min(at.right - box.width, innerWidth - box.width - 6))}px`
+  }
+})
+moreMenu.addEventListener('click', (event) => { if (event.target.closest('.menu-item')) moreMenu.hidePopover() })
+moreMenu.addEventListener('keydown', (event) => { if (event.key === 'Tab') moreMenu.hidePopover() })
+
+// Arrow keys between toolbar buttons and menu items where focusgroup is not native yet (a roving tab stop).
+if (!('focusGroup' in HTMLElement.prototype)) {
+  for (const group of document.querySelectorAll('[focusgroup]')) {
+    const vertical = group.getAttribute('role') === 'menu'
+    const items = () => [...group.querySelectorAll(':scope > :is(button, a), :scope > * > :is(button, a)')].filter((item) => !item.hidden)
+    if (!vertical) items().forEach((item, at) => { item.tabIndex = at ? -1 : 0 })
+    group.addEventListener('focusin', (event) => { if (!vertical) items().forEach((item) => { item.tabIndex = item === event.target ? 0 : -1 }) })
+    group.addEventListener('keydown', (event) => {
+      const list = items()
+      const at = list.indexOf(document.activeElement)
+      const rtl = getComputedStyle(group).direction === 'rtl'
+      const steps = vertical ? { ArrowDown: 1, ArrowUp: -1 } : { ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 }
+      let next = null
+      if (event.key in steps && at >= 0) next = list[(at + steps[event.key] + list.length) % list.length]
+      else if (event.key === 'Home') next = list[0]
+      else if (event.key === 'End') next = list.at(-1)
+      if (!next) return
+      event.preventDefault()
+      next.focus()
+    })
+  }
+}
 
 // Comments
 
@@ -652,7 +702,8 @@ function syncEditButton() {
   const markdown = place.path === null && !isDeck() && /\.(md|markdown)$/i.test(entry)
   const original = office || markdown
   exportLink.hidden = !isDeck() && !original
-  exportLink.textContent = markdown ? 'MD' : office ? entry.split('.').pop().toUpperCase() : 'PPTX'
+  const format = markdown ? 'MD' : office ? entry.split('.').pop().toUpperCase() : 'PPTX'
+  exportLink.querySelector('.label').textContent = original ? `下載原始檔(${format})` : '下載成 PowerPoint(PPTX)'
   exportLink.title = original ? '下載原始檔' : '下載成 PowerPoint(.pptx)'
   // Decks print from their own bar (one slide per page).
   printButton.hidden = isDeck()
@@ -843,7 +894,6 @@ pinButton.addEventListener('click', async () => {
   try {
     const next = await api('', { method: 'PATCH', json: { pinned: !artifact.pinned } })
     artifact = { ...artifact, pinned: next.pinned }
-    pinButton.textContent = next.pinned ? '★' : '☆'
     pinButton.setAttribute('aria-pressed', String(next.pinned))
   } catch (error) {
     toast(error.message)
@@ -978,7 +1028,6 @@ function connectEvents() {
 }
 
 renderVersions()
-pinButton.textContent = artifact.pinned ? '★' : '☆'
 pinButton.setAttribute('aria-pressed', String(artifact.pinned))
 if (storage.get('artifacts.commentsOpen') === '1') {
   commentsPanel.hidden = false

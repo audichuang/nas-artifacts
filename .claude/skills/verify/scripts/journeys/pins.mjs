@@ -24,7 +24,8 @@ async function galleryOrder(page) {
   return page.locator('#list .card').evaluateAll((cards) => cards.map((card) => ({ title: card.querySelector('.card-title').textContent, pinned: Boolean(card.querySelector('.pinned-mark')) })))
 }
 const show = (order) => order.map((x) => `${x.title}${x.pinned ? ' ★' : ''}`).join(' | ')
-const pinState = async (page) => ({ text: (await page.locator('#pin').textContent()).trim(), pressed: await page.locator('#pin').getAttribute('aria-pressed') })
+// The star is an icon now: pinned fills it.
+const pinState = async (page) => ({ text: (await page.locator('#pin .icon').evaluate((icon) => getComputedStyle(icon).fill)) === 'none' ? '☆' : '★', pressed: await page.locator('#pin').getAttribute('aria-pressed') })
 
 let browser
 try {

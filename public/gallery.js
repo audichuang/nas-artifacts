@@ -15,6 +15,11 @@ function relativeTime(iso) {
   return timeFormat.format(Math.round(seconds / size), unit)
 }
 
+const KINDS = [
+  [/\.slides\.md$/i, '簡報'], [/\.(md|markdown)$/i, 'Markdown'], [/\.(pptx|pptm|ppsx)$/i, 'PowerPoint'],
+  [/\.(docx|docm)$/i, 'Word'], [/\.(xlsx|xlsm)$/i, 'Excel'], [/\.html?$/i, '網頁']
+]
+
 function card(artifact) {
   const item = document.createElement('li')
   const link = document.createElement('a')
@@ -25,9 +30,16 @@ function card(artifact) {
   const icon = document.createElement('span')
   icon.className = 'artifact-icon'
   icon.textContent = artifact.icon || '📄'
+  // The same name as the viewer's icon: the navigation morphs this tile into the viewer's title.
+  icon.style.viewTransitionName = `a-${artifact.id}`
   const title = document.createElement('span')
   title.className = 'card-title'
   title.textContent = artifact.title
+  const kind = KINDS.find(([pattern]) => pattern.test(artifact.entry))?.[1] ?? '檔案'
+  const chip = document.createElement('span')
+  chip.className = 'kind-chip'
+  chip.dataset.kind = kind
+  chip.textContent = kind
   head.append(icon, title)
   if (artifact.visibility === 'public') {
     const badge = document.createElement('span')
@@ -43,7 +55,7 @@ function card(artifact) {
     pin.title = '已釘選'
     head.append(pin)
   }
-  link.append(head)
+  link.append(head, chip)
   if (artifact.description) {
     const desc = document.createElement('p')
     desc.className = 'card-desc'
