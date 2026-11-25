@@ -542,6 +542,22 @@ test('a deck fits a phone: one slide in view, controls without horizontal scroll
   await viewer.close()
 })
 
+test('the overview on a phone keeps every thumbnail 16:9 when the slides outgrow the screen, notes open or not', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const long = Array.from({ length: 12 }, (_, i) => `## Slide ${i + 1}`).join('\n---\n')
+  const { id } = store.publish({ title: 'Long phone deck', files: { 'index.slides.md': { content: Buffer.from(long) } } })
+  const viewer = await browser.newPage({ viewport: { width: 375, height: 740 }, hasTouch: true })
+  await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+  const frame = viewer.frameLocator('#frame')
+  await frame.locator('.slide.active').waitFor()
+  const page = viewer.frames().find((f) => f.url().includes(`:${CONTENT_PORT}/`))!
+  const ratios = () => page.evaluate(() => [...document.querySelectorAll('.slide')].map((s) => { const r = s.getBoundingClientRect(); return Math.round((r.width / r.height) * 100) / 100 }))
+  await frame.locator('[data-deck="overview"]').click()
+  for (const ratio of await ratios()) assert.ok(Math.abs(ratio - 16 / 9) < 0.02, `overview thumbnail ${ratio}`)
+  await frame.locator('[data-deck="notes"]').click()
+  for (const ratio of await ratios()) assert.ok(Math.abs(ratio - 16 / 9) < 0.02, `overview thumbnail with notes ${ratio}`)
+  await viewer.close()
+})
+
 test('the deck editor previews a draft live, saves it as a version, and stays on the slide', { skip: !chromiumPath && 'no Chromium found' }, async () => {
   const { id } = store.publish({ title: 'Edit deck', files: { 'index.slides.md': { content: Buffer.from(DECK) } } })
   const viewer = await browser.newPage()

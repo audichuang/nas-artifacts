@@ -145,7 +145,8 @@ body.idle { cursor: none; }
 .deck-notes > :first-child { margin-top: 0; }
 
 /* Overview: every slide as a thumbnail; the same cqw sizing shrinks them whole. */
-body.overview .deck-stage { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 16px; padding: 16px; overflow: auto; align-content: start; place-items: stretch; container-type: normal; touch-action: auto; }
+/* max-content rows: a size-contained slide has no minimum height, so auto rows would share out only the stage height and squash thumbnails once they outgrow it (phones). */
+body.overview .deck-stage { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); grid-auto-rows: max-content; gap: 16px; padding: 16px; overflow: auto; align-content: start; place-items: stretch; container-type: normal; touch-action: auto; }
 body.overview .slide { grid-area: auto; visibility: visible; width: auto; height: auto; aspect-ratio: var(--aspect, 16 / 9); cursor: pointer; }
 body.overview .slide.active { outline: 3px solid var(--accent); outline-offset: 2px; }
 body.overview .deck-notes { display: none; }
