@@ -1315,7 +1315,9 @@ function drawCategories(
     else if (widest * skip <= slot * 0.92) catMode = 'flat'
     else {
       const wrapped = categories.map((c) => wrap(c, slot * skip * 0.92, catFs, 2))
-      const fitsWrap = wrapped.every((lines, at) => lines.join('') === categories[at].replace(/\s+/g, '') || lines.join(' ') === categories[at]) && !wrapped.some((lines) => lines.some((l) => l.endsWith('…'))) && slot * skip > catFs * 2.5
+      // Like Office, break only between words or CJK characters; a word too wide for its slot slants the labels instead.
+      const wordsFit = categories.every((c) => (c.match(/[^\s⺀-鿿가-힯＀-￯　-〿]+/g) ?? []).every((word) => textWidth(word, catFs) <= slot * skip * 0.92))
+      const fitsWrap = wordsFit && wrapped.every((lines, at) => lines.join('') === categories[at].replace(/\s+/g, '') || lines.join(' ') === categories[at]) && !wrapped.some((lines) => lines.some((l) => l.endsWith('…'))) && slot * skip > catFs * 2.5
       if (fitsWrap) {
         catMode = 'wrap'
         catLines = wrapped

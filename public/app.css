@@ -141,6 +141,9 @@ textarea { resize: vertical; }
   .viewer-bar .viewer-title { flex: 1 0 calc(100% - 40px); }
   .viewer-bar .version-picker { flex: 1 1 0; min-width: 0; }
   .viewer-bar .version-picker select { width: 100%; }
+  /* A deck with errors shows six actions; at full padding they squeezed the version picker to a sliver. */
+  .viewer-bar .bar-actions { gap: 4px; }
+  .viewer-bar .button { padding-inline: 8px; }
   /* Reading down a page, the bar slides away and the frame takes its room; scrolling up brings it back. */
   .viewer-bar { transition: margin-top 0.2s ease; }
   .viewer { transition: height 0.2s ease, margin-top 0.2s ease; }

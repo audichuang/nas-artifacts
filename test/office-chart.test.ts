@@ -173,6 +173,13 @@ describe('axes', () => {
     assert.match(svg, /rotate\(-45/)
   })
 
+  test('a category label too wide for its slot is slanted, not split inside a word', () => {
+    const cats = Array.from({ length: 12 }, (_, i) => `2026-${String(i + 1).padStart(2, '0')}`)
+    const { svg } = draw(chart(`<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>${ser('A', cats.map((_, i) => i), cats)}${ser('B', cats.map((_, i) => i), cats)}${ser('C', cats.map((_, i) => i), cats)}${ids()}</c:barChart>${axes()}`))
+    const shown = texts(svg).filter((t) => t.startsWith('20'))
+    assert.ok(shown.length > 0 && shown.every((t) => cats.includes(t)), shown.join('|'))
+  })
+
   test('a deleted axis draws no labels', () => {
     const { svg } = draw(chart(`<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>${ser('S', [1, 2, 3])}${ids()}</c:barChart>${catAx(1, 2).replace('<c:delete val="0"/>', '<c:delete val="1"/>')}${valAx(2, 1)}`))
     assert.ok(!texts(svg).includes('A'))
