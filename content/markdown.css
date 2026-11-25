@@ -55,7 +55,7 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 /* Task lists: the checkbox stands in for the bullet, as on GitHub. */
 :is(.markdown-body, .slide-inner) li:has(> input[type=checkbox]:first-child, > p:first-child > input[type=checkbox]:first-child) { list-style: none; }
 :is(.markdown-body, .slide-inner) li > :is(input[type=checkbox], p > input[type=checkbox]):first-child { margin: 0 0.35em 0.2em -1.3em; vertical-align: middle; }
-.markdown-body table { border-collapse: collapse; display: block; overflow: auto; }
+.markdown-body table { border-collapse: collapse; display: block; overflow: auto; margin: 0 0 1em; }
 /* A floor on cell width keeps short labels on one line at phone width; a table that then needs more room scrolls. */
 .markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 6px 12px; min-width: 4em; }
 .markdown-body .cell-short { white-space: nowrap; }

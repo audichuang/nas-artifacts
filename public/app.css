@@ -140,10 +140,12 @@ textarea { resize: vertical; }
   :root:has(.viewer-bar) { --bar-h: 92px; }
   .viewer-bar { flex-wrap: wrap; align-content: center; gap: 6px 8px; padding: 6px 12px; }
   .viewer-bar .viewer-title { flex: 1 0 calc(100% - 40px); }
-  .viewer-bar .version-picker { flex: 1 1 0; min-width: 0; }
+  .viewer-bar .version-picker { flex: 1 1 0; min-width: 64px; }
   .viewer-bar .version-picker select { width: 100%; }
-  /* A deck with errors shows six actions; at full padding they squeezed the version picker to a sliver. */
-  .viewer-bar .bar-actions { gap: 4px; }
+  /* A deck with errors shows up to seven actions, more than a 320px row holds: they scroll sideways
+     rather than squeezing the version picker away or breaking labels into two lines. */
+  .viewer-bar .bar-actions { gap: 4px; min-width: 0; max-width: calc(100% - 72px); overflow-x: auto; scrollbar-width: none; }
+  .viewer-bar .bar-actions > * { flex: none; white-space: nowrap; }
   .viewer-bar .button { padding-inline: 8px; }
   /* Reading down a page, the bar slides away and the frame takes its room; scrolling up brings it back. */
   .viewer-bar { transition: margin-top 0.2s ease; }
