@@ -1216,6 +1216,28 @@ addEventListener('load', () => setTimeout(() => {
   }
 })
 
+test('a page that scrolls an inner box instead of the window (an xlsx grid) still slides the phone bar away and back', { skip: !chromiumPath && 'no Chromium found' }, async () => {
+  const boxed = `<!doctype html><html style="height:100%"><body style="margin:0;height:100%;overflow:hidden">
+<div id="grid" style="height:100%;overflow:auto"><div style="height:5000px">格線</div></div></body></html>`
+  const { id } = store.publish({ title: '內層捲動', files: { 'index.html': { content: Buffer.from(boxed) } } })
+  const viewer = await browser.newPage()
+  try {
+    await viewer.setViewportSize({ width: 390, height: 760 })
+    await viewer.goto(`http://localhost:${APP_PORT}/a/${id}`)
+    const grid = viewer.frameLocator('#frame').locator('#grid')
+    await grid.waitFor({ timeout: 5000 })
+    for (const top of [200, 400, 600]) {
+      await grid.evaluate((el, y) => { el.scrollTop = y }, top)
+      await viewer.waitForTimeout(350)
+    }
+    await viewer.waitForFunction(() => document.body.classList.contains('bar-away'), null, { timeout: 3000 })
+    await grid.evaluate((el) => { el.scrollTop = 300 })
+    await viewer.waitForFunction(() => !document.body.classList.contains('bar-away'), null, { timeout: 3000 })
+  } finally {
+    await viewer.close()
+  }
+})
+
 // The owner on the public app: a passkey (Chromium's virtual authenticator), a session, and private pages
 // served by the public content listener under a content token.
 

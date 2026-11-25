@@ -66,9 +66,12 @@
 
   // Where the reader is, so the viewer can keep them there across versions and in its address bar.
   let reportTimer = null
+  // A page that scrolls a box filling the screen instead of the window (an xlsx grid): its position stands in for scrollY.
+  let mainScroller = null
   function reportPlace() {
     reportTimer = null
-    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: location.hash.slice(0, 400), scrollY: Math.round(scrollY) } }, APP_ORIGIN)
+    const y = mainScroller ? mainScroller.scrollTop : scrollY
+    window.parent.postMessage({ __artifact: 1, report: { type: 'place', path: location.pathname, hash: location.hash.slice(0, 400), scrollY: Math.round(y) } }, APP_ORIGIN)
   }
   // Content drawn by scripts may not be tall enough yet, so keep trying briefly unless the reader scrolls first.
   function restoreScroll(target) {
@@ -118,7 +121,12 @@
   if (framed) {
     addEventListener('DOMContentLoaded', reportPlace)
     addEventListener('hashchange', reportPlace)
-    addEventListener('scroll', () => { reportTimer ??= setTimeout(reportPlace, 250) }, { passive: true })
+    // Capture: scroll events of inner boxes do not bubble. Small boxes (a code block, a wide table) are not the page.
+    addEventListener('scroll', (event) => {
+      const box = event.target
+      if (box instanceof Element && box.clientHeight > innerHeight / 2 && document.documentElement.scrollHeight <= innerHeight + 1) mainScroller = box
+      reportTimer ??= setTimeout(reportPlace, 250)
+    }, { passive: true, capture: true })
   }
 
   // Pictures, Mermaid diagrams and wide Markdown tables open large on a click, on every page. A picture is
