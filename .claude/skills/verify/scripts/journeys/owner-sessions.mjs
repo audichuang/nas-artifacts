@@ -5,7 +5,7 @@
 // Usage: node .claude/skills/verify/scripts/journeys/owner-sessions.mjs
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { SESSION_COOKIE, V, checks, cli, contentFrame, enrolOwner, launch, log, redact, save, scratch, secret, shot, withCookie } from '../browser.mjs'
+import { SESSION_COOKIE, V, checks, cli, contentFrame, enrolOwner, launch, log, redact, save, scratch, secret, shot, withAuthenticator, withCookie } from '../browser.mjs'
 
 const F = 'owner-sessions'
 const c = checks(F)
@@ -194,6 +194,42 @@ try {
   c.ok(goneB === 0 && rowsAfter === rows - 1, 'device A signs back in at /account; device B is gone, device A remains', `${rows} -> ${rowsAfter}`)
   c.ok(disabledAfter.every((d) => d === (rowsAfter <= 1)), '刪除 is disabled exactly when one passkey is left', `${rowsAfter} rows ${JSON.stringify(disabledAfter)}`)
   await shot(pageA, F, '08-account-after-removal')
+  // Device D: a browser without the native WebAuthn JSON helpers (older Safari, Firefox), so the hand-rolled
+  // conversions in webauthn.js carry enrolment and sign-in. Its second tab opens the same login-link and finishes
+  // after the first tab spent it: the server refuses (403) and the page signals the orphaned credential unknown.
+  const ctxD = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const signalsD = await spySignals(ctxD)
+  await ctxD.addInitScript(() => {
+    if (!window.PublicKeyCredential) return
+    PublicKeyCredential.parseCreationOptionsFromJSON = undefined
+    PublicKeyCredential.parseRequestOptionsFromJSON = undefined
+    PublicKeyCredential.prototype.toJSON = undefined
+  })
+  const link = cli(F, ['login-link', '--json'], { quiet: true })
+  const linkUrl = JSON.parse(link.stdout).url
+  secret(linkUrl.split('#')[1])
+  const pageD = await ctxD.newPage()
+  const pageD2 = await ctxD.newPage()
+  await withAuthenticator(pageD)
+  await withAuthenticator(pageD2)
+  const optionsLoaded = (page) => page.waitForResponse((r) => r.url().endsWith('/auth/register/options'))
+  await Promise.all([optionsLoaded(pageD2), pageD2.goto(linkUrl)])
+  c.ok((await pageD2.evaluate(() => typeof PublicKeyCredential.prototype.toJSON)) === 'undefined', 'control: in context D the native toJSON is gone')
+  await Promise.all([optionsLoaded(pageD), pageD.goto(linkUrl)])
+  await pageD.locator('#name').fill(`device D ${nonce}`)
+  await pageD.locator('#go').click()
+  await pageD.waitForURL(`${V.publicApp}/`, { timeout: 10_000 }).catch(() => {})
+  c.ok(pageD.url() === `${V.publicApp}/`, 'without native JSON helpers, enrolment from a login-link lands on the gallery', pageD.url())
+  await ctxD.clearCookies()
+  c.ok(await signIn(pageD, 'device D fallback sign-in'), 'without native JSON helpers, the passkey signs in again at /login')
+  await pageD2.locator('#name').fill(`device D2 ${nonce}`)
+  await pageD2.locator('#go').click()
+  await pageD2.locator('#status', { hasText: '註冊連結' }).waitFor({ timeout: 10_000 }).catch(() => {})
+  const statusD2 = (await pageD2.locator('#status').textContent()) ?? ''
+  const orphan = signalsD.find((call) => call.name === 'signalUnknownCredential')
+  c.ok(statusD2.includes('註冊連結') && orphan && orphan.rpId === RP_ID && orphan.credentialId, 'the second tab, finishing with a spent link, is refused and signals its new credential unknown', JSON.stringify({ status: statusD2, rpId: orphan?.rpId }))
+  await ctxD.close()
+
   save(F, 'ids.json', { artifact: art.id })
   cli(F, ['delete', art.id, '--yes'], { quiet: true })
   await ctxB.close()

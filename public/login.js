@@ -29,16 +29,17 @@ async function run() {
     ready = null
     if (mode === 'enroll') {
       const response = await createPasskey(options)
-      // Refused (4xx), so stored nowhere: the device should not keep offering it. A 5xx or a lost response may
+      // Refused by this server (4xx with its error code), so stored nowhere: the device should not keep offering it. A 5xx or a lost response may
       // come after the passkey was stored, so those leave it alone.
       await post('/auth/register/verify', { flow, response, name: document.getElementById('name').value }).catch(async (error) => {
-        if (error.status >= 400 && error.status < 500) await signalUnknown(options.rp.id, response.id)
+        if (error.code && error.status >= 400 && error.status < 500) await signalUnknown(options.rp.id, response.id)
         throw error
       })
     } else {
       const response = await getPasskey(options)
       await post('/auth/login/verify', { flow, response }).catch(async (error) => {
-        if (error.status === 404) await signalUnknown(options.rpId, response.id)
+        // By code, not status alone: a 404 from the tunnel in front says nothing about the passkey.
+        if (error.code === 'unknown_passkey') await signalUnknown(options.rpId, response.id)
         throw error
       })
     }

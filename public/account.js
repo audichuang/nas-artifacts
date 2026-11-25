@@ -75,7 +75,7 @@ add.addEventListener('click', async () => {
     const name = prompt('這把 passkey 的名稱(例如 MacBook)') ?? ''
     await post('/auth/register/verify', { flow, response, name }).catch(async (error) => {
       // Same rule as the enrolment page: only a refusal (4xx) means the server stored nothing.
-      if (error.status >= 400 && error.status < 500) await signalUnknown(options.rp.id, response.id)
+      if (error.code && error.status >= 400 && error.status < 500) await signalUnknown(options.rp.id, response.id)
       throw error
     })
     status.textContent = '已新增。'

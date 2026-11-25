@@ -11,7 +11,7 @@ export async function post(path, body) {
     body: JSON.stringify(body ?? {})
   })
   const payload = await response.json().catch(() => null)
-  if (!response.ok) throw Object.assign(new Error(payload?.error?.message || `HTTP ${response.status}`), { status: response.status })
+  if (!response.ok) throw Object.assign(new Error(payload?.error?.message || `HTTP ${response.status}`), { status: response.status, code: payload?.error?.code })
   return payload
 }
 
