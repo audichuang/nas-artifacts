@@ -193,6 +193,20 @@ describe('reading Word files', () => {
     assert.match(boxCss, /background-color:rgb\(242,242,242\)/)
   })
 
+  test('a right-to-left paragraph reads jc and indents logically: left is its start side (right), not physical left', () => {
+    const doc = `<w:document ${W}><w:body>${p(r('سطر'), '<w:bidi/><w:jc w:val="left"/><w:ind w:left="720" w:right="360"/>')}${p(r('נגמר'), '<w:bidi/><w:jc w:val="right"/>')}</w:body></w:document>`
+    const page = renderDocxPage(sampleDocx({ 'word/document.xml': doc }), 'rtl.docx', 'rtl')
+    const paraCss = (text: string) => {
+      const block = new RegExp(`<div class="dx-p (s\\d+)"><span class="s\\d+">${text}`).exec(page)
+      assert.ok(block, text)
+      return new RegExp(`\\.${block[1]}\\{([^}]*)\\}`).exec(page)![1]
+    }
+    const start = paraCss('سطر')
+    assert.match(start, /text-align:start;direction:rtl;margin-inline-start:36pt;margin-inline-end:18pt/)
+    assert.doesNotMatch(start, /text-align:left|padding-left|margin-left/)
+    assert.match(paraCss('נגמר'), /text-align:end;direction:rtl/)
+  })
+
   test('numbering: multi-level counters restart, bullets map from Symbol, Chinese counting, overrides restart', () => {
     const labels = [...html.matchAll(/class="dx-num[^"]*">([^<]*)<\/span>([^<]*<span[^>]*>)?([^<]*)/g)].map((m) => `${m[1].trim()}${m[3]}`)
     assert.deepEqual(labels, ['1.第一項', '1.a)子項甲', '1.b)子項乙', '2.第二項', '2.a)重新起算', '•圓點項目', '1.另一清單從一開始', '一、中文編號', '二、中文編號二', '(IV)羅馬'])

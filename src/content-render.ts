@@ -22,7 +22,7 @@ const packageVersion = (name: string) =>
  * Library upgrades count themselves; bump the leading tags when you change what renderMarkdown (md) or
  * the Office renderers in pptx.ts, docx.ts and xlsx.ts emit.
  */
-export const RENDER_VERSION = ['md-5', 'pptx-6', 'docx-9', 'xlsx-8', ...['marked', 'marked-alert', 'marked-footnote', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
+export const RENDER_VERSION = ['md-5', 'pptx-7', 'docx-10', 'xlsx-9', ...['marked', 'marked-alert', 'marked-footnote', 'highlight.js', 'pele'].map((name) => `${name}@${packageVersion(name)}`)].join(' ')
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)

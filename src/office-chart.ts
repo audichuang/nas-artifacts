@@ -1120,8 +1120,25 @@ function drawPie(
   const labelRoom = anyOutside ? ctx.fs * 2.2 : 0
   const cx = area.x + area.w / 2
   const cy = area.y + area.h / 2
-  const R = Math.max(4, (Math.min(area.w, area.h) / 2 - 4 - labelRoom) / (1 + maxExplode))
+  const goesOutside = (labels: Labels, sweep: number, outer: number, text: string) =>
+    !doughnut && (labels.pos === 'outEnd' || (labels.pos === 'bestFit' && sweep * outer * 0.6 < textWidth(text, labels.fs) * 0.8))
+  const fitR = Math.max(4, (Math.min(area.w, area.h) / 2 - 4 - labelRoom) / (1 + maxExplode))
+  let R = fitR
+  const pieLabels = first.labels
+  const pieRaw = first.values.map((v) => (finite(v) ? Math.abs(v) : 0))
+  const pieTotal = pieRaw.reduce((a, b) => a + b, 0)
+  if (anyOutside && pieLabels && pieTotal > 0) {
+    // Leave room beside the pie for the widest label that goes outside (a smaller pie sends more out: twice).
+    for (let pass = 0; pass < 2; pass++) {
+      const widest = Math.max(0, ...pieRaw.map((v, at) => {
+        const text = v > 0 ? labelText(pieLabels, first, first.values[at] ?? 0, v / pieTotal, categories[at] ?? '') : ''
+        return text && goesOutside(pieLabels, (v / pieTotal) * Math.PI * 2, R, text) ? textWidth(text, pieLabels.fs) : 0
+      }))
+      R = Math.max(4, clamp((area.w / 2 - 4 - widest - pieLabels.fs * 0.8) / (1 + maxExplode), fitR * 0.5, fitR))
+    }
+  }
   const ringW = (R * (1 - hole)) / rings.length
+  const outsideLabels: PieLabel[] = []
   rings.forEach((s, ri) => {
     const outer = R - ringW * ri
     const inner = doughnut ? outer - ringW : 0
@@ -1161,18 +1178,89 @@ function drawPie(
         const text = labelText(s.labels, s, s.values[at] ?? 0, value / total, categories[at] ?? '')
         if (text) {
           const lfs = s.labels.fs
-          const outside = !doughnut && (s.labels.pos === 'outEnd' || (s.labels.pos === 'bestFit' && sweep * outer * 0.6 < textWidth(text, lfs) * 0.8))
-          const radius = doughnut ? (outer + inner) / 2 : outside ? outer + lfs * 0.6 : s.labels.pos === 'ctr' ? outer * 0.5 : s.labels.pos === 'inEnd' ? outer * 0.78 : outer * 0.62
-          const lx = ox + radius * Math.cos(mid)
-          const ly = oy + radius * Math.sin(mid)
-          const anchor = outside ? (Math.cos(mid) > 0.15 ? 'start' : Math.cos(mid) < -0.15 ? 'end' : 'middle') : 'middle'
-          ctx.out.push(textEl(lx, ly + lfs * 0.35, text, lfs, ` text-anchor="${anchor}"${s.labels.color !== ctx.color ? ` fill="${s.labels.color}"` : ''}`))
+          const outside = goesOutside(s.labels, sweep, outer, text)
+          const fillAttr = s.labels.color !== ctx.color ? ` fill="${s.labels.color}"` : ''
+          if (outside) outsideLabels.push({ text, fs: lfs, fillAttr, mid, ox, oy, outer, share: value / total, at })
+          else {
+            const radius = doughnut ? (outer + inner) / 2 : s.labels.pos === 'ctr' ? outer * 0.5 : s.labels.pos === 'inEnd' ? outer * 0.78 : outer * 0.62
+            ctx.out.push(textEl(ox + radius * Math.cos(mid), oy + radius * Math.sin(mid) + lfs * 0.35, text, lfs, ` text-anchor="middle"${fillAttr}`))
+          }
         }
       }
       angle = end
     })
   })
+  placePieLabels(ctx, outsideLabels, cx, cy, area.y, area.y + area.h)
   return categories
+}
+
+type PieLabel = { text: string; fs: number; fillAttr: string; mid: number; ox: number; oy: number; outer: number; share: number; at: number }
+
+/**
+ * Labels outside a pie, per half: stacked without overlap the way Highcharts' `distribute` does
+ * (overlapping neighbours merge into a group centred on their targets, clamped to the plot), the
+ * smallest slices' labels dropped when a half cannot hold them all; then pulled onto an ellipse
+ * around the pie (ECharts' recalculateX) and tied to their slice by a leader line when moved; while a
+ * leader would cross the pie, the smallest slice's label is dropped too.
+ */
+function placePieLabels(ctx: Ctx, labels: PieLabel[], cx: number, cy: number, top: number, bottom: number): void {
+  const gap = (l: PieLabel) => l.fs * 0.6
+  const target = (l: PieLabel) => l.oy + (l.outer + gap(l)) * Math.sin(l.mid)
+  for (const right of [true, false]) {
+    let side = labels.filter((l) => Math.cos(l.mid) >= 0 === right)
+    if (!side.length) continue
+    const h = Math.max(...side.map((l) => l.fs)) * 1.2
+    const fit = Math.max(0, Math.floor((bottom - top) / h))
+    if (side.length > fit) {
+      const keep = new Set([...side].sort((a, b) => b.share - a.share || a.at - b.at).slice(0, fit))
+      side = side.filter((l) => keep.has(l))
+    }
+    side.sort((a, b) => target(a) - target(b) || a.at - b.at)
+    const sign = right ? 1 : -1
+    type Run = { items: PieLabel[]; start: number }
+    const run = (items: PieLabel[]): Run => {
+      const mean = items.reduce((sum, l) => sum + target(l), 0) / items.length
+      return { items, start: clamp(mean - (items.length * h) / 2, top, bottom - items.length * h) }
+    }
+    // While some label is pushed so far round the pie that its leader would cut across it, drop the smallest slice's label.
+    for (;;) {
+      const runs = side.map((l) => run([l]))
+      for (let i = 1; i < runs.length; ) {
+        const [a, b] = [runs[i - 1], runs[i]]
+        if (a.start + a.items.length * h > b.start + 1e-6) {
+          runs.splice(i - 1, 2, run([...a.items, ...b.items]))
+          i = Math.max(1, i - 1)
+        } else i++
+      }
+      const ys = runs.flatMap((r) => r.items.map((l, k) => ({ l, y: r.start + (k + 0.5) * h })))
+      const rA = (l: PieLabel) => Math.hypot(l.ox - cx, l.oy - cy) + l.outer + gap(l)
+      const rB = Math.max(...ys.map(({ l, y }) => Math.max(rA(l), Math.abs(y - cy))))
+      const placed = ys.map(({ l, y }) => ({ l, y, x: cx + sign * Math.sqrt(Math.max(0, 1 - ((y - cy) * (y - cy)) / (rB * rB))) * rA(l) }))
+      // How deep the straight leader from the slice's edge to the label dips into the pie (grazing is fine).
+      const dip = ({ l, x, y }: (typeof placed)[number]) => {
+        const [ex, ey] = [l.outer * Math.cos(l.mid), l.outer * Math.sin(l.mid)]
+        const [dx, dy] = [x - l.ox - ex, y - l.oy - ey]
+        const t = clamp(-(ex * dx + ey * dy) / (dx * dx + dy * dy || 1), 0, 1)
+        return l.outer - Math.hypot(ex + t * dx, ey + t * dy)
+      }
+      if (placed.some((p) => dip(p) > p.l.fs * 0.5)) {
+        const smallest = side.reduce((a, b) => (b.share < a.share || (b.share === a.share && b.at > a.at) ? b : a))
+        side = side.filter((l) => l !== smallest)
+        continue
+      }
+      for (const { l, x, y } of placed) {
+        const [nx, ny] = [l.ox + (l.outer + gap(l)) * Math.cos(l.mid), target(l)]
+        if (Math.hypot(x - nx, y - ny) > l.fs * 0.5) {
+          const points = [[l.ox + l.outer * Math.cos(l.mid), l.oy + l.outer * Math.sin(l.mid)], [x, y]].map(([px, py]) => `${r2(px)},${r2(py)}`).join(' ')
+          ctx.out.push(`<polyline points="${points}" fill="none" stroke="#A6A6A6" stroke-width="0.75" data-leader=""/>`)
+        }
+        // A label wider than the room left in the frame (a pie only shrinks so far) is cut with an ellipsis, not at the edge.
+        const tx = x + sign * l.fs * 0.2
+        ctx.out.push(textEl(tx, y + l.fs * 0.35, ellipsize(l.text, right ? ctx.W - tx : tx, l.fs), l.fs, ` text-anchor="${right ? 'start' : 'end'}"${l.fillAttr}`))
+      }
+      break
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

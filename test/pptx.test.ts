@@ -338,6 +338,19 @@ describe('crafted and unusual PowerPoint files', () => {
     assert.match(slide.html, /color:transparent;[^"]*-webkit-text-stroke:calc\(1\*var\(--pt\)\) rgb\(255,0,0\)[^"]*">空心字/)
   })
 
+  test('right-to-left paragraphs: direction and margins follow the list style; algn stays physical, a missing one aligns right', () => {
+    const lst = '<a:lstStyle><a:lvl1pPr rtl="1" marL="342900" indent="-342900"><a:buChar char="•"/></a:lvl1pPr></a:lstStyle>'
+    const body = `${lst}<a:p><a:r><a:t>שלום</a:t></a:r></a:p><a:p><a:pPr algn="l"/><a:r><a:t>مرحبا</a:t></a:r></a:p><a:p><a:pPr rtl="0"/><a:r><a:t>ltr</a:t></a:r></a:p>`
+    const [slide] = readPptx(deckOf([shape(xfrm(), '').replace('</p:spPr>', `</p:spPr><p:txBody><a:bodyPr/>${body}</p:txBody>`)]), '').slides
+    const paragraphs = [...slide.html.matchAll(/<p class="pp-p" style="([^"]*)">(.*?)<\/p>/g)]
+    assert.equal(paragraphs.length, 3)
+    assert.match(paragraphs[0][1], /direction:rtl;text-align:right;padding-inline-start:calc\(27\*var\(--pt\)\)/)
+    assert.match(paragraphs[0][2], /^<span class="pp-bu"[^>]*>•<\/span><span[^>]*>שלום/)
+    assert.match(paragraphs[1][1], /direction:rtl;text-align:left/)
+    assert.doesNotMatch(paragraphs[2][1], /direction/)
+    assert.match(paragraphs[2][1], /text-align:left/)
+  })
+
   test('a video with a poster frame shows the poster with a label saying it does not play here', () => {
     const video = `<p:pic><p:nvPicPr><p:cNvPr id="4" name="v.mp4"/><p:cNvPicPr/><p:nvPr><a:videoFile r:link="v"/></p:nvPr></p:nvPicPr><p:blipFill><a:blip r:embed="img"/></p:blipFill><p:spPr>${xfrm()}</p:spPr></p:pic>`
     const deck = deckOf([video], { 'ppt/media/image1.png': 'png', 'ppt/media/media1.mp4': 'mp4' }, { 1: [['img', 'image', '../media/image1.png'], ['v', 'video', '../media/media1.mp4']] })
